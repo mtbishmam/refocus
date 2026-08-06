@@ -15,11 +15,15 @@ final class AppModel: ObservableObject {
     let clockDisplay = ClockDisplay()
     @Published var tasks: [PlanTask] = []
     @Published var agendaTasks: [AgendaTask] = []
+    @Published var tomorrowTasks: [PlanTask] = []
+    @Published var taskTemplates: [PlanTask] = []
+    @Published var tomorrowValidationIssues: [PlanValidationIssue] = []
+    @Published var tomorrowIsDirty = false
+    @Published var isSavingTomorrow = false
     @Published var planMessage = "Choose your Obsidian vault."
     @Published var validationIssues: [PlanValidationIssue] = []
     @Published var dayProfile = RoutineProfileResolver().profile(for: Date())
-    // Planning is the gate: focus and screen blocking stay off until Today is
-    // a complete, valid twelve-cycle plan.
+    @Published var activeSegment = PlanValidator().segment(at: Date())
     @Published var isArmed = false
     @Published var isBreakVisible = false
     @Published var currentCheckIn: CheckIn?
@@ -29,11 +33,11 @@ final class AppModel: ObservableObject {
     @Published var vaultURL: URL?
     @Published var launchAtLogin = false
     @Published var planIsDirty = false
-    @Published var requiredCycleMinimum = 12
+    @Published var requiredCycleMinimum = 10
     @Published var isSavingPlan = false
     @Published var isEditingPlan = true
     @Published private(set) var hasPersistedToday = false
-    @Published private(set) var hasInitialPlan = false
+    @Published private(set) var initialSegments: Set<PlanningSegment> = []
     @Published var collapsedTaskIDs: Set<UUID> = []
     @Published var showCompletedSubtasks = false
 
@@ -44,8 +48,10 @@ final class AppModel: ObservableObject {
     private var watchers: [VaultWatcher] = []
     private var ticker: Task<Void, Never>?
     private var saveTask: Task<Void, Never>?
+    private var agendaSaveTask: Task<Void, Never>?
     private var activeBreakID: String?
     private var baselineTasks: [PlanTask] = []
+    private var tomorrowBaselineTasks: [PlanTask] = []
     private var userRequestedEditing = false
     private var accessedSecurityScopedResource = false
     private lazy var overlayController = BreakOverlayController()
@@ -59,6 +65,7 @@ final class AppModel: ObservableObject {
     deinit {
         ticker?.cancel()
         saveTask?.cancel()
+        agendaSaveTask?.cancel()
     }
 
     var currentTask: PlanTask? {
@@ -67,6 +74,10 @@ final class AppModel: ObservableObject {
     }
 
     var snapshot: ClockSnapshot { clockDisplay.snapshot }
+
+    var tomorrowDate: Date {
+        WallClock.dhakaCalendar().date(byAdding: .day, value: 1, to: WallClock.dhakaCalendar().startOfDay(for: now)) ?? now
+    }
 
     var executionTask: PlanTask? {
         if let currentTask { return currentTask }
@@ -86,24 +97,22 @@ final class AppModel: ObservableObject {
         snapshot.phase == .focus ? "FOCUS" : "SCREEN BREAK"
     }
 
-    var plannedCycles: Int { tasks.reduce(0) { $0 + $1.cycles } }
+    var hasInitialPlan: Bool { initialSegments.contains(activeSegment) }
+
+    var plannedCycles: Int { tasks.filter(activeSegment.contains).reduce(0) { $0 + $1.cycles } }
 
     var cycleSummaryText: String {
-        "\(plannedCycles) planned · \(requiredCycleMinimum) required now"
+        "\(activeSegment.title) · \(plannedCycles) planned · \(requiredCycleMinimum) required now"
     }
 
     var planIsCurrent: Bool { planMessage == "Today is planned." || !tasks.isEmpty }
 
     var isPlanReady: Bool {
-        blockingIssues(in: validator.validate(tasks: tasks, profile: dayProfile, minimumCycles: requiredCycleMinimum)).isEmpty
+        blockingIssues(in: currentValidation(tasks)).isEmpty
     }
 
     var isPlanCommitted: Bool {
-        hasPersistedToday && blockingIssues(in: validator.validate(
-            tasks: baselineTasks,
-            profile: dayProfile,
-            minimumCycles: requiredCycleMinimum
-        )).isEmpty
+        hasPersistedToday && hasInitialPlan && blockingIssues(in: currentValidation(baselineTasks)).isEmpty
     }
 
     var executionTasks: [PlanTask] {
@@ -111,7 +120,8 @@ final class AppModel: ObservableObject {
     }
 
     var executionCycleSummaryText: String {
-        "\(executionTasks.reduce(0) { $0 + $1.cycles }) planned · \(requiredCycleMinimum) required now"
+        let cycles = executionTasks.filter(activeSegment.contains).reduce(0) { $0 + $1.cycles }
+        return "\(activeSegment.title) · \(cycles) planned · \(requiredCycleMinimum) required now"
     }
 
     var agendaValidationIssues: [PlanValidationIssue] {
@@ -121,14 +131,25 @@ final class AppModel: ObservableObject {
                 tasks: entries.map(\.task),
                 profile: resolver.profile(for: date),
                 minimumCycles: 0,
-                requireFixedTasks: false
+                requireFixedTasks: false,
+                requireTaskDetails: false
             )
         }
     }
 
+    var tomorrowIsReady: Bool {
+        tomorrowValidationIssues.allSatisfy { $0.severity == .warning }
+    }
+
+    var tomorrowCycleSummary: String {
+        PlanningSegment.allCases.map { segment in
+            "\(segment.title.replacingOccurrences(of: " Block", with: "")) \(tomorrowTasks.filter(segment.contains).reduce(0) { $0 + $1.cycles })/\(tomorrowRequiredCycles(segment))"
+        }.joined(separator: " · ")
+    }
+
     var planGateMessage: String {
         guard !isPlanReady else { return "Today is ready." }
-        return "Complete a valid \(requiredCycleMinimum)-cycle Today plan to unlock work."
+        return "Plan the \(activeSegment.title.lowercased()) before focused work begins: \(requiredCycleMinimum) available work cycles."
     }
 
     func startNow() {
@@ -190,43 +211,54 @@ final class AppModel: ObservableObject {
             do { streakResult = .success(try await worker.loadStreakDefinitions()) }
             catch { streakResult = .failure(error) }
             let agendaResult = (try? await worker.loadAgenda()) ?? []
+            let templatesResult = (try? await worker.loadTemplates()) ?? []
+            let nextDate = WallClock.dhakaCalendar().date(byAdding: .day, value: 1, to: date) ?? date
+            let tomorrowResult = try? await worker.loadTomorrow(date: nextDate)
 
             self.dayProfile = self.resolver.profile(for: date)
-            self.requiredCycleMinimum = self.validator.requiredCycles(at: date, profile: self.dayProfile)
+            self.activeSegment = self.validator.segment(at: date)
+            self.requiredCycleMinimum = self.validator.requiredCycles(
+                in: self.activeSegment, at: date, profile: self.dayProfile
+            )
             switch planResult {
             case .success(let plan):
                 self.hasPersistedToday = true
-                self.hasInitialPlan = plan.hasInitialPlan
+                self.initialSegments = plan.initialSegments
                 let normalized = self.withRecurringFixedTasks(plan.tasks)
                 self.tasks = normalized
                 self.baselineTasks = plan.tasks
-                let issues = self.validator.validate(
-                    tasks: normalized,
-                    profile: self.dayProfile,
-                    minimumCycles: self.requiredCycleMinimum
-                )
+                let issues = self.currentValidation(normalized)
                 self.validationIssues = issues
                 let blockers = self.blockingIssues(in: issues)
-                self.planMessage = blockers.isEmpty ? "Today is planned." : "Today plan is incomplete."
-                self.isArmed = blockers.isEmpty
+                let committed = self.hasInitialPlan && blockers.isEmpty
+                self.planMessage = committed ? "Today is planned." : "Today plan is incomplete."
+                self.isArmed = committed
                 self.planIsDirty = normalized != plan.tasks
                 self.isEditingPlan = normalized != plan.tasks || (blockers.isEmpty ? self.userRequestedEditing : true)
             case .failure:
                 self.hasPersistedToday = false
-                self.hasInitialPlan = false
+                self.initialSegments = []
                 self.tasks = FixedPlanTasks.daily()
                 self.baselineTasks = []
-                self.validationIssues = self.validator.validate(
-                    tasks: self.tasks,
-                    profile: self.dayProfile,
-                    minimumCycles: self.requiredCycleMinimum
-                )
+                self.validationIssues = self.currentValidation(self.tasks)
                 self.planMessage = "Today has not been planned."
                 self.isArmed = false
                 self.planIsDirty = true
                 self.isEditingPlan = true
             }
             self.agendaTasks = agendaResult.sorted(by: self.agendaSort)
+            self.taskTemplates = templatesResult
+            let scheduledTomorrow = agendaResult.filter {
+                WallClock.dhakaCalendar().isDate($0.date, inSameDayAs: nextDate)
+            }.map(\.task)
+            var tomorrowBase = tomorrowResult?.tasks ?? []
+            let existingTomorrowIDs = Set(tomorrowBase.map(\.id))
+            tomorrowBase.append(contentsOf: scheduledTomorrow.filter { !existingTomorrowIDs.contains($0.id) })
+            let preparedTomorrow = self.withRecurringFixedTasks(tomorrowBase)
+            self.tomorrowTasks = preparedTomorrow
+            self.tomorrowBaselineTasks = tomorrowResult?.tasks ?? []
+            self.tomorrowIsDirty = preparedTomorrow != self.tomorrowBaselineTasks
+            self.tomorrowValidationIssues = self.validateTomorrow(preparedTomorrow)
             switch streakResult {
             case .success(let definitions): self.streakDefinitions = definitions
             case .failure: self.streakDefinitions = VaultRepository.defaultStreaks
@@ -251,9 +283,10 @@ final class AppModel: ObservableObject {
         tasks.sort { $0.startMinute < $1.startMinute }
         let date = now
         let profile = dayProfile
+        let segment = activeSegment
         let planTasks = tasks
         let expectedTasks = baselineTasks
-        let issues = validator.validate(tasks: tasks, profile: profile, minimumCycles: requiredCycleMinimum)
+        let issues = currentValidation(tasks)
         validationIssues = issues
         guard blockingIssues(in: issues).isEmpty else {
             errorMessage = planGateMessage
@@ -267,6 +300,7 @@ final class AppModel: ObservableObject {
                     date: date,
                     tasks: planTasks,
                     profile: profile.kind,
+                    segment: segment,
                     expectedTasks: expectedTasks
                 )
             } catch {
@@ -281,7 +315,7 @@ final class AppModel: ObservableObject {
             // must never make a successfully saved plan look unsaved.
             self.baselineTasks = planTasks
             self.hasPersistedToday = true
-            self.hasInitialPlan = true
+            self.initialSegments.insert(segment)
             self.planIsDirty = false
             self.planMessage = "Today is planned."
             self.isArmed = true
@@ -304,11 +338,136 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func addTomorrowTask() {
+        let segment = PlanningSegment.allCases.first { candidate in
+            tomorrowTasks.filter(candidate.contains).reduce(0) { $0 + $1.cycles } < tomorrowRequiredCycles(candidate)
+        } ?? .evening
+        let nextStart = max(
+            segment.startMinute,
+            tomorrowTasks.filter { $0.fixedRole == nil && segment.contains($0) }.map(\.endMinute).max() ?? segment.startMinute
+        )
+        tomorrowTasks.append(PlanTask(
+            title: "New task", startMinute: nextStart, cycles: 1, mvp: "",
+            coreTasks: [CoreTask(title: ""), CoreTask(title: ""), CoreTask(title: "")]
+        ))
+        markTomorrowDirty()
+    }
+
+    func saveTaskAsTemplate(_ task: PlanTask) {
+        guard let worker else { return }
+        var template = task
+        template.isComplete = false
+        template.coreTasks = template.coreTasks.map { CoreTask(title: $0.title) }
+        template.fixedRole = nil
+        template.routineOverride = false
+        if let index = taskTemplates.firstIndex(where: { $0.title.caseInsensitiveCompare(template.title) == .orderedSame }) {
+            taskTemplates[index] = template
+        } else {
+            taskTemplates.append(template)
+        }
+        let saved = taskTemplates
+        Task { [weak self] in
+            do { try await worker.saveTemplates(saved) }
+            catch { self?.errorMessage = "Could not save task template: \(error.localizedDescription)" }
+        }
+    }
+
+    func addTemplateToToday(_ template: PlanTask) {
+        tasks.append(freshCopy(of: template))
+        markPlanDirty()
+    }
+
+    func addTemplateToTomorrow(_ template: PlanTask) {
+        tomorrowTasks.append(freshCopy(of: template))
+        markTomorrowDirty()
+    }
+
+    func removeTomorrowTask(id: UUID) {
+        tomorrowTasks.removeAll { $0.id == id && $0.fixedRole == nil }
+        markTomorrowDirty()
+    }
+
+    func toggleTomorrowTaskCompletion(_ taskID: UUID) {
+        guard let index = tomorrowTasks.firstIndex(where: { $0.id == taskID }) else { return }
+        tomorrowTasks[index].isComplete.toggle()
+        markTomorrowDirty()
+    }
+
+    func normalizeTomorrowSubtasks(for id: UUID) {
+        guard let index = tomorrowTasks.firstIndex(where: { $0.id == id }) else { return }
+        while tomorrowTasks[index].coreTasks.count < 3 { tomorrowTasks[index].coreTasks.append(CoreTask(title: "")) }
+        markTomorrowDirty()
+    }
+
+    func addTomorrowSubtask(to id: UUID) {
+        guard let index = tomorrowTasks.firstIndex(where: { $0.id == id }) else { return }
+        tomorrowTasks[index].coreTasks.append(CoreTask(title: ""))
+        markTomorrowDirty()
+    }
+
+    func removeTomorrowSubtask(taskID: UUID, subtaskID: UUID) {
+        guard let index = tomorrowTasks.firstIndex(where: { $0.id == taskID }), tomorrowTasks[index].coreTasks.count > 3 else { return }
+        tomorrowTasks[index].coreTasks.removeAll { $0.id == subtaskID }
+        markTomorrowDirty()
+    }
+
+    func markTomorrowDirty() {
+        tomorrowTasks.sort { lhs, rhs in
+            lhs.startMinute == rhs.startMinute
+                ? lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+                : lhs.startMinute < rhs.startMinute
+        }
+        tomorrowIsDirty = tomorrowTasks != tomorrowBaselineTasks
+        tomorrowValidationIssues = validateTomorrow(tomorrowTasks)
+    }
+
+    func saveTomorrowPlan() {
+        guard let worker, !isSavingTomorrow else { return }
+        let warningIDs = Set(tomorrowValidationIssues.compactMap { issue -> UUID? in
+            if case .routineConflict(let id, _, _, _, _) = issue { return id }
+            return nil
+        })
+        for index in tomorrowTasks.indices where warningIDs.contains(tomorrowTasks[index].id) {
+            tomorrowTasks[index].routineOverride = true
+        }
+        tomorrowValidationIssues = validateTomorrow(tomorrowTasks)
+        guard tomorrowValidationIssues.allSatisfy({ $0.severity == .warning }) else {
+            errorMessage = "Tomorrow still has blocking plan errors."
+            return
+        }
+        let date = tomorrowDate
+        let planTasks = tomorrowTasks
+        let profile = resolver.profile(for: date)
+        let plannedIDs = Set(planTasks.map(\.id))
+        let remainingAgenda = agendaTasks.filter {
+            !WallClock.dhakaCalendar().isDate($0.date, inSameDayAs: date) || !plannedIDs.contains($0.id)
+        }
+        isSavingTomorrow = true
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await worker.saveTomorrow(date: date, tasks: planTasks, profile: profile.kind)
+                try await worker.saveAgenda(remainingAgenda)
+                self.tomorrowBaselineTasks = planTasks
+                self.tomorrowIsDirty = false
+                self.agendaTasks = remainingAgenda
+                self.isSavingTomorrow = false
+            } catch {
+                self.isSavingTomorrow = false
+                self.errorMessage = "Could not save Tomorrow: \(error.localizedDescription)"
+            }
+        }
+    }
+
     func addTask() {
         userRequestedEditing = true
         isEditingPlan = true
         let currentCycleStart = clock.minuteOfDay(for: snapshot.cycleStart)
-        let nextStart = max(360, currentCycleStart, tasks.map(\.endMinute).max() ?? currentCycleStart)
+        let nextStart = max(
+            activeSegment.startMinute,
+            currentCycleStart,
+            tasks.filter { $0.fixedRole == nil && activeSegment.contains($0) }.map(\.endMinute).max() ?? currentCycleStart
+        )
         tasks.append(PlanTask(
             title: "New task", startMinute: nextStart, cycles: 1, mvp: "",
             coreTasks: [CoreTask(title: ""), CoreTask(title: ""), CoreTask(title: "")]
@@ -333,16 +492,13 @@ final class AppModel: ObservableObject {
 
     func cancelEditingPlan() {
         tasks = baselineTasks
-        let issues = validator.validate(
-            tasks: tasks,
-            profile: dayProfile,
-            minimumCycles: requiredCycleMinimum
-        )
+        let issues = currentValidation(tasks)
         validationIssues = issues
         planIsDirty = false
-        planMessage = issues.isEmpty ? "Today is planned." : "Today plan is incomplete."
-        isArmed = issues.isEmpty
-        isEditingPlan = !issues.isEmpty
+        let committed = hasInitialPlan && blockingIssues(in: issues).isEmpty
+        planMessage = committed ? "Today is planned." : "Today plan is incomplete."
+        isArmed = committed
+        isEditingPlan = !committed
         userRequestedEditing = false
         tick()
     }
@@ -387,7 +543,7 @@ final class AppModel: ObservableObject {
         }
         let isActuallyDirty = tasks != baselineTasks
         if isActuallyDirty != planIsDirty { planIsDirty = isActuallyDirty }
-        let issues = validator.validate(tasks: tasks, profile: dayProfile, minimumCycles: requiredCycleMinimum)
+        let issues = currentValidation(tasks)
         if issues != validationIssues { validationIssues = issues }
         if isPlanCommitted {
             isArmed = true
@@ -412,8 +568,17 @@ final class AppModel: ObservableObject {
         if collapsedTaskIDs.contains(taskID) { collapsedTaskIDs.remove(taskID) } else { collapsedTaskIDs.insert(taskID) }
     }
 
-    func setAllTasksCollapsed(_ collapsed: Bool) {
-        collapsedTaskIDs = collapsed ? Set((tasks + agendaTasks.map(\.task)).map(\.id)) : []
+    func allTasksCollapsed(_ target: [PlanTask]) -> Bool {
+        !target.isEmpty && target.allSatisfy { collapsedTaskIDs.contains($0.id) }
+    }
+
+    func toggleAllTasksCollapsed(_ target: [PlanTask]) {
+        let ids = Set(target.map(\.id))
+        if allTasksCollapsed(target) {
+            collapsedTaskIDs.subtract(ids)
+        } else {
+            collapsedTaskIDs.formUnion(ids)
+        }
     }
 
     func toggleTaskCompletion(_ taskID: UUID) {
@@ -440,7 +605,8 @@ final class AppModel: ObservableObject {
         rescheduledTask.routineOverride = false
         let sameDay = agendaTasks.filter { WallClock.dhakaCalendar().isDate($0.date, inSameDayAs: date) }.map(\.task) + [rescheduledTask]
         let destinationIssues = validator.validate(
-            tasks: sameDay, profile: resolver.profile(for: date), minimumCycles: 0, requireFixedTasks: false
+            tasks: sameDay, profile: resolver.profile(for: date), minimumCycles: 0,
+            requireFixedTasks: false, requireTaskDetails: false
         )
         let blockers = destinationIssues.filter { $0.severity == .error }
         guard blockers.isEmpty else {
@@ -472,7 +638,8 @@ final class AppModel: ObservableObject {
             $0.id != taskID && WallClock.dhakaCalendar().isDate($0.date, inSameDayAs: date)
         }.map(\.task) + [movedTask]
         let issues = validator.validate(
-            tasks: sameDay, profile: resolver.profile(for: date), minimumCycles: 0, requireFixedTasks: false
+            tasks: sameDay, profile: resolver.profile(for: date), minimumCycles: 0,
+            requireFixedTasks: false, requireTaskDetails: false
         )
         let blockers = issues.filter { $0.severity == .error }
         guard blockers.isEmpty else {
@@ -500,7 +667,8 @@ final class AppModel: ObservableObject {
             tasks: sameDay,
             profile: resolver.profile(for: date),
             minimumCycles: 0,
-            requireFixedTasks: false
+            requireFixedTasks: false,
+            requireTaskDetails: false
         )
         let blockers = issues.filter { $0.severity == .error }
         guard blockers.isEmpty else {
@@ -529,6 +697,19 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func updateAgendaTask(_ updated: PlanTask) {
+        guard let index = agendaTasks.firstIndex(where: { $0.id == updated.id }) else { return }
+        agendaTasks[index].task = updated
+        agendaTasks.sort(by: agendaSort)
+        agendaSaveTask?.cancel()
+        agendaSaveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            guard !Task.isCancelled, let self, let worker = self.worker else { return }
+            do { try await worker.saveAgenda(self.agendaTasks) }
+            catch { self.errorMessage = "Could not update agenda: \(error.localizedDescription)" }
+        }
+    }
+
     func scheduleCheckInSave() {
         saveTask?.cancel()
         saveTask = Task { [weak self] in
@@ -542,14 +723,15 @@ final class AppModel: ObservableObject {
         var components = WallClock.dhakaCalendar().dateComponents([.year, .month], from: now)
         components.day = day
         guard let date = WallClock.dhakaCalendar().date(from: components) else { return }
-        setStreak(summary.definition, completed: !summary.completedDays.contains(day), date: date)
+        let next = (summary.statuses[day] ?? .blank).next
+        setStreak(summary.definition, status: next, date: date)
     }
 
-    private func setStreak(_ definition: StreakDefinition, completed: Bool, date: Date) {
+    private func setStreak(_ definition: StreakDefinition, status: StreakStatus, date: Date) {
         guard let worker else { return }
         Task { [weak self] in
             do {
-                try await worker.setStreakValue(definition, completed: completed, date: date)
+                try await worker.setStreakValue(definition, status: status, date: date)
                 self?.reloadStreakSummaries()
             } catch {
                 self?.errorMessage = error.localizedDescription
@@ -575,14 +757,22 @@ final class AppModel: ObservableObject {
         clockDisplay.snapshot = clock.snapshot(at: date)
         let resolvedProfile = resolver.profile(for: date)
         if resolvedProfile != dayProfile { dayProfile = resolvedProfile }
-        let resolvedMinimum = validator.requiredCycles(at: date, profile: resolvedProfile)
-        if resolvedMinimum != requiredCycleMinimum {
+        let resolvedSegment = validator.segment(at: date)
+        let resolvedMinimum = validator.requiredCycles(in: resolvedSegment, at: date, profile: resolvedProfile)
+        if resolvedSegment != activeSegment || resolvedMinimum != requiredCycleMinimum {
+            activeSegment = resolvedSegment
             requiredCycleMinimum = resolvedMinimum
-            validationIssues = validator.validate(
-                tasks: tasks,
-                profile: resolvedProfile,
-                minimumCycles: resolvedMinimum
-            )
+            validationIssues = currentValidation(tasks)
+        }
+
+        // The sleep cutoff is a true execution boundary, not another planning
+        // gate. ReFocus disarms and gets out of the way after 21:30.
+        if clock.minuteOfDay(for: date) >= 1290 {
+            isArmed = false
+            activeBreakID = nil
+            if overlayController.mode != nil { overlayController.hide() }
+            isBreakVisible = false
+            return
         }
 
         // An incomplete Today plan is a persistent planning gate. It is not a
@@ -678,6 +868,47 @@ final class AppModel: ObservableObject {
         return true
     }
 
+    private func currentValidation(_ candidate: [PlanTask]) -> [PlanValidationIssue] {
+        validator.validate(
+            tasks: candidate,
+            profile: dayProfile,
+            minimumCycles: requiredCycleMinimum,
+            requireFixedTasks: true,
+            requireTaskDetails: true,
+            countedSegment: activeSegment
+        )
+    }
+
+    private func tomorrowRequiredCycles(_ segment: PlanningSegment) -> Int {
+        var parts = WallClock.dhakaCalendar().dateComponents([.year, .month, .day], from: tomorrowDate)
+        parts.hour = segment.startMinute / 60
+        parts.minute = segment.startMinute % 60
+        let start = WallClock.dhakaCalendar().date(from: parts) ?? tomorrowDate
+        return validator.requiredCycles(
+            in: segment,
+            at: start,
+            profile: resolver.profile(for: tomorrowDate)
+        )
+    }
+
+    private func validateTomorrow(_ candidate: [PlanTask]) -> [PlanValidationIssue] {
+        var issues = validator.validate(
+            tasks: candidate,
+            profile: resolver.profile(for: tomorrowDate),
+            minimumCycles: 0,
+            requireFixedTasks: true,
+            requireTaskDetails: true
+        )
+        for segment in PlanningSegment.allCases {
+            let actual = candidate.filter(segment.contains).reduce(0) { $0 + $1.cycles }
+            let required = tomorrowRequiredCycles(segment)
+            if actual < required {
+                issues.append(.insufficientSegment(segment: segment, actual: actual, required: required))
+            }
+        }
+        return issues
+    }
+
     private func withRecurringFixedTasks(_ existing: [PlanTask]) -> [PlanTask] {
         var result = existing
         for fixed in FixedPlanTasks.daily() {
@@ -713,6 +944,19 @@ final class AppModel: ObservableObject {
     private func agendaSort(_ lhs: AgendaTask, _ rhs: AgendaTask) -> Bool {
         if lhs.date != rhs.date { return lhs.date < rhs.date }
         return lhs.task.startMinute < rhs.task.startMinute
+    }
+
+    private func freshCopy(of template: PlanTask) -> PlanTask {
+        PlanTask(
+            title: template.title,
+            startMinute: template.startMinute,
+            cycles: template.cycles,
+            kind: template.kind,
+            priority: template.priority,
+            difficulty: template.difficulty,
+            mvp: template.mvp,
+            coreTasks: template.coreTasks.map { CoreTask(title: $0.title) }
+        )
     }
 
     private func sessionID(for cycleStart: Date) -> String {

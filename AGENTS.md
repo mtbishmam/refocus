@@ -1,83 +1,136 @@
 # ReFocus project instructions
 
-## Build and verification
+## Build and architecture
 
-- Build the native app with `swift build`.
-- Run behavior checks with `swift run RefocusCoreChecks`.
-- Package the local app with `scripts/package-app.sh`.
-- Keep the app native to SwiftUI/AppKit. Do not add Electron, Tauri, a web
-  runtime, a database, an in-app terminal, or an AI API without explicit user
-  approval.
-- ReFocus may edit its versioned managed blocks in `tasks.md`, `agenda.md`, and
-  daily logs. `tasks.md` is a current-day dashboard, not a backlog: when a new
-  day begins, archive its previous contents verbatim into `dump.md` before
-  replacing it. Preserve unrelated Markdown in `dump.md` and the daily logs.
-- Keep streak definitions in `log/streaks.md`; store each day's streak values
-  in that day's `log/mon-D.md` entry.
+- Build with `swift build`, run `swift run RefocusCoreChecks`, and package with
+  `scripts/package-app.sh`.
+- Keep ReFocus native to SwiftUI/AppKit. Speed is the primary product
+  constraint.
+- Persistence is plain Markdown coordinated through `NSFileCoordinator`; there
+  is no database. Do not add Electron, Tauri, a web runtime, an AI API, an
+  in-app terminal, or a database without explicit approval.
+- The vault is
+  `/Users/mtbishmam/Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian`.
+- ReFocus may change only its managed Markdown blocks. Preserve unrelated
+  content exactly and treat an external Obsidian/Codex edit as a conflict rather
+  than overwriting it.
 
-## Obsidian planning bridge
+## Files and ownership
 
-The attached Obsidian vault is at
-`/Users/mtbishmam/Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian`.
-Its `AGENTS.md`, live `ego/ikigai.md`, `ego/non-negotiables.md`, and `tasks.md`
-are authoritative for task planning.
+- `tasks.md` is the mobile-readable operational file. It may contain the live
+  dated Today and relative Tomorrow plans, three immutable Initial snapshots,
+  three live Modified snapshots, completion state, and screen-break logs.
+- `agenda.md` stores future scheduled tasks. Agenda capture requires a real
+  title only; MVP and subtasks are optional until the task is promoted into
+  Tomorrow or Today.
+- `task-templates.md` stores reusable task definitions.
+- `dump.md` is only the user's fast raw capture surface. Never use it as a
+  daily-plan archive.
+- `log/mon-D.md` is the permanent daily record; store the ISO date in
+  frontmatter. When a dated Today is rolled over, archive it in that date's
+  daily log, never in `dump.md`.
+- Read streak definitions from the live `ego/non-negotiables.md`. Store daily
+  blank/win/fail values in `log/mon-D.md`; `log/streaks.md` documents the
+  mapping.
 
-When the user says `sort_tasks`, run the vault's complete `plan_tasks` workflow;
-do not perform a shallow reorder. Re-read the live Ikigai file every time,
-  calculate the actual weekday in `Asia/Dhaka`, consider the current plan,
-  `agenda.md`, and every capture in `dump.md`, display the complete proposed
-  Today plan, and wait for explicit approval before writing.
+## Three planning gates
 
-Mandatory current exception resolution:
+The day is independently planned and snapshotted in three super-blocks:
 
-- Monday/Wednesday: Standard Routine with the 6:00–11:00 contest.
-- Saturday/Thursday: omit the contest, ordinary work 6:00–8:00, protect
-  university 8:00–14:00, then ordinary blocks.
-- Sunday/Tuesday: keep the 6:00–11:00 contest, enforce Rest 11:00–12:00,
-  protect the 12:00–17:00 transition/university window, enforce Rest
-  17:00–18:00, then resume the evening routine.
-- Friday: omit the normal contest and use only the 9:00–13:00 SSC contest.
+| Block | Window | Required cycles |
+|---|---:|---:|
+| Morning | 06:00–11:00 | `min(10, usable half-hour cycles remaining in this block)` |
+| Afternoon | 12:00–17:00 | `min(10, usable half-hour cycles remaining in this block)` |
+| Evening | 18:00–21:30 | `min(7, usable half-hour cycles remaining in this block)` |
 
-Explicit dated instructions override Special Events, which override University
-Hours, which override the Standard Routine. Ask if two live exceptions conflict.
-Before proposing or writing, audit the weekday, profile, protected windows,
-contest duration, dynamic cycle minimum, four-cycle ordinary-task cap, and 9:30
-PM cutoff. The minimum is the smaller of twelve and the number of unprotected
-half-hour slots actually remaining before 9:30 PM.
+- Floor the current time to its active wall-clock cycle. At 07:13 the current
+  cycle begins at 07:00.
+- Only tasks wholly inside the active block count toward that block's gate.
+  The fixed evening tasks count only toward the Evening gate.
+- The first successful save in each block creates its immutable Initial
+  snapshot. Later saves refresh that block's Modified snapshot. A save also
+  refreshes Modified snapshots for earlier initialized blocks so end-of-day
+  state is accurate.
+- Red errors block saving. Yellow routine-exception warnings may be explicitly
+  accepted for that date. Sort tasks by start time before validating; any
+  unapproved collision remains red.
+- Planning is a hard gate, but Command-Q must always remain available.
 
-The 11:00–12:00 and 17:00–18:00 Rest Blocks are absolute and never
-overridable. University and other recurring routine-exception windows are
-yellow warnings: state the exact protected time and its reason, and allow an
-explicit dated override such as “not going to university today.” All malformed
-tasks, Rest Block collisions, ordinary task collisions, cutoff violations, and
-the first-plan cycle minimum are red blockers.
+## Task rules
 
-Planning is now a hard gate. Do not tell the user to begin work before the
-complete Today plan is approved and written. ReFocus must remain unarmed until
-Today reaches the dynamic cycle minimum and passes every plan validation rule;
-saving a valid plan unlocks the wall-clock work rhythm. `normal` and `contest`
-are the only task kinds. A contest may occur in any unprotected window and may
-use one to ten cycles; it is not required merely because of the day profile.
+- `normal` and `contest` are the only kinds.
+- Normal tasks use one to four cycles. Contest tasks use one to ten cycles.
+- Every Today/Tomorrow task has a concrete MVP as its sole completion
+  definition and at least three named subtasks; more are allowed.
+- Scheduled Agenda tasks may omit MVP and subtasks. They must satisfy the full
+  task rules when promoted into Tomorrow or Today.
+- Nothing may overlap the non-overridable 11:00–12:00 or 17:00–18:00 Rest
+  Blocks or run after 21:30.
+- Every day includes:
+  - 20:00–20:30 — `Day Analysis and Streaks (CF & Git)`.
+  - 20:30–21:00 — `Plan Tomorrow + Miscel Tasks`, extendable to 21:30.
+  - 21:00–21:30 — `ReVision`, with ReSolve, ReSync, and Routes, Goals and
+    Milestones.
+- Only the 21:00–21:30 overlap between Plan Tomorrow and ReVision is permitted.
 
-Every task uses its MVP as the completion definition; never add a separate
-`Completion` field. Every task, including a one-cycle task, needs at least three
-named subtasks, and may have more. Preserve ReFocus's hidden UUID metadata and
-managed Today markers. The app overlay consumes only the current dated Today
-section; it must never display `agenda.md` or `dump.md` captures.
+## Live routine authority
 
-Every day contains these fixed blocks: 20:00–20:30 “Day Analysis and Streaks
-(CF & Git)”; 20:30–21:00 “Plan Tomorrow + Miscel Tasks,” extendable to 21:30;
-and 21:00–21:30 “ReVision” with ReSolve, ReSync, and Routes, Goals and
-Milestones as subtasks. Only the permitted 21:00–21:30 overlap between Plan
-Tomorrow and ReVision is exempt from collision validation.
+Before every planning, prioritization, rollover, rescheduling, or scheduling
+operation, reread `ego/ikigai.md` and calculate the actual weekday in
+`Asia/Dhaka`. The live file overrides examples copied here.
 
-On the first valid save, preserve an immutable Initial Plan snapshot. Later
-saves update the Modified Plan. Screen-break answers are written both beside
-the live plan in `tasks.md` and to `log/mon-D.md`.
+Current recurring profiles:
 
-When the user says `analyze_day`, read the live `tasks.md`, compare Initial Plan
-with Modified Plan, inspect completion states and every screen-break answer,
-then collaboratively derive Summary, Progress, Mistakes, and Gains. Write the
-approved result to that day's log. `clean_dump` is reserved for the later
-interactive workflow that rewrites every capture into its canonical location;
-never delete an unresolved capture.
+- Monday/Wednesday: Standard Routine, including the suggested 06:00–11:00
+  contest.
+- Saturday/Thursday: omit the contest, ordinary work 06:00–08:00, protect
+  University 08:00–14:00, then ordinary blocks.
+- Sunday/Tuesday: keep the 06:00–11:00 contest, enforce Rest 11:00–12:00,
+  protect University/transition until 17:00, enforce Rest 17:00–18:00, then
+  resume the evening routine.
+- Friday: omit the normal contest and use the 09:00–13:00 SSC contest.
+
+Precedence: explicit dated instruction, live Special Event, recurring
+University Hours, Standard Routine. If live exceptions conflict without a
+precedence rule, ask. University/special-event protection is a yellow,
+date-overridable warning that must name its exact window and reason. Rest,
+collision, malformed-task, duration, and cutoff failures are red.
+
+## Codex commands
+
+`sort_tasks` is an alias for the complete `plan_tasks` workflow. Read the live
+Ikigai, the current plan, Agenda, and dump captures; resolve conflicts; show the
+complete proposed Today/Tomorrow/Agenda changes; and obtain explicit approval
+before writing.
+
+`analyze_day`:
+
+1. Read the day's log plus all three Initial and Modified snapshots, completion
+   states, and screen-break answers.
+2. Compare planned versus actual work and discuss causes that the evidence
+   supports. Ask when the cause is unclear.
+3. Propose Summary, Progress, Mistakes, and Gains and obtain explicit approval.
+4. Write the approved analysis to `log/mon-D.md`, preserving all managed data.
+5. Archive the full dated `tasks.md` Today record in that log and remove the
+   analyzed Today section. Do not touch `dump.md`.
+
+`clean_dump`:
+
+1. Parse captures such as `page_name - content`, an indented block beneath a
+   page name, `task - do_x`, or `aug 27 - MAT120 exam`.
+2. Show a preflight list with every proposed destination/action and a separate
+   ambiguity list. Examples: `refocus - ...` targets `refocus.md`; `task - ...`
+   targets ReFocus planning/Agenda; a dated item targets Agenda.
+3. Obtain explicit approval before writing. Do not move any ambiguous item.
+4. Move only approved, unambiguous content, preserve meaning, and remove from
+   `dump.md` only the captures successfully committed elsewhere.
+
+The intended evening sequence is `analyze_day` → `clean_dump` → save the plan
+in the relative Tomorrow view. Saving Tomorrow writes `# Tomorrow - YYYY-MM-DD`
+to `tasks.md`; it becomes Today on that date.
+
+## Streaks
+
+- Use every bullet in the live `ego/non-negotiables.md`, in file order.
+- Each date cycles blank → green win → red fail → blank.
+- Display current streak, maximum streak, total wins, and total fails.

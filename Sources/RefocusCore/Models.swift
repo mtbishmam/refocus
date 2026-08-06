@@ -11,6 +11,47 @@ public enum FixedTaskRole: String, Codable, CaseIterable, Sendable {
     case revision
 }
 
+public enum PlanningSegment: String, Codable, CaseIterable, Sendable {
+    case morning
+    case afternoon
+    case evening
+
+    public var title: String {
+        switch self {
+        case .morning: "Morning Block"
+        case .afternoon: "Afternoon Block"
+        case .evening: "Evening Block"
+        }
+    }
+
+    public var startMinute: Int {
+        switch self {
+        case .morning: 360
+        case .afternoon: 720
+        case .evening: 1080
+        }
+    }
+
+    public var endMinute: Int {
+        switch self {
+        case .morning: 660
+        case .afternoon: 1020
+        case .evening: 1290
+        }
+    }
+
+    public var maximumCycles: Int {
+        switch self {
+        case .morning, .afternoon: 10
+        case .evening: 7
+        }
+    }
+
+    public func contains(_ task: PlanTask) -> Bool {
+        task.startMinute >= startMinute && task.endMinute <= endMinute
+    }
+}
+
 public enum DayProfileKind: String, Codable, CaseIterable, Sendable {
     case standard
     case universityEarly = "university-early"
@@ -22,6 +63,20 @@ public enum StreakMode: String, Codable, CaseIterable, Sendable {
     case manual
     case planMinimum
     case noMissedCheckIns
+}
+
+public enum StreakStatus: String, Codable, CaseIterable, Sendable {
+    case blank
+    case win
+    case fail
+
+    public var next: StreakStatus {
+        switch self {
+        case .blank: .win
+        case .win: .fail
+        case .fail: .blank
+        }
+    }
 }
 
 public struct CoreTask: Identifiable, Codable, Equatable, Sendable {
@@ -90,20 +145,20 @@ public struct TodayPlan: Equatable, Sendable {
     public var profile: DayProfileKind
     public var tasks: [PlanTask]
     public var isCurrent: Bool
-    public var hasInitialPlan: Bool
+    public var initialSegments: Set<PlanningSegment>
 
     public init(
         date: Date,
         profile: DayProfileKind,
         tasks: [PlanTask],
         isCurrent: Bool = true,
-        hasInitialPlan: Bool = false
+        initialSegments: Set<PlanningSegment> = []
     ) {
         self.date = date
         self.profile = profile
         self.tasks = tasks
         self.isCurrent = isCurrent
-        self.hasInitialPlan = hasInitialPlan
+        self.initialSegments = initialSegments
     }
 }
 
@@ -206,13 +261,24 @@ public struct StreakSummary: Identifiable, Equatable, Sendable {
     public var definition: StreakDefinition
     public var current: Int
     public var longest: Int
-    public var completedDays: Set<Int>
+    public var statuses: [Int: StreakStatus]
+    public var totalWins: Int
+    public var totalFails: Int
 
-    public init(definition: StreakDefinition, current: Int, longest: Int, completedDays: Set<Int>) {
+    public init(
+        definition: StreakDefinition,
+        current: Int,
+        longest: Int,
+        statuses: [Int: StreakStatus],
+        totalWins: Int,
+        totalFails: Int
+    ) {
         self.definition = definition
         self.current = current
         self.longest = longest
-        self.completedDays = completedDays
+        self.statuses = statuses
+        self.totalWins = totalWins
+        self.totalFails = totalFails
     }
 }
 
@@ -223,6 +289,7 @@ public enum ValidationSeverity: String, Sendable {
 
 public enum PlanValidationIssue: Equatable, Sendable, CustomStringConvertible {
     case insufficientCycles(actual: Int, required: Int)
+    case insufficientSegment(segment: PlanningSegment, actual: Int, required: Int)
     case missingTaskTitle
     case invalidCycleCount(task: String)
     case invalidContest(task: String)
@@ -248,6 +315,8 @@ public enum PlanValidationIssue: Equatable, Sendable, CustomStringConvertible {
     public var description: String {
         switch self {
         case .insufficientCycles(let actual, let required): return "Plan has \(actual)/\(required) required cycles."
+        case .insufficientSegment(let segment, let actual, let required):
+            return "\(segment.title) has \(actual)/\(required) required cycles."
         case .missingTaskTitle: return "Every task needs a real name."
         case .invalidCycleCount(let task): return "\(task) must use one to four cycles."
         case .invalidContest(let task): return "\(task) must use one to ten contest cycles."
@@ -258,7 +327,7 @@ public enum PlanValidationIssue: Equatable, Sendable, CustomStringConvertible {
         case .emptyCoreTask(let task): return "\(task) cannot contain an unnamed subtask."
         case .overlap(let first, let second): return "\(first) overlaps \(second)."
         case .routineConflict(_, let task, let reason, let start, let end):
-            return "\(task) overlaps \(Self.time(start))–\(Self.time(end)), protected for \(reason). You can override it for today."
+            return "\(task) overlaps \(Self.time(start))–\(Self.time(end)), protected for \(reason)."
         case .hardRest(let task, let start, let end):
             return "\(task) overlaps the non-overridable \(Self.time(start))–\(Self.time(end)) Rest Block."
         case .afterSleepCutoff(let task): return "\(task) runs after the 9:30 PM cutoff."

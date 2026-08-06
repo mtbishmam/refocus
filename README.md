@@ -21,13 +21,14 @@ Launching the packaged app opens the dashboard and adds the live timer to the
 menu bar. If it is already running, the same command brings the dashboard to
 the front.
 
-The fixed wall-clock timer is gated by planning. If Today is missing or invalid,
+The fixed wall-clock timer is gated by planning. If the active work block is missing or invalid,
 ReFocus opens a persistent full-screen planning gate. The primary display embeds
-the complete dashboard—Today, Streaks, and Settings—so the plan can be created
+the complete dashboard—Agenda, Today, Tomorrow, Streaks, and Settings—so the plan can be created
 without leaving the blocker. The gate remains across timer boundaries until a
-valid plan is saved. Its cycle minimum is the smaller of twelve and the number
-of unprotected half-hour slots remaining before 9:30 PM, so late planning cannot
-create an impossible lock. ReFocus then arms automatically
+valid plan is saved. Morning (`06:00–11:00`) and Afternoon (`12:00–17:00`)
+independently require the smaller of ten and the usable cycles remaining in that
+block. Evening (`18:00–21:30`) requires the smaller of seven and its usable
+remaining cycles. ReFocus then arms automatically
 and uses its check-in overlay at `:25–:30` and `:55–:00`.
 
 Normal tasks are capped at four cycles. Every contest uses the single `contest`
@@ -42,14 +43,16 @@ it once, then enable the option in ReFocus Settings.
 
 ## Markdown contract
 
-- Plan source: `tasks.md`, current `# Today - YYYY-MM-DD` section only.
+- Plan source: `tasks.md`, with dated Today and relative Tomorrow sections.
+- Future schedule: `agenda.md`; reusable definitions: `task-templates.md`.
 - Execution log: `log/aug-4.md` style filenames with ISO date frontmatter.
-- Streak definitions: `log/streaks.md`; daily values remain in the daily log.
+- Streak definitions: live bullets in `ego/non-negotiables.md`; tri-state daily
+  values remain in the daily log.
 - ReFocus patches only `<!-- refocus:... -->` managed blocks and reloads after
   external Obsidian or Codex writes.
 
-`Later`, `Completed`, and `Inbox` remain planning inputs for Codex but are never
-shown in the execution/check-in overlay.
+Persistence is coordinated plain Markdown; ReFocus has no database. The
+execution/check-in overlay renders only Today.
 
 ## Safety boundary
 

@@ -131,30 +131,51 @@ public struct PlanValidator: Sendable {
         profile: DayProfile,
         calendar: Calendar = WallClock.dhakaCalendar()
     ) -> Int {
+        requiredCycles(in: segment(at: date, calendar: calendar), at: date, profile: profile, calendar: calendar)
+    }
+
+    public func segment(at date: Date, calendar: Calendar = WallClock.dhakaCalendar()) -> PlanningSegment {
         let components = calendar.dateComponents([.hour, .minute], from: date)
         let minute = (components.hour ?? 0) * 60 + (components.minute ?? 0)
-        let firstAvailableSlot = ((minute + 29) / 30) * 30
-        guard firstAvailableSlot < 1290 else { return 0 }
+        if minute < 660 { return .morning }
+        if minute < 1020 { return .afternoon }
+        return .evening
+    }
+
+    public func requiredCycles(
+        in segment: PlanningSegment,
+        at date: Date,
+        profile: DayProfile,
+        calendar: Calendar = WallClock.dhakaCalendar()
+    ) -> Int {
+        let components = calendar.dateComponents([.hour, .minute], from: date)
+        let minute = (components.hour ?? 0) * 60 + (components.minute ?? 0)
+        let currentCycleStart = (minute / 30) * 30
+        let firstAvailableSlot = max(segment.startMinute, currentCycleStart)
+        guard firstAvailableSlot < segment.endMinute else { return 0 }
 
         var available = 0
         var cursor = firstAvailableSlot
-        while cursor + 30 <= 1290 {
+        while cursor + 30 <= segment.endMinute {
             let blocked = (profile.protectedWindows + FixedPlanTasks.hardRestWindows)
                 .contains { $0.overlaps(start: cursor, end: cursor + 30) }
             if !blocked { available += 1 }
             cursor += 30
         }
-        return min(12, available)
+        return min(segment.maximumCycles, available)
     }
 
     public func validate(
         tasks: [PlanTask],
         profile: DayProfile,
         minimumCycles: Int = 12,
-        requireFixedTasks: Bool = true
+        requireFixedTasks: Bool = true,
+        requireTaskDetails: Bool = true,
+        countedSegment: PlanningSegment? = nil
     ) -> [PlanValidationIssue] {
         var issues: [PlanValidationIssue] = []
-        let totalCycles = tasks.reduce(0) { $0 + $1.cycles }
+        let countedTasks = countedSegment.map { segment in tasks.filter(segment.contains) } ?? tasks
+        let totalCycles = countedTasks.reduce(0) { $0 + $1.cycles }
         if totalCycles < minimumCycles {
             issues.append(.insufficientCycles(actual: totalCycles, required: minimumCycles))
         }
@@ -180,15 +201,17 @@ public struct PlanValidator: Sendable {
                 }
             }
 
-            if task.mvp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                issues.append(.missingMVP(task: displayTitle))
-            }
-            if task.coreTasks.count < 3 {
-                issues.append(.tooFewSubtasks(task: displayTitle))
-            } else if task.coreTasks.contains(where: {
-                $0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            }) {
-                issues.append(.emptyCoreTask(task: displayTitle))
+            if requireTaskDetails {
+                if task.mvp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    issues.append(.missingMVP(task: displayTitle))
+                }
+                if task.coreTasks.count < 3 {
+                    issues.append(.tooFewSubtasks(task: displayTitle))
+                } else if task.coreTasks.contains(where: {
+                    $0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                }) {
+                    issues.append(.emptyCoreTask(task: displayTitle))
+                }
             }
             if task.endMinute > 1290 { issues.append(.afterSleepCutoff(task: displayTitle)) }
             for window in FixedPlanTasks.hardRestWindows where window.overlaps(start: task.startMinute, end: task.endMinute) {

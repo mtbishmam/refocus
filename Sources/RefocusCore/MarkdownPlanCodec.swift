@@ -20,8 +20,16 @@ public struct MarkdownPlanCodec: Sendable {
     }
 
     public func parseToday(_ markdown: String, date: Date) throws -> TodayPlan {
+        try parseDay(markdown, date: date, headingPrefix: "Today")
+    }
+
+    public func parseTomorrow(_ markdown: String, date: Date) throws -> TodayPlan {
+        try parseDay(markdown, date: date, headingPrefix: "Tomorrow")
+    }
+
+    private func parseDay(_ markdown: String, date: Date, headingPrefix: String) throws -> TodayPlan {
         let dateText = Self.isoDate(date, calendar: calendar)
-        let heading = "# Today - \(dateText)"
+        let heading = "# \(headingPrefix) - \(dateText)"
         guard let headingRange = markdown.range(of: heading) else {
             throw PlanCodecError.missingToday(dateText)
         }
@@ -48,7 +56,10 @@ public struct MarkdownPlanCodec: Sendable {
             profile: profile,
             tasks: parseTasks(currentPlanSection),
             isCurrent: true,
-            hasInitialPlan: section.contains("<!-- refocus:initial-plan")
+            initialSegments: Set(section.components(separatedBy: .newlines).compactMap { line in
+                guard line.contains("<!-- refocus:initial-plan") else { return nil }
+                return metadata(in: line)["segment"].flatMap(PlanningSegment.init(rawValue:))
+            })
         )
     }
 
@@ -74,10 +85,30 @@ public struct MarkdownPlanCodec: Sendable {
         return lines.joined(separator: "\n")
     }
 
-    public func renderInitialBlock(tasks: [PlanTask], profile: DayProfileKind) -> String {
-        renderManagedBlock(tasks: tasks, profile: profile)
-            .replacingOccurrences(of: "<!-- refocus:plan v=1", with: "<!-- refocus:initial-plan v=1")
-            .replacingOccurrences(of: "<!-- /refocus:plan -->", with: "<!-- /refocus:initial-plan -->")
+    public func renderInitialBlock(
+        tasks: [PlanTask],
+        profile: DayProfileKind,
+        segment: PlanningSegment = .morning
+    ) -> String {
+        renderSnapshotBlock(tasks: tasks, profile: profile, segment: segment, kind: "initial-plan")
+    }
+
+    public func renderModifiedBlock(tasks: [PlanTask], profile: DayProfileKind, segment: PlanningSegment) -> String {
+        renderSnapshotBlock(tasks: tasks, profile: profile, segment: segment, kind: "modified-plan")
+    }
+
+    private func renderSnapshotBlock(
+        tasks: [PlanTask],
+        profile: DayProfileKind,
+        segment: PlanningSegment,
+        kind: String
+    ) -> String {
+        renderManagedBlock(tasks: tasks.filter(segment.contains), profile: profile)
+            .replacingOccurrences(
+                of: "<!-- refocus:plan v=1",
+                with: "<!-- refocus:\(kind) v=1 segment=\(segment.rawValue)"
+            )
+            .replacingOccurrences(of: "<!-- /refocus:plan -->", with: "<!-- /refocus:\(kind) -->")
     }
 
     public func replacingTodayBlock(
@@ -86,10 +117,33 @@ public struct MarkdownPlanCodec: Sendable {
         tasks: [PlanTask],
         profile: DayProfileKind
     ) throws -> String {
+        try replacingDayBlock(in: markdown, date: date, tasks: tasks, profile: profile, headingPrefix: "Today")
+    }
+
+    public func replacingTomorrowBlock(
+        in markdown: String,
+        date: Date,
+        tasks: [PlanTask],
+        profile: DayProfileKind
+    ) throws -> String {
+        try replacingDayBlock(in: markdown, date: date, tasks: tasks, profile: profile, headingPrefix: "Tomorrow")
+    }
+
+    private func replacingDayBlock(
+        in markdown: String,
+        date: Date,
+        tasks: [PlanTask],
+        profile: DayProfileKind,
+        headingPrefix: String
+    ) throws -> String {
         let dateText = Self.isoDate(date, calendar: calendar)
-        let heading = "# Today - \(dateText)"
+        let heading = "# \(headingPrefix) - \(dateText)"
         let rendered = renderManagedBlock(tasks: tasks, profile: profile)
         guard let headingRange = markdown.range(of: heading) else {
+            if headingPrefix == "Tomorrow", !markdown.isEmpty {
+                return markdown.trimmingCharacters(in: .newlines)
+                    + "\n\n\(heading)\n\n\(rendered)\n"
+            }
             let separator = markdown.isEmpty ? "" : "\n\n"
             return "\(heading)\n\n\(rendered)\(separator)\(markdown)"
         }

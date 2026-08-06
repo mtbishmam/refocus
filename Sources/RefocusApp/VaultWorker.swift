@@ -12,6 +12,10 @@ actor VaultWorker {
         try repository.loadToday(date: date)
     }
 
+    func loadTomorrow(date: Date) throws -> TodayPlan {
+        try repository.loadTomorrow(date: date)
+    }
+
     func loadStreakDefinitions() throws -> [StreakDefinition] {
         try repository.loadStreakDefinitions()
     }
@@ -24,18 +28,32 @@ actor VaultWorker {
         try repository.saveAgenda(tasks)
     }
 
+    func loadTemplates() throws -> [PlanTask] {
+        try repository.loadTemplates()
+    }
+
+    func saveTemplates(_ tasks: [PlanTask]) throws {
+        try repository.saveTemplates(tasks)
+    }
+
     func saveToday(
         date: Date,
         tasks: [PlanTask],
         profile: DayProfileKind,
+        segment: PlanningSegment,
         expectedTasks: [PlanTask]
     ) throws {
         try repository.saveToday(
             date: date,
             tasks: tasks,
             profile: profile,
+            segment: segment,
             expectedTasks: expectedTasks
         )
+    }
+
+    func saveTomorrow(date: Date, tasks: [PlanTask], profile: DayProfileKind) throws {
+        try repository.saveTomorrow(date: date, tasks: tasks, profile: profile)
     }
 
     func saveCheckIn(_ checkIn: CheckIn, streaks: [StreakDefinition]) throws {
@@ -47,8 +65,8 @@ actor VaultWorker {
         try repository.updateAutomaticStreaks(date: date, planHasMinimum: completed)
     }
 
-    func setStreakValue(_ definition: StreakDefinition, completed: Bool, date: Date) throws {
-        try repository.setStreakValue(definition, completed: completed, date: date)
+    func setStreakValue(_ definition: StreakDefinition, status: StreakStatus, date: Date) throws {
+        try repository.setStreakValue(definition, status: status, date: date)
     }
 
     func streakSummaries(for date: Date, definitions: [StreakDefinition]) throws -> [StreakSummary] {

@@ -31,6 +31,13 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
     if !condition() { throw CheckFailure.failed(message) }
 }
 
+func expectIndex(_ needle: String, in text: String) throws -> String.Index {
+    guard let range = text.range(of: needle) else {
+        throw CheckFailure.failed("Missing expected text: \(needle)")
+    }
+    return range.lowerBound
+}
+
 var checks = 0
 func check(_ name: String, _ body: () throws -> Void) rethrows {
     try body()
@@ -155,7 +162,7 @@ do {
         )
         let markdown = "# Today - 2026-08-06\n\n\(codec.renderInitialBlock(tasks: [initial], profile: .universityEarly))\n\n\(codec.renderManagedBlock(tasks: [modified], profile: .universityEarly))"
         let parsed = try codec.parseToday(markdown, date: planDate)
-        try expect(parsed.hasInitialPlan, "Initial plan marker was not detected")
+        try expect(parsed.initialSegments.contains(.morning), "Morning initial plan marker was not detected")
         try expect(parsed.tasks.map(\.title) == ["Modified"], "Initial plan leaked into the live plan")
     }
     try check("Agenda Markdown round-trips future tasks") {
@@ -170,7 +177,7 @@ do {
         try expect(parsed.count == 1 && parsed[0].task.title == "MAT120 Exam", "Agenda task did not round-trip")
         try expect(MarkdownPlanCodec.isoDate(parsed[0].date, calendar: calendar) == "2026-08-27", "Agenda date changed")
     }
-    try check("First plan makes tasks.md Today-only and archives old sections") {
+    try check("First plan preserves unrelated Markdown") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-first-plan-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temporary) }
@@ -186,13 +193,11 @@ do {
         let repository = VaultRepository(vaultURL: temporary, calendar: calendar)
         let task = PlanTask(title: "Named task", startMinute: 1080, cycles: 1, priority: "High", difficulty: "Hard", mvp: "Concrete result")
         let planDate = try date("2026-08-05", format: "yyyy-MM-dd")
-        try repository.saveToday(date: planDate, tasks: [task], profile: .standard, expectedTasks: [])
+        try repository.saveToday(date: planDate, tasks: [task], profile: .standard, segment: .evening, expectedTasks: [])
         let updated = try String(contentsOf: tasksURL, encoding: .utf8)
         try expect(updated.hasPrefix("# Today - 2026-08-05"), "Current Today heading was not created")
-        try expect(!updated.contains("# Later"), "Later remained in dynamic tasks.md")
-        let dump = try String(contentsOf: temporary.appendingPathComponent("dump.md"), encoding: .utf8)
-        try expect(dump.contains("Keep later exactly."), "Later was not archived in dump.md")
-        try expect(dump.contains("Keep inbox exactly."), "Inbox was not archived in dump.md")
+        try expect(updated.contains("Keep later exactly."), "Later was overwritten")
+        try expect(updated.contains("Keep inbox exactly."), "Inbox was overwritten")
         try expect(updated.contains("refocus:initial-plan"), "Initial plan snapshot missing")
     }
     try check("Planning gate rejects placeholder and blank core tasks") {
@@ -250,14 +255,61 @@ do {
     try check("Late planning minimum shrinks to remaining cycles") {
         let moment = try date("2026-08-05 20:15:00")
         let profile = RoutineProfileResolver(calendar: calendar).profile(for: moment)
-        try expect(PlanValidator().requiredCycles(at: moment, profile: profile, calendar: calendar) == 2, "Expected only 20:30 and 21:00 to remain")
+        try expect(PlanValidator().requiredCycles(at: moment, profile: profile, calendar: calendar) == 3, "Expected the three evening slots through 21:30")
+    }
+    try check("Planning minimums are independent per super-block") {
+        let validator = PlanValidator()
+        let thursdayMorning = try date("2026-08-06 06:00:00")
+        let thursdayAfternoon = try date("2026-08-06 14:00:00")
+        let thursdayEvening = try date("2026-08-06 18:00:00")
+        let profile = RoutineProfileResolver(calendar: calendar).profile(for: thursdayMorning)
+        try expect(validator.requiredCycles(at: thursdayMorning, profile: profile, calendar: calendar) == 4, "Thursday morning should stop at University")
+        try expect(validator.requiredCycles(at: thursdayAfternoon, profile: profile, calendar: calendar) == 6, "Thursday afternoon should count 14:00–17:00")
+        try expect(validator.requiredCycles(at: thursdayEvening, profile: profile, calendar: calendar) == 7, "Evening should use seven cycles")
+        let issues = validator.validate(
+            tasks: FixedPlanTasks.daily(), profile: profile, minimumCycles: 4,
+            countedSegment: .morning
+        )
+        try expect(issues.contains(.insufficientCycles(actual: 0, required: 4)), "Fixed evening cycles leaked into the morning gate")
+    }
+    try check("Task templates round-trip through Markdown") {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-template-check-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let repository = VaultRepository(vaultURL: temporary, calendar: calendar)
+        let template = PlanTask(
+            title: "Five-hour contest", startMinute: 360, cycles: 10, kind: .contest,
+            priority: "Do/Die", difficulty: "Hard", mvp: "Finish the contest",
+            coreTasks: [CoreTask(title: "Setup"), CoreTask(title: "Compete"), CoreTask(title: "Review")]
+        )
+        try repository.saveTemplates([template])
+        let loaded = try repository.loadTemplates()
+        try expect(loaded.count == 1 && loaded[0].title == template.title, "Saved template could not be loaded")
+        try expect(loaded[0].cycles == 10 && loaded[0].kind == .contest, "Template fields changed")
+    }
+    try check("Later saves preserve Initial and refresh Modified snapshots") {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-snapshot-check-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let repository = VaultRepository(vaultURL: temporary, calendar: calendar)
+        let planDate = try date("2026-08-05", format: "yyyy-MM-dd")
+        let morning = PlanTask(title: "Morning initial", startMinute: 360, cycles: 1, mvp: "Initial")
+        try repository.saveToday(date: planDate, tasks: [morning], profile: .standard, segment: .morning, expectedTasks: [])
+        var changed = morning
+        changed.title = "Morning modified"
+        let afternoon = PlanTask(title: "Afternoon", startMinute: 720, cycles: 1, mvp: "Done")
+        try repository.saveToday(date: planDate, tasks: [changed, afternoon], profile: .standard, segment: .afternoon, expectedTasks: [morning])
+        let log = try String(contentsOf: repository.dailyLogURL(for: planDate), encoding: .utf8)
+        try expect(log.contains("Morning initial"), "Immutable morning Initial snapshot changed")
+        try expect(log.contains("Morning modified"), "Morning Modified snapshot was not refreshed")
+        try expect(log.contains("initial-plan-snapshot segment=afternoon"), "Afternoon Initial snapshot missing")
     }
     try check("Daily filename is log/aug-4.md") {
         let repository = VaultRepository(vaultURL: FileManager.default.temporaryDirectory, calendar: calendar)
         let augustFourth = try date("2026-08-04", format: "yyyy-MM-dd")
         try expect(repository.dailyLogURL(for: augustFourth).lastPathComponent == "aug-4.md", "Wrong filename")
     }
-    try check("Repository archives non-Today content and detects same-plan conflicts") {
+    try check("Repository preserves unrelated content and detects same-plan conflicts") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-check-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temporary) }
@@ -287,17 +339,15 @@ do {
         let baseline = try repository.loadToday(date: augustFourth).tasks
         var edited = baseline
         edited[0].mvp = "Edited MVP"
-        try repository.saveToday(date: augustFourth, tasks: edited, profile: .universityLate, expectedTasks: baseline)
+        try repository.saveToday(date: augustFourth, tasks: edited, profile: .universityLate, segment: .evening, expectedTasks: baseline)
         let afterSave = try String(contentsOf: tasksURL, encoding: .utf8)
-        try expect(!afterSave.contains("# Later"), "Later remained in tasks.md")
-        let archived = try String(contentsOf: temporary.appendingPathComponent("dump.md"), encoding: .utf8)
-        try expect(archived.contains("Keep later."), "Later was not archived")
-        try expect(archived.contains("Keep inbox."), "Inbox was not archived")
+        try expect(afterSave.contains("Keep later."), "Later was overwritten")
+        try expect(afterSave.contains("Keep inbox."), "Inbox was overwritten")
 
         let external = afterSave.replacingOccurrences(of: "Edited MVP", with: "External MVP")
         try external.write(to: tasksURL, atomically: true, encoding: .utf8)
         do {
-            try repository.saveToday(date: augustFourth, tasks: edited, profile: .universityLate, expectedTasks: edited)
+            try repository.saveToday(date: augustFourth, tasks: edited, profile: .universityLate, segment: .evening, expectedTasks: edited)
             throw CheckFailure.failed("Expected an external-edit conflict")
         } catch VaultRepositoryError.planConflict {
             // Expected.
@@ -325,17 +375,55 @@ do {
             focusStart: focusStart, focusEnd: focusEnd, whatDid: "Solved one problem", outcome: .complete
         )
         try repository.saveCheckIn(checkIn, date: focusStart, streaks: VaultRepository.defaultStreaks)
-        try repository.updateAutomaticStreaks(date: focusStart)
         let logURL = repository.dailyLogURL(for: focusStart)
         let text = try String(contentsOf: logURL, encoding: .utf8)
         try expect(logURL.lastPathComponent == "aug-4.md", "Daily log filename wrong")
         try expect(text.contains("date: 2026-08-04"), "ISO frontmatter missing")
         try expect(text.contains("What I did → Solved one problem"), "Check-in missing")
-        try expect(text.contains("[x] No missed check-ins"), "Automatic check-in streak missing")
+        try expect(text.contains("state=blank"), "Blank streak state missing")
         let automaticDefinition = VaultRepository.defaultStreaks[2]
-        try repository.setStreakValue(automaticDefinition, completed: false, date: focusStart)
-        let manuallyCleared = try String(contentsOf: logURL, encoding: .utf8)
-        try expect(manuallyCleared.contains("[ ] No missed check-ins"), "Automatic streak could not be manually cleared")
+        try repository.setStreakValue(automaticDefinition, status: .fail, date: focusStart)
+        let manuallyFailed = try String(contentsOf: logURL, encoding: .utf8)
+        try expect(manuallyFailed.contains("state=fail"), "Fail streak state was not saved")
+    }
+    try check("Today check-ins stay above the Tomorrow section") {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-checkin-section-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let repository = VaultRepository(vaultURL: temporary, calendar: calendar)
+        let today = try date("2026-08-06", format: "yyyy-MM-dd")
+        let tomorrow = try date("2026-08-07", format: "yyyy-MM-dd")
+        let task = PlanTask(title: "Work", startMinute: 840, cycles: 1, mvp: "Done")
+        try repository.saveToday(date: today, tasks: [task], profile: .universityEarly, segment: .afternoon, expectedTasks: [])
+        try repository.saveTomorrow(date: tomorrow, tasks: [task], profile: .fridaySSC)
+        let checkIn = CheckIn(
+            id: "20260806-1400", taskID: task.id, taskTitle: task.title,
+            focusStart: try date("2026-08-06 14:00:00"), focusEnd: try date("2026-08-06 14:25:00"),
+            whatDid: "Finished the task"
+        )
+        try repository.saveCheckIn(checkIn, date: today, streaks: VaultRepository.defaultStreaks)
+        let text = try String(contentsOf: repository.tasksURL, encoding: .utf8)
+        let logPosition = try expectIndex("## Screen Break Logs", in: text)
+        let tomorrowPosition = try expectIndex("# Tomorrow - 2026-08-07", in: text)
+        try expect(logPosition < tomorrowPosition, "Today check-in was written beneath Tomorrow")
+    }
+    try check("Rollover archives old Today and promotes prepared Tomorrow") {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-rollover-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let repository = VaultRepository(vaultURL: temporary, calendar: calendar)
+        let oldDate = try date("2026-08-06", format: "yyyy-MM-dd")
+        let newDate = try date("2026-08-07", format: "yyyy-MM-dd")
+        let oldTask = PlanTask(title: "Old work", startMinute: 840, cycles: 1, mvp: "Old result")
+        let prepared = PlanTask(title: "Prepared tomorrow", startMinute: 360, cycles: 1, mvp: "New result")
+        try repository.saveToday(date: oldDate, tasks: [oldTask], profile: .universityEarly, segment: .afternoon, expectedTasks: [])
+        try repository.saveTomorrow(date: newDate, tasks: [prepared], profile: .fridaySSC)
+        try repository.saveToday(date: newDate, tasks: [prepared], profile: .fridaySSC, segment: .morning, expectedTasks: [])
+        let tasks = try String(contentsOf: repository.tasksURL, encoding: .utf8)
+        try expect(!tasks.contains("# Today - 2026-08-06"), "Stale Today remained after rollover")
+        try expect(tasks.contains("# Today - 2026-08-07"), "Prepared Tomorrow was not promoted")
+        let oldLog = try String(contentsOf: repository.dailyLogURL(for: oldDate), encoding: .utf8)
+        try expect(oldLog.contains("Old work"), "Old Today was not archived in its daily log")
     }
     print("\nAll \(checks) ReFocus core checks passed.")
 } catch {
