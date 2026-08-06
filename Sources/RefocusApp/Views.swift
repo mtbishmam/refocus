@@ -70,11 +70,7 @@ struct DashboardView: View {
             .labelsHidden()
             .frame(width: 480)
             .padding(.top, 16)
-            .padding(.bottom, 8)
-
-            QuickNoteBar()
-                .padding(.horizontal, 16)
-                .padding(.bottom, 8)
+            .padding(.bottom, 12)
 
             Group {
                 switch selectedTab {
@@ -86,6 +82,11 @@ struct DashboardView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            QuickNoteBar()
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                .padding(.bottom, 12)
         }
         .background(dashboardBackground)
         .frame(minWidth: 860, minHeight: 620)
@@ -631,9 +632,24 @@ private enum AgendaRange: String, CaseIterable, Identifiable {
     var id: Self { self }
 }
 
+private enum AgendaPriority: String, CaseIterable, Identifiable {
+    case all = "All Priorities"
+    case doDie = "Do/Die"
+    case high = "High"
+    case medium = "Medium"
+    case low = "Low"
+
+    var id: Self { self }
+
+    func includes(_ task: PlanTask) -> Bool {
+        self == .all || task.priority == rawValue
+    }
+}
+
 struct AgendaView: View {
     @EnvironmentObject private var model: AppModel
     @State private var range: AgendaRange = .month
+    @State private var priority: AgendaPriority = .all
     @State private var showingAdd = false
 
     private var entries: [AgendaTask] {
@@ -648,6 +664,8 @@ struct AgendaView: View {
         let tomorrowEntries = model.tomorrowTasks.map { AgendaTask(date: model.tomorrowDate, task: $0) }
         let liveIDs = Set((todayEntries + tomorrowEntries).map(\.id))
         return (todayEntries + tomorrowEntries + model.agendaTasks.filter { !liveIDs.contains($0.id) })
+            .filter { $0.task.fixedRole == nil }
+            .filter { priority.includes($0.task) }
             .filter { futureLimit == nil || $0.date < futureLimit! }
             .sorted {
                 if $0.date != $1.date { return $0.date < $1.date }
@@ -671,6 +689,11 @@ struct AgendaView: View {
                 Picker("Range", selection: $range) {
                     ForEach(AgendaRange.allCases) { Text($0.rawValue).tag($0) }
                 }.pickerStyle(.segmented).frame(width: 260)
+                Picker("Priority", selection: $priority) {
+                    ForEach(AgendaPriority.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.menu)
+                .frame(width: 145)
                 Button("Add Scheduled Task") { showingAdd = true }
                 Button {
                     model.toggleAllTasksCollapsed(entries.map(\.task))
