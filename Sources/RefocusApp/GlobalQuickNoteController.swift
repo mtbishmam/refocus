@@ -88,8 +88,17 @@ final class GlobalQuickNoteController {
             .preferredColorScheme(.dark)
         )
         position(panel)
-        NSApp.activate(ignoringOtherApps: true)
+        panel.orderFrontRegardless()
+        NSApp.activate()
         panel.makeKeyAndOrderFront(nil)
+        // The global key-down event is still being dispatched while this runs.
+        // Repeat activation just after it finishes so the previous application
+        // cannot reclaim keyboard focus from the capture field.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak panel] in
+            guard let panel, panel.isVisible else { return }
+            NSApp.activate()
+            panel.makeKeyAndOrderFront(nil)
+        }
     }
 
     private func makePanel() -> QuickNotePanel {

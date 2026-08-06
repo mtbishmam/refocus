@@ -684,7 +684,9 @@ struct AgendaView: View {
             HStack {
                 VStack(alignment: .leading) {
                     Text("Agenda").font(.largeTitle.bold())
-                    Text("Today and scheduled work").foregroundStyle(.secondary)
+                    Text("Work overview")
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
                 Spacer()
                 Picker("Range", selection: $range) {
