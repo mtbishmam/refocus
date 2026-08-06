@@ -14,6 +14,7 @@ final class AppModel: ObservableObject {
     private(set) var now = Date()
     let clockDisplay = ClockDisplay()
     @Published var tasks: [PlanTask] = []
+    @Published var agendaTasks: [AgendaTask] = []
     @Published var planMessage = "Choose your Obsidian vault."
     @Published var validationIssues: [PlanValidationIssue] = []
     @Published var dayProfile = RoutineProfileResolver().profile(for: Date())
@@ -32,6 +33,9 @@ final class AppModel: ObservableObject {
     @Published var isSavingPlan = false
     @Published var isEditingPlan = true
     @Published private(set) var hasPersistedToday = false
+    @Published private(set) var hasInitialPlan = false
+    @Published var collapsedTaskIDs: Set<UUID> = []
+    @Published var showCompletedSubtasks = false
 
     private let clock = WallClock()
     private let resolver = RoutineProfileResolver()
@@ -91,15 +95,15 @@ final class AppModel: ObservableObject {
     var planIsCurrent: Bool { planMessage == "Today is planned." || !tasks.isEmpty }
 
     var isPlanReady: Bool {
-        validator.validate(tasks: tasks, profile: dayProfile, minimumCycles: requiredCycleMinimum).isEmpty
+        blockingIssues(in: validator.validate(tasks: tasks, profile: dayProfile, minimumCycles: requiredCycleMinimum)).isEmpty
     }
 
     var isPlanCommitted: Bool {
-        hasPersistedToday && validator.validate(
+        hasPersistedToday && blockingIssues(in: validator.validate(
             tasks: baselineTasks,
             profile: dayProfile,
             minimumCycles: requiredCycleMinimum
-        ).isEmpty
+        )).isEmpty
     }
 
     var executionTasks: [PlanTask] {
@@ -108,6 +112,18 @@ final class AppModel: ObservableObject {
 
     var executionCycleSummaryText: String {
         "\(executionTasks.reduce(0) { $0 + $1.cycles }) planned · \(requiredCycleMinimum) required now"
+    }
+
+    var agendaValidationIssues: [PlanValidationIssue] {
+        let groups = Dictionary(grouping: agendaTasks) { WallClock.dhakaCalendar().startOfDay(for: $0.date) }
+        return groups.flatMap { date, entries in
+            validator.validate(
+                tasks: entries.map(\.task),
+                profile: resolver.profile(for: date),
+                minimumCycles: 0,
+                requireFixedTasks: false
+            )
+        }
     }
 
     var planGateMessage: String {
@@ -173,34 +189,44 @@ final class AppModel: ObservableObject {
             let streakResult: Result<[StreakDefinition], Error>
             do { streakResult = .success(try await worker.loadStreakDefinitions()) }
             catch { streakResult = .failure(error) }
+            let agendaResult = (try? await worker.loadAgenda()) ?? []
 
             self.dayProfile = self.resolver.profile(for: date)
             self.requiredCycleMinimum = self.validator.requiredCycles(at: date, profile: self.dayProfile)
             switch planResult {
             case .success(let plan):
                 self.hasPersistedToday = true
-                self.tasks = plan.tasks
+                self.hasInitialPlan = plan.hasInitialPlan
+                let normalized = self.withRecurringFixedTasks(plan.tasks)
+                self.tasks = normalized
                 self.baselineTasks = plan.tasks
                 let issues = self.validator.validate(
-                    tasks: plan.tasks,
+                    tasks: normalized,
                     profile: self.dayProfile,
                     minimumCycles: self.requiredCycleMinimum
                 )
                 self.validationIssues = issues
-                self.planMessage = issues.isEmpty ? "Today is planned." : "Today plan is incomplete."
-                self.isArmed = issues.isEmpty
-                self.planIsDirty = false
-                self.isEditingPlan = issues.isEmpty ? self.userRequestedEditing : true
+                let blockers = self.blockingIssues(in: issues)
+                self.planMessage = blockers.isEmpty ? "Today is planned." : "Today plan is incomplete."
+                self.isArmed = blockers.isEmpty
+                self.planIsDirty = normalized != plan.tasks
+                self.isEditingPlan = normalized != plan.tasks || (blockers.isEmpty ? self.userRequestedEditing : true)
             case .failure:
                 self.hasPersistedToday = false
-                self.tasks = []
+                self.hasInitialPlan = false
+                self.tasks = FixedPlanTasks.daily()
                 self.baselineTasks = []
-                self.validationIssues = []
+                self.validationIssues = self.validator.validate(
+                    tasks: self.tasks,
+                    profile: self.dayProfile,
+                    minimumCycles: self.requiredCycleMinimum
+                )
                 self.planMessage = "Today has not been planned."
                 self.isArmed = false
-                self.planIsDirty = false
+                self.planIsDirty = true
                 self.isEditingPlan = true
             }
+            self.agendaTasks = agendaResult.sorted(by: self.agendaSort)
             switch streakResult {
             case .success(let definitions): self.streakDefinitions = definitions
             case .failure: self.streakDefinitions = VaultRepository.defaultStreaks
@@ -211,13 +237,25 @@ final class AppModel: ObservableObject {
 
     func savePlan() {
         guard let worker, !isSavingPlan else { return }
+        // Yellow routine conflicts are an explicit per-day override. Saving
+        // acknowledges them and records that choice in Markdown.
+        let warningTaskIDs = Set(validationIssues.compactMap { issue -> UUID? in
+            if case .routineConflict(let id, _, _, _, _) = issue { return id }
+            return nil
+        })
+        if !warningTaskIDs.isEmpty {
+            for index in tasks.indices where warningTaskIDs.contains(tasks[index].id) {
+                tasks[index].routineOverride = true
+            }
+        }
+        tasks.sort { $0.startMinute < $1.startMinute }
         let date = now
         let profile = dayProfile
         let planTasks = tasks
         let expectedTasks = baselineTasks
         let issues = validator.validate(tasks: tasks, profile: profile, minimumCycles: requiredCycleMinimum)
         validationIssues = issues
-        guard issues.isEmpty else {
+        guard blockingIssues(in: issues).isEmpty else {
             errorMessage = planGateMessage
             return
         }
@@ -243,6 +281,7 @@ final class AppModel: ObservableObject {
             // must never make a successfully saved plan look unsaved.
             self.baselineTasks = planTasks
             self.hasPersistedToday = true
+            self.hasInitialPlan = true
             self.planIsDirty = false
             self.planMessage = "Today is planned."
             self.isArmed = true
@@ -270,7 +309,10 @@ final class AppModel: ObservableObject {
         isEditingPlan = true
         let currentCycleStart = clock.minuteOfDay(for: snapshot.cycleStart)
         let nextStart = max(360, currentCycleStart, tasks.map(\.endMinute).max() ?? currentCycleStart)
-        tasks.append(PlanTask(title: "New task", startMinute: nextStart, cycles: 1, mvp: ""))
+        tasks.append(PlanTask(
+            title: "New task", startMinute: nextStart, cycles: 1, mvp: "",
+            coreTasks: [CoreTask(title: ""), CoreTask(title: ""), CoreTask(title: "")]
+        ))
         markPlanDirty()
     }
 
@@ -280,7 +322,7 @@ final class AppModel: ObservableObject {
     }
 
     func removeTask(id: UUID) {
-        tasks.removeAll { $0.id == id }
+        tasks.removeAll { $0.id == id && $0.fixedRole == nil }
         markPlanDirty()
     }
 
@@ -327,12 +369,7 @@ final class AppModel: ObservableObject {
 
     func normalizeCoreTasks(for taskIndex: Int) {
         guard tasks.indices.contains(taskIndex) else { return }
-        if tasks[taskIndex].cycles > 1 {
-            while tasks[taskIndex].coreTasks.count < 3 { tasks[taskIndex].coreTasks.append(CoreTask(title: "")) }
-            if tasks[taskIndex].coreTasks.count > 3 { tasks[taskIndex].coreTasks = Array(tasks[taskIndex].coreTasks.prefix(3)) }
-        } else {
-            tasks[taskIndex].coreTasks = []
-        }
+        while tasks[taskIndex].coreTasks.count < 3 { tasks[taskIndex].coreTasks.append(CoreTask(title: "")) }
         markPlanDirty()
     }
 
@@ -345,6 +382,9 @@ final class AppModel: ObservableObject {
         // SwiftUI row changes also fire when a plan is reloaded from disk.
         // Compare against the loaded baseline so programmatic refreshes never
         // turn a saved plan back into a blocking, dirty plan.
+        tasks.sort { lhs, rhs in
+            lhs.startMinute == rhs.startMinute ? lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending : lhs.startMinute < rhs.startMinute
+        }
         let isActuallyDirty = tasks != baselineTasks
         if isActuallyDirty != planIsDirty { planIsDirty = isActuallyDirty }
         let issues = validator.validate(tasks: tasks, profile: dayProfile, minimumCycles: requiredCycleMinimum)
@@ -353,6 +393,139 @@ final class AppModel: ObservableObject {
             isArmed = true
         } else if isActuallyDirty || !issues.isEmpty {
             isArmed = false
+        }
+    }
+
+    func addSubtask(to taskID: UUID) {
+        guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { return }
+        tasks[index].coreTasks.append(CoreTask(title: ""))
+        markPlanDirty()
+    }
+
+    func removeSubtask(taskID: UUID, subtaskID: UUID) {
+        guard let index = tasks.firstIndex(where: { $0.id == taskID }), tasks[index].coreTasks.count > 3 else { return }
+        tasks[index].coreTasks.removeAll { $0.id == subtaskID }
+        markPlanDirty()
+    }
+
+    func toggleCollapsed(_ taskID: UUID) {
+        if collapsedTaskIDs.contains(taskID) { collapsedTaskIDs.remove(taskID) } else { collapsedTaskIDs.insert(taskID) }
+    }
+
+    func setAllTasksCollapsed(_ collapsed: Bool) {
+        collapsedTaskIDs = collapsed ? Set((tasks + agendaTasks.map(\.task)).map(\.id)) : []
+    }
+
+    func toggleTaskCompletion(_ taskID: UUID) {
+        guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { return }
+        tasks[index].isComplete.toggle()
+        markPlanDirty()
+        savePlan()
+    }
+
+    func toggleSubtaskCompletion(taskID: UUID, subtaskID: UUID) {
+        guard let taskIndex = tasks.firstIndex(where: { $0.id == taskID }),
+              let subtaskIndex = tasks[taskIndex].coreTasks.firstIndex(where: { $0.id == subtaskID }) else { return }
+        tasks[taskIndex].coreTasks[subtaskIndex].isComplete.toggle()
+        markPlanDirty()
+        savePlan()
+    }
+
+    func rescheduleTask(_ taskID: UUID, to date: Date) {
+        guard let worker,
+              let index = tasks.firstIndex(where: { $0.id == taskID }),
+              !tasks[index].isComplete,
+              tasks[index].fixedRole == nil else { return }
+        var rescheduledTask = tasks[index]
+        rescheduledTask.routineOverride = false
+        let sameDay = agendaTasks.filter { WallClock.dhakaCalendar().isDate($0.date, inSameDayAs: date) }.map(\.task) + [rescheduledTask]
+        let destinationIssues = validator.validate(
+            tasks: sameDay, profile: resolver.profile(for: date), minimumCycles: 0, requireFixedTasks: false
+        )
+        let blockers = destinationIssues.filter { $0.severity == .error }
+        guard blockers.isEmpty else {
+            errorMessage = blockers.map(\.description).joined(separator: "\n")
+            return
+        }
+        if destinationIssues.contains(where: { $0.severity == .warning }) { rescheduledTask.routineOverride = true }
+        tasks.remove(at: index)
+        let moved = AgendaTask(date: WallClock.dhakaCalendar().startOfDay(for: date), task: rescheduledTask)
+        agendaTasks.append(moved)
+        agendaTasks.sort(by: agendaSort)
+        markPlanDirty()
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await worker.saveAgenda(self.agendaTasks)
+                self.savePlan()
+            } catch {
+                self.errorMessage = "Could not reschedule task: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func moveAgendaTask(_ taskID: UUID, to date: Date) {
+        guard let worker, let index = agendaTasks.firstIndex(where: { $0.id == taskID }) else { return }
+        var movedTask = agendaTasks[index].task
+        movedTask.routineOverride = false
+        let sameDay = agendaTasks.filter {
+            $0.id != taskID && WallClock.dhakaCalendar().isDate($0.date, inSameDayAs: date)
+        }.map(\.task) + [movedTask]
+        let issues = validator.validate(
+            tasks: sameDay, profile: resolver.profile(for: date), minimumCycles: 0, requireFixedTasks: false
+        )
+        let blockers = issues.filter { $0.severity == .error }
+        guard blockers.isEmpty else {
+            errorMessage = blockers.map(\.description).joined(separator: "\n")
+            return
+        }
+        if issues.contains(where: { $0.severity == .warning }) { movedTask.routineOverride = true }
+        agendaTasks[index].task = movedTask
+        agendaTasks[index].date = WallClock.dhakaCalendar().startOfDay(for: date)
+        agendaTasks.sort(by: agendaSort)
+        Task { [weak self] in
+            guard let self else { return }
+            do { try await worker.saveAgenda(self.agendaTasks) }
+            catch { self.errorMessage = "Could not move agenda task: \(error.localizedDescription)" }
+        }
+    }
+
+    func addAgendaTask(_ task: PlanTask, on date: Date) {
+        guard let worker else { return }
+        var scheduledTask = task
+        scheduledTask.routineOverride = false
+        var entry = AgendaTask(date: WallClock.dhakaCalendar().startOfDay(for: date), task: scheduledTask)
+        let sameDay = (agendaTasks + [entry]).filter { WallClock.dhakaCalendar().isDate($0.date, inSameDayAs: date) }.map(\.task)
+        let issues = validator.validate(
+            tasks: sameDay,
+            profile: resolver.profile(for: date),
+            minimumCycles: 0,
+            requireFixedTasks: false
+        )
+        let blockers = issues.filter { $0.severity == .error }
+        guard blockers.isEmpty else {
+            errorMessage = blockers.map(\.description).joined(separator: "\n")
+            return
+        }
+        if issues.contains(where: { $0.severity == .warning }) {
+            scheduledTask.routineOverride = true
+            entry.task = scheduledTask
+        }
+        agendaTasks = (agendaTasks + [entry]).sorted(by: agendaSort)
+        Task { [weak self] in
+            guard let self else { return }
+            do { try await worker.saveAgenda(self.agendaTasks) }
+            catch { self.errorMessage = "Could not add scheduled task: \(error.localizedDescription)" }
+        }
+    }
+
+    func toggleAgendaTaskCompletion(_ taskID: UUID) {
+        guard let worker, let index = agendaTasks.firstIndex(where: { $0.id == taskID }) else { return }
+        agendaTasks[index].task.isComplete.toggle()
+        Task { [weak self] in
+            guard let self else { return }
+            do { try await worker.saveAgenda(self.agendaTasks) }
+            catch { self.errorMessage = "Could not update agenda task: \(error.localizedDescription)" }
         }
     }
 
@@ -493,6 +666,53 @@ final class AppModel: ObservableObject {
             }
             cursor = tasks[index].endMinute
         }
+    }
+
+    private func blockingIssues(in issues: [PlanValidationIssue]) -> [PlanValidationIssue] {
+        issues.filter(isBlocking)
+    }
+
+    func isBlocking(_ issue: PlanValidationIssue) -> Bool {
+        if issue.severity == .warning { return false }
+        if hasInitialPlan, case .insufficientCycles = issue { return false }
+        return true
+    }
+
+    private func withRecurringFixedTasks(_ existing: [PlanTask]) -> [PlanTask] {
+        var result = existing
+        for fixed in FixedPlanTasks.daily() {
+            if let index = result.firstIndex(where: {
+                if $0.fixedRole == fixed.fixedRole || $0.title.caseInsensitiveCompare(fixed.title) == .orderedSame { return true }
+                switch fixed.fixedRole {
+                case .dayAnalysis: return $0.startMinute == 1200 && $0.title.localizedCaseInsensitiveContains("day analysis")
+                case .planTomorrow: return $0.startMinute == 1230 && $0.title.localizedCaseInsensitiveContains("plan tomorrow")
+                case .revision: return $0.startMinute == 1260 && $0.title.localizedCaseInsensitiveContains("revision")
+                case nil: return false
+                }
+            }) {
+                result[index].fixedRole = fixed.fixedRole
+                result[index].title = fixed.title
+                result[index].startMinute = fixed.startMinute
+                if fixed.fixedRole != .planTomorrow { result[index].cycles = 1 }
+                if result[index].mvp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { result[index].mvp = fixed.mvp }
+                for subtask in fixed.coreTasks where !result[index].coreTasks.contains(where: {
+                    $0.title.caseInsensitiveCompare(subtask.title) == .orderedSame
+                }) {
+                    result[index].coreTasks.append(subtask)
+                }
+                while result[index].coreTasks.count < 3 {
+                    result[index].coreTasks.append(fixed.coreTasks[result[index].coreTasks.count])
+                }
+            } else {
+                result.append(fixed)
+            }
+        }
+        return result.sorted(by: { $0.startMinute < $1.startMinute })
+    }
+
+    private func agendaSort(_ lhs: AgendaTask, _ rhs: AgendaTask) -> Bool {
+        if lhs.date != rhs.date { return lhs.date < rhs.date }
+        return lhs.task.startMinute < rhs.task.startMinute
     }
 
     private func sessionID(for cycleStart: Date) -> String {

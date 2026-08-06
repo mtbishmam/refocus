@@ -16,6 +16,14 @@ actor VaultWorker {
         try repository.loadStreakDefinitions()
     }
 
+    func loadAgenda() throws -> [AgendaTask] {
+        try repository.loadAgenda()
+    }
+
+    func saveAgenda(_ tasks: [AgendaTask]) throws {
+        try repository.saveAgenda(tasks)
+    }
+
     func saveToday(
         date: Date,
         tasks: [PlanTask],

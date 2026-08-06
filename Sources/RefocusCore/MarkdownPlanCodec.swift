@@ -36,7 +36,20 @@ public struct MarkdownPlanCodec: Sendable {
         }
         let section = String(markdown[sectionStart..<sectionEnd])
         let profile = parseProfile(section) ?? RoutineProfileResolver(calendar: calendar).profile(for: date).kind
-        return TodayPlan(date: date, profile: profile, tasks: parseTasks(section), isCurrent: true)
+        let currentPlanSection: String
+        if let start = section.range(of: "<!-- refocus:plan"),
+           let end = section.range(of: "<!-- /refocus:plan -->", range: start.lowerBound..<section.endIndex) {
+            currentPlanSection = String(section[start.lowerBound..<end.upperBound])
+        } else {
+            currentPlanSection = section
+        }
+        return TodayPlan(
+            date: date,
+            profile: profile,
+            tasks: parseTasks(currentPlanSection),
+            isCurrent: true,
+            hasInitialPlan: section.contains("<!-- refocus:initial-plan")
+        )
     }
 
     public func renderManagedBlock(tasks: [PlanTask], profile: DayProfileKind) -> String {
@@ -45,10 +58,13 @@ public struct MarkdownPlanCodec: Sendable {
             if index > 0 { lines.append("") }
             let checkbox = task.isComplete ? "x" : " "
             lines.append("- [\(checkbox)] \(Self.time(task.startMinute))–\(Self.time(task.endMinute)) → \(task.title)")
-            lines.append("  <!-- refocus:task id=\(task.id.uuidString.lowercased()) start=\(Self.time(task.startMinute)) cycles=\(task.cycles) kind=\(task.kind.rawValue) priority=\(task.priority) difficulty=\(task.difficulty) -->")
+            var metadata = "  <!-- refocus:task id=\(task.id.uuidString.lowercased()) start=\(Self.time(task.startMinute)) cycles=\(task.cycles) kind=\(task.kind.rawValue) priority=\(task.priority) difficulty=\(task.difficulty)"
+            if let fixedRole = task.fixedRole { metadata += " fixed=\(fixedRole.rawValue)" }
+            if task.routineOverride { metadata += " routineOverride=true" }
+            lines.append(metadata + " -->")
             lines.append("  - MVP → \(task.mvp)")
-            if task.cycles > 1 || !task.coreTasks.isEmpty {
-                lines.append("  - Core tasks")
+            if !task.coreTasks.isEmpty {
+                lines.append("  - Subtasks")
                 for (offset, core) in task.coreTasks.enumerated() {
                     lines.append("    \(offset + 1). [\(core.isComplete ? "x" : " ")] \(core.title)")
                 }
@@ -56,6 +72,12 @@ public struct MarkdownPlanCodec: Sendable {
         }
         lines.append("<!-- /refocus:plan -->")
         return lines.joined(separator: "\n")
+    }
+
+    public func renderInitialBlock(tasks: [PlanTask], profile: DayProfileKind) -> String {
+        renderManagedBlock(tasks: tasks, profile: profile)
+            .replacingOccurrences(of: "<!-- refocus:plan v=1", with: "<!-- refocus:initial-plan v=1")
+            .replacingOccurrences(of: "<!-- /refocus:plan -->", with: "<!-- /refocus:initial-plan -->")
     }
 
     public func replacingTodayBlock(
@@ -115,6 +137,8 @@ public struct MarkdownPlanCodec: Sendable {
             // single modern contest kind and rewrite it as `contest` on save.
             let kindText = values["kind"]
             let kind = kindText == "sscContest" ? .contest : kindText.flatMap(TaskKind.init(rawValue:)) ?? .normal
+            let fixedRole = values["fixed"].flatMap(FixedTaskRole.init(rawValue:))
+            let routineOverride = values["routineOverride"] == "true"
             let mvp = block.compactMap { line -> String? in
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 guard trimmed.hasPrefix("- MVP →") else { return nil }
@@ -131,7 +155,9 @@ public struct MarkdownPlanCodec: Sendable {
                 difficulty: values["difficulty"] ?? "Moderate",
                 mvp: mvp,
                 coreTasks: cores,
-                isComplete: header.complete
+                isComplete: header.complete,
+                fixedRole: fixedRole,
+                routineOverride: routineOverride
             ))
             index = end
         }

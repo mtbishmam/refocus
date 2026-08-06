@@ -5,6 +5,12 @@ public enum TaskKind: String, Codable, CaseIterable, Sendable {
     case contest
 }
 
+public enum FixedTaskRole: String, Codable, CaseIterable, Sendable {
+    case dayAnalysis
+    case planTomorrow
+    case revision
+}
+
 public enum DayProfileKind: String, Codable, CaseIterable, Sendable {
     case standard
     case universityEarly = "university-early"
@@ -41,6 +47,8 @@ public struct PlanTask: Identifiable, Codable, Equatable, Sendable {
     public var mvp: String
     public var coreTasks: [CoreTask]
     public var isComplete: Bool
+    public var fixedRole: FixedTaskRole?
+    public var routineOverride: Bool
 
     public init(
         id: UUID = UUID(),
@@ -52,7 +60,9 @@ public struct PlanTask: Identifiable, Codable, Equatable, Sendable {
         difficulty: String = "Moderate",
         mvp: String = "",
         coreTasks: [CoreTask] = [],
-        isComplete: Bool = false
+        isComplete: Bool = false,
+        fixedRole: FixedTaskRole? = nil,
+        routineOverride: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -64,6 +74,8 @@ public struct PlanTask: Identifiable, Codable, Equatable, Sendable {
         self.mvp = mvp
         self.coreTasks = coreTasks
         self.isComplete = isComplete
+        self.fixedRole = fixedRole
+        self.routineOverride = routineOverride
     }
 
     public var endMinute: Int { startMinute + cycles * 30 }
@@ -78,12 +90,31 @@ public struct TodayPlan: Equatable, Sendable {
     public var profile: DayProfileKind
     public var tasks: [PlanTask]
     public var isCurrent: Bool
+    public var hasInitialPlan: Bool
 
-    public init(date: Date, profile: DayProfileKind, tasks: [PlanTask], isCurrent: Bool = true) {
+    public init(
+        date: Date,
+        profile: DayProfileKind,
+        tasks: [PlanTask],
+        isCurrent: Bool = true,
+        hasInitialPlan: Bool = false
+    ) {
         self.date = date
         self.profile = profile
         self.tasks = tasks
         self.isCurrent = isCurrent
+        self.hasInitialPlan = hasInitialPlan
+    }
+}
+
+public struct AgendaTask: Identifiable, Equatable, Sendable {
+    public var id: UUID { task.id }
+    public var date: Date
+    public var task: PlanTask
+
+    public init(date: Date, task: PlanTask) {
+        self.date = date
+        self.task = task
     }
 }
 
@@ -185,6 +216,11 @@ public struct StreakSummary: Identifiable, Equatable, Sendable {
     }
 }
 
+public enum ValidationSeverity: String, Sendable {
+    case error
+    case warning
+}
+
 public enum PlanValidationIssue: Equatable, Sendable, CustomStringConvertible {
     case insufficientCycles(actual: Int, required: Int)
     case missingTaskTitle
@@ -193,11 +229,21 @@ public enum PlanValidationIssue: Equatable, Sendable, CustomStringConvertible {
     case invalidPriority(task: String)
     case invalidDifficulty(task: String)
     case missingMVP(task: String)
-    case wrongCoreTaskCount(task: String)
+    case tooFewSubtasks(task: String)
     case emptyCoreTask(task: String)
     case overlap(first: String, second: String)
-    case blockedTime(task: String)
+    case routineConflict(taskID: UUID, task: String, reason: String, startMinute: Int, endMinute: Int)
+    case hardRest(task: String, startMinute: Int, endMinute: Int)
     case afterSleepCutoff(task: String)
+    case missingFixedTask(name: String)
+    case invalidFixedTask(name: String, requirement: String)
+
+    public var severity: ValidationSeverity {
+        switch self {
+        case .routineConflict: .warning
+        default: .error
+        }
+    }
 
     public var description: String {
         switch self {
@@ -208,11 +254,20 @@ public enum PlanValidationIssue: Equatable, Sendable, CustomStringConvertible {
         case .invalidPriority(let task): return "\(task) needs a valid priority."
         case .invalidDifficulty(let task): return "\(task) needs a valid difficulty."
         case .missingMVP(let task): return "\(task) needs a concrete MVP."
-        case .wrongCoreTaskCount(let task): return "\(task) needs exactly three core tasks."
-        case .emptyCoreTask(let task): return "\(task) needs three named core tasks."
+        case .tooFewSubtasks(let task): return "\(task) needs at least three subtasks."
+        case .emptyCoreTask(let task): return "\(task) cannot contain an unnamed subtask."
         case .overlap(let first, let second): return "\(first) overlaps \(second)."
-        case .blockedTime(let task): return "\(task) overlaps a protected routine exception."
+        case .routineConflict(_, let task, let reason, let start, let end):
+            return "\(task) overlaps \(Self.time(start))–\(Self.time(end)), protected for \(reason). You can override it for today."
+        case .hardRest(let task, let start, let end):
+            return "\(task) overlaps the non-overridable \(Self.time(start))–\(Self.time(end)) Rest Block."
         case .afterSleepCutoff(let task): return "\(task) runs after the 9:30 PM cutoff."
+        case .missingFixedTask(let name): return "The fixed daily block \(name) is missing."
+        case .invalidFixedTask(let name, let requirement): return "\(name) must \(requirement)."
         }
+    }
+
+    private static func time(_ minute: Int) -> String {
+        String(format: "%02d:%02d", minute / 60, minute % 60)
     }
 }

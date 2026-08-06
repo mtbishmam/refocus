@@ -92,7 +92,11 @@ do {
         )
         let overlapping = PlanTask(title: "Bad task", startMinute: 750, cycles: 1, mvp: "Finish")
         let issues = PlanValidator().validate(tasks: [contest, overlapping], profile: profile)
-        try expect(issues.contains(.blockedTime(task: "Bad task")), "University overlap not found")
+        try expect(issues.contains(where: {
+            if case .routineConflict(_, "Bad task", "University", 750, 1020) = $0 { return true }
+            return false
+        }), "University overlap not found")
+        try expect(issues.contains(where: { $0.severity == .warning }), "University overlap was not overridable")
         try expect(!issues.contains(.invalidContest(task: "Codeforces contest")), "Flexible contest was rejected")
     }
     try check("Today parser ignores Later") {
@@ -138,7 +142,35 @@ do {
         try expect(updated.contains("18:00–18:30 → Task"), "Task not rendered")
         try expect(!updated.contains("Completion →"), "Legacy Completion field rendered")
     }
-    try check("First plan creates Today without overwriting other sections") {
+    try check("Initial and modified plans remain distinct") {
+        let planDate = try date("2026-08-06", format: "yyyy-MM-dd")
+        let codec = MarkdownPlanCodec(calendar: calendar)
+        let initial = PlanTask(
+            title: "Initial", startMinute: 840, cycles: 1, mvp: "Initial result",
+            coreTasks: [CoreTask(title: "One"), CoreTask(title: "Two"), CoreTask(title: "Three")]
+        )
+        let modified = PlanTask(
+            title: "Modified", startMinute: 870, cycles: 1, mvp: "Modified result",
+            coreTasks: [CoreTask(title: "One"), CoreTask(title: "Two"), CoreTask(title: "Three")]
+        )
+        let markdown = "# Today - 2026-08-06\n\n\(codec.renderInitialBlock(tasks: [initial], profile: .universityEarly))\n\n\(codec.renderManagedBlock(tasks: [modified], profile: .universityEarly))"
+        let parsed = try codec.parseToday(markdown, date: planDate)
+        try expect(parsed.hasInitialPlan, "Initial plan marker was not detected")
+        try expect(parsed.tasks.map(\.title) == ["Modified"], "Initial plan leaked into the live plan")
+    }
+    try check("Agenda Markdown round-trips future tasks") {
+        let futureDate = try date("2026-08-27", format: "yyyy-MM-dd")
+        let task = PlanTask(
+            title: "MAT120 Exam", startMinute: 1020, cycles: 3, priority: "Do/Die", difficulty: "Hard",
+            mvp: "Complete the exam", coreTasks: [CoreTask(title: "Arrive"), CoreTask(title: "Solve"), CoreTask(title: "Review")]
+        )
+        let codec = AgendaMarkdownCodec(calendar: calendar)
+        let rendered = codec.render([AgendaTask(date: futureDate, task: task)])
+        let parsed = codec.parse(rendered)
+        try expect(parsed.count == 1 && parsed[0].task.title == "MAT120 Exam", "Agenda task did not round-trip")
+        try expect(MarkdownPlanCodec.isoDate(parsed[0].date, calendar: calendar) == "2026-08-27", "Agenda date changed")
+    }
+    try check("First plan makes tasks.md Today-only and archives old sections") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-first-plan-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temporary) }
@@ -157,8 +189,11 @@ do {
         try repository.saveToday(date: planDate, tasks: [task], profile: .standard, expectedTasks: [])
         let updated = try String(contentsOf: tasksURL, encoding: .utf8)
         try expect(updated.hasPrefix("# Today - 2026-08-05"), "Current Today heading was not created")
-        try expect(updated.contains("Keep later exactly."), "Later was overwritten")
-        try expect(updated.contains("Keep inbox exactly."), "Inbox was overwritten")
+        try expect(!updated.contains("# Later"), "Later remained in dynamic tasks.md")
+        let dump = try String(contentsOf: temporary.appendingPathComponent("dump.md"), encoding: .utf8)
+        try expect(dump.contains("Keep later exactly."), "Later was not archived in dump.md")
+        try expect(dump.contains("Keep inbox exactly."), "Inbox was not archived in dump.md")
+        try expect(updated.contains("refocus:initial-plan"), "Initial plan snapshot missing")
     }
     try check("Planning gate rejects placeholder and blank core tasks") {
         let profile = RoutineProfileResolver(calendar: calendar).profile(for: try date("2026-08-05", format: "yyyy-MM-dd"))
@@ -169,6 +204,32 @@ do {
         let issues = PlanValidator().validate(tasks: [placeholder], profile: profile)
         try expect(issues.contains(.missingTaskTitle), "Placeholder task name was accepted")
         try expect(issues.contains(.emptyCoreTask(task: "New task")), "Blank core task was accepted")
+    }
+    try check("Hard rest blocks are red and cannot be overridden") {
+        let profile = RoutineProfileResolver(calendar: calendar).profile(for: try date("2026-08-06", format: "yyyy-MM-dd"))
+        let task = PlanTask(
+            title: "Rest collision", startMinute: 660, cycles: 1, mvp: "Done",
+            coreTasks: [CoreTask(title: "One"), CoreTask(title: "Two"), CoreTask(title: "Three")],
+            routineOverride: true
+        )
+        let issues = PlanValidator().validate(tasks: [task] + FixedPlanTasks.daily(), profile: profile, minimumCycles: 0)
+        try expect(issues.contains(.hardRest(task: "Rest collision", startMinute: 660, endMinute: 720)), "11:00–12:00 rest collision missing")
+        try expect(issues.first(where: {
+            if case .hardRest = $0 { return true }; return false
+        })?.severity == .error, "Hard rest was not red")
+    }
+    try check("Fixed evening blocks and flexible subtasks validate") {
+        var tasks = FixedPlanTasks.daily()
+        tasks[1].cycles = 2
+        tasks[1].coreTasks.append(CoreTask(title: "Call family"))
+        let profile = RoutineProfileResolver(calendar: calendar).profile(for: try date("2026-08-06", format: "yyyy-MM-dd"))
+        let issues = PlanValidator().validate(tasks: tasks, profile: profile, minimumCycles: 0)
+        try expect(!issues.contains(where: {
+            if case .overlap = $0 { return true }; return false
+        }), "Allowed Plan Tomorrow/ReVision overlap was rejected")
+        try expect(!issues.contains(where: {
+            if case .tooFewSubtasks = $0 { return true }; return false
+        }), "More than three subtasks was rejected")
     }
     try check("Contest is one flexible kind capped at ten cycles") {
         let profile = RoutineProfileResolver(calendar: calendar).profile(for: try date("2026-08-05", format: "yyyy-MM-dd"))
@@ -196,7 +257,7 @@ do {
         let augustFourth = try date("2026-08-04", format: "yyyy-MM-dd")
         try expect(repository.dailyLogURL(for: augustFourth).lastPathComponent == "aug-4.md", "Wrong filename")
     }
-    try check("Repository preserves Later and detects same-plan conflicts") {
+    try check("Repository archives non-Today content and detects same-plan conflicts") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-check-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temporary) }
@@ -228,8 +289,10 @@ do {
         edited[0].mvp = "Edited MVP"
         try repository.saveToday(date: augustFourth, tasks: edited, profile: .universityLate, expectedTasks: baseline)
         let afterSave = try String(contentsOf: tasksURL, encoding: .utf8)
-        try expect(afterSave.contains("Keep later."), "Later changed during save")
-        try expect(afterSave.contains("Keep inbox."), "Inbox changed during save")
+        try expect(!afterSave.contains("# Later"), "Later remained in tasks.md")
+        let archived = try String(contentsOf: temporary.appendingPathComponent("dump.md"), encoding: .utf8)
+        try expect(archived.contains("Keep later."), "Later was not archived")
+        try expect(archived.contains("Keep inbox."), "Inbox was not archived")
 
         let external = afterSave.replacingOccurrences(of: "Edited MVP", with: "External MVP")
         try external.write(to: tasksURL, atomically: true, encoding: .utf8)

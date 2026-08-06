@@ -39,6 +39,52 @@ public struct DayProfile: Equatable, Sendable {
     }
 }
 
+public enum FixedPlanTasks {
+    public static let dayAnalysisName = "Day Analysis and Streaks (CF & Git)"
+    public static let planTomorrowName = "Plan Tomorrow + Miscel Tasks"
+    public static let revisionName = "ReVision"
+
+    public static let hardRestWindows = [
+        RoutineWindow(660, 720, .protected, "Rest Block"),
+        RoutineWindow(1020, 1080, .protected, "Rest Block"),
+    ]
+
+    public static func daily() -> [PlanTask] {
+        [
+            PlanTask(
+                title: dayAnalysisName, startMinute: 1200, cycles: 1,
+                priority: "High", difficulty: "Moderate",
+                mvp: "Analyze the day and update the Codeforces and Git streaks",
+                coreTasks: [
+                    CoreTask(title: "Run analyze_day"),
+                    CoreTask(title: "Review gains and mistakes"),
+                    CoreTask(title: "Update CF and Git streaks"),
+                ], fixedRole: .dayAnalysis
+            ),
+            PlanTask(
+                title: planTomorrowName, startMinute: 1230, cycles: 1,
+                priority: "High", difficulty: "Moderate",
+                mvp: "Tomorrow is planned and miscellaneous tasks are processed",
+                coreTasks: [
+                    CoreTask(title: "Plan tomorrow"),
+                    CoreTask(title: "Process miscellaneous tasks"),
+                    CoreTask(title: "Reschedule unfinished tasks"),
+                ], fixedRole: .planTomorrow
+            ),
+            PlanTask(
+                title: revisionName, startMinute: 1260, cycles: 1,
+                priority: "High", difficulty: "Moderate",
+                mvp: "Finish the daily revision loop",
+                coreTasks: [
+                    CoreTask(title: "ReSolve"),
+                    CoreTask(title: "ReSync"),
+                    CoreTask(title: "Routes, Goals and Milestones"),
+                ], fixedRole: .revision
+            ),
+        ]
+    }
+}
+
 public struct RoutineProfileResolver: Sendable {
     public var calendar: Calendar
 
@@ -57,9 +103,8 @@ public struct RoutineProfileResolver: Sendable {
         case 1, 3: // Sunday, Tuesday
             return DayProfile(kind: .universityLate, windows: [
                 RoutineWindow(360, 660, .contest, "Five-hour contest"),
-                RoutineWindow(690, 750, .protected, "Rest and transition"),
+                RoutineWindow(720, 750, .protected, "university transition"),
                 RoutineWindow(750, 1020, .protected, "University"),
-                RoutineWindow(1020, 1080, .protected, "Return and rest"),
                 RoutineWindow(1080, 1290, .eveningRoutine, "Evening routine"),
             ])
         case 6: // Friday
@@ -71,9 +116,7 @@ public struct RoutineProfileResolver: Sendable {
         default:
             return DayProfile(kind: .standard, windows: [
                 RoutineWindow(360, 660, .contest, "Five-hour contest"),
-                RoutineWindow(690, 720, .protected, "Rest 1"),
                 RoutineWindow(720, 1050, .work, "Upsolving"),
-                RoutineWindow(1050, 1080, .protected, "Rest 2"),
                 RoutineWindow(1080, 1290, .eveningRoutine, "Evening routine"),
             ])
         }
@@ -96,14 +139,20 @@ public struct PlanValidator: Sendable {
         var available = 0
         var cursor = firstAvailableSlot
         while cursor + 30 <= 1290 {
-            let blocked = profile.protectedWindows.contains { $0.overlaps(start: cursor, end: cursor + 30) }
+            let blocked = (profile.protectedWindows + FixedPlanTasks.hardRestWindows)
+                .contains { $0.overlaps(start: cursor, end: cursor + 30) }
             if !blocked { available += 1 }
             cursor += 30
         }
         return min(12, available)
     }
 
-    public func validate(tasks: [PlanTask], profile: DayProfile, minimumCycles: Int = 12) -> [PlanValidationIssue] {
+    public func validate(
+        tasks: [PlanTask],
+        profile: DayProfile,
+        minimumCycles: Int = 12,
+        requireFixedTasks: Bool = true
+    ) -> [PlanValidationIssue] {
         var issues: [PlanValidationIssue] = []
         let totalCycles = tasks.reduce(0) { $0 + $1.cycles }
         if totalCycles < minimumCycles {
@@ -134,23 +183,59 @@ public struct PlanValidator: Sendable {
             if task.mvp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 issues.append(.missingMVP(task: displayTitle))
             }
-            if task.cycles > 1 && task.coreTasks.count != 3 {
-                issues.append(.wrongCoreTaskCount(task: displayTitle))
-            } else if task.cycles > 1 && task.coreTasks.contains(where: {
+            if task.coreTasks.count < 3 {
+                issues.append(.tooFewSubtasks(task: displayTitle))
+            } else if task.coreTasks.contains(where: {
                 $0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }) {
                 issues.append(.emptyCoreTask(task: displayTitle))
             }
             if task.endMinute > 1290 { issues.append(.afterSleepCutoff(task: displayTitle)) }
-            if profile.protectedWindows.contains(where: { $0.overlaps(start: task.startMinute, end: task.endMinute) }) {
-                issues.append(.blockedTime(task: displayTitle))
+            for window in FixedPlanTasks.hardRestWindows where window.overlaps(start: task.startMinute, end: task.endMinute) {
+                issues.append(.hardRest(task: displayTitle, startMinute: window.startMinute, endMinute: window.endMinute))
+            }
+            if !task.routineOverride {
+                for window in profile.protectedWindows where window.overlaps(start: task.startMinute, end: task.endMinute) {
+                    issues.append(.routineConflict(
+                        taskID: task.id,
+                        task: displayTitle,
+                        reason: window.label,
+                        startMinute: window.startMinute,
+                        endMinute: window.endMinute
+                    ))
+                }
             }
         }
 
+        if requireFixedTasks { validateFixedTasks(tasks, issues: &issues) }
+
         let ordered = tasks.sorted { $0.startMinute < $1.startMinute }
         for pair in zip(ordered, ordered.dropFirst()) where pair.0.endMinute > pair.1.startMinute {
-            issues.append(.overlap(first: pair.0.title, second: pair.1.title))
+            let allowedEveningOverlap = Set([pair.0.fixedRole, pair.1.fixedRole]) == Set([.planTomorrow, .revision])
+                && max(pair.0.startMinute, pair.1.startMinute) >= 1260
+                && min(pair.0.endMinute, pair.1.endMinute) <= 1290
+            if !allowedEveningOverlap {
+                issues.append(.overlap(first: pair.0.title, second: pair.1.title))
+            }
         }
         return issues
+    }
+
+    private func validateFixedTasks(_ tasks: [PlanTask], issues: inout [PlanValidationIssue]) {
+        let requirements: [(FixedTaskRole, String, Int, ClosedRange<Int>)] = [
+            (.dayAnalysis, FixedPlanTasks.dayAnalysisName, 1200, 1...1),
+            (.planTomorrow, FixedPlanTasks.planTomorrowName, 1230, 1...2),
+            (.revision, FixedPlanTasks.revisionName, 1260, 1...1),
+        ]
+        for (role, name, start, cycles) in requirements {
+            guard let task = tasks.first(where: { $0.fixedRole == role }) else {
+                issues.append(.missingFixedTask(name: name))
+                continue
+            }
+            if task.title != name || task.startMinute != start || !cycles.contains(task.cycles) {
+                let duration = role == .planTomorrow ? "start at 20:30 and use one or two cycles" : "start at \(MarkdownPlanCodec.time(start)) and use one cycle"
+                issues.append(.invalidFixedTask(name: name, requirement: duration))
+            }
+        }
     }
 }

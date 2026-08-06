@@ -59,18 +59,20 @@ struct DashboardView: View {
     var body: some View {
         VStack(spacing: 0) {
             Picker("Section", selection: $selectedTab) {
+                Text("Agenda").tag(DashboardTab.agenda)
                 Text("Today").tag(DashboardTab.today)
                 Text("Streaks").tag(DashboardTab.streaks)
                 Text("Settings").tag(DashboardTab.settings)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 300)
+            .frame(width: 390)
             .padding(.top, 16)
             .padding(.bottom, 12)
 
             Group {
                 switch selectedTab {
+                case .agenda: AgendaView()
                 case .today: PlanEditorView()
                 case .streaks: StreaksView()
                 case .settings: SettingsView()
@@ -98,6 +100,7 @@ struct DashboardView: View {
 }
 
 private enum DashboardTab: Hashable {
+    case agenda
     case today
     case streaks
     case settings
@@ -120,6 +123,17 @@ struct PlanEditorView: View {
                     }
                 }
                 Spacer()
+                Button {
+                    model.setAllTasksCollapsed(model.collapsedTaskIDs.count < model.tasks.count)
+                } label: {
+                    Label(
+                        model.collapsedTaskIDs.count < model.tasks.count ? "Collapse All" : "Expand All",
+                        systemImage: model.collapsedTaskIDs.count < model.tasks.count ? "rectangle.compress.vertical" : "rectangle.expand.vertical"
+                    )
+                }
+                .buttonStyle(.borderless)
+                Toggle("Show completed subtasks", isOn: $model.showCompletedSubtasks)
+                    .toggleStyle(.checkbox)
                 if model.isEditingPlan {
                     if model.planMessage == "Today is planned." {
                         Button("Cancel") { model.cancelEditingPlan() }
@@ -147,7 +161,7 @@ struct PlanEditorView: View {
                 )
             } else if model.isEditingPlan {
                 ScrollView {
-                    LazyVStack(spacing: 0) {
+                    LazyVStack(spacing: 12) {
                         ForEach(Array(model.tasks.enumerated()), id: \.element.id) { index, task in
                             TaskEditorRow(task: $model.tasks[index], cyclesChanged: {
                                 model.normalizeCoreTasks(for: task.id)
@@ -160,10 +174,12 @@ struct PlanEditorView: View {
                             }, canMoveUp: index > 0, canMoveDown: index < model.tasks.count - 1)
                             .id(task.id)
                             .onChange(of: task) { model.markPlanDirty() }
-                            Divider()
+                            .padding(.horizontal, 16)
+                            .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 14))
+                            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.09)))
                         }
                     }
-                    .padding(.horizontal)
+                    .padding()
                 }
             } else {
                 SavedPlanView()
@@ -175,7 +191,7 @@ struct PlanEditorView: View {
                         ForEach(Array(model.validationIssues.enumerated()), id: \.offset) { _, issue in
                             Label(issue.description, systemImage: "exclamationmark.triangle.fill")
                                 .font(.caption)
-                                .foregroundStyle(.orange)
+                                .foregroundStyle(model.isBlocking(issue) ? .red : .yellow)
                         }
                     }
                     .padding(.horizontal)
@@ -197,6 +213,7 @@ struct PlanEditorView: View {
 }
 
 private struct TaskEditorRow: View {
+    @EnvironmentObject private var model: AppModel
     @Binding var task: PlanTask
     var cyclesChanged: () -> Void
     var delete: () -> Void
@@ -216,6 +233,7 @@ private struct TaskEditorRow: View {
                     TextField("Rename this task", text: $task.title)
                         .textFieldStyle(.roundedBorder)
                         .font(.headline)
+                        .disabled(task.fixedRole != nil)
                 }
                 .frame(minWidth: 260)
                 VStack(alignment: .trailing, spacing: 4) {
@@ -227,20 +245,19 @@ private struct TaskEditorRow: View {
                     Image(systemName: "trash")
                 }
                 .buttonStyle(.borderless)
+                .disabled(task.fixedRole != nil)
                 .help("Delete task")
-                VStack(spacing: 2) {
-                    Button(action: moveUp) { Image(systemName: "chevron.up") }
-                        .disabled(!canMoveUp)
-                    Button(action: moveDown) { Image(systemName: "chevron.down") }
-                        .disabled(!canMoveDown)
+                Button { model.toggleCollapsed(task.id) } label: {
+                    Image(systemName: model.collapsedTaskIDs.contains(task.id) ? "chevron.down" : "chevron.up")
                 }
                 .buttonStyle(.borderless)
-                .help("Reorder task")
             }
 
-            HStack(alignment: .bottom, spacing: 14) {
+            if !model.collapsedTaskIDs.contains(task.id) {
+              HStack(alignment: .bottom, spacing: 14) {
                 editorField("Start") {
                     TimeEditorField(minute: $task.startMinute)
+                        .disabled(task.fixedRole != nil)
                 }
                 editorField("Priority") {
                     Picker("", selection: $task.priority) {
@@ -263,42 +280,62 @@ private struct TaskEditorRow: View {
                     }
                     .labelsHidden()
                     .frame(width: 180)
+                    .disabled(task.fixedRole != nil)
                 }
                 editorField("Duration") {
                     Stepper(
                         "\(task.cycles) cycle\(task.cycles == 1 ? "" : "s")",
                         value: $task.cycles,
-                        in: task.kind == .normal ? 1...4 : 1...10
+                        in: durationRange
                     )
                     .onChange(of: task.cycles) { cyclesChanged() }
                     .frame(width: 145)
                 }
-            }
+              }
 
-            editorField("MVP · completion definition") {
+              editorField("MVP · completion definition") {
                 TextField("Describe exactly what must be true for this task to count as complete", text: $task.mvp, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(2...4)
-            }
+              }
 
-            if task.cycles > 1 {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("CORE TASKS · exactly three")
+              VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                    Text("SUBTASKS · at least three")
                         .font(.caption.bold())
                         .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Add Subtask") { model.addSubtask(to: task.id) }
+                        .buttonStyle(.borderless)
+                    }
                     ForEach(Array(task.coreTasks.indices), id: \.self) { index in
-                        HStack(spacing: 8) {
+                        if model.showCompletedSubtasks || !task.coreTasks[index].isComplete {
+                          HStack(spacing: 8) {
                             Toggle("", isOn: $task.coreTasks[index].isComplete).labelsHidden()
                             Text("\(index + 1).").foregroundStyle(.secondary).frame(width: 20, alignment: .trailing)
-                            TextField("Name core task \(index + 1)", text: $task.coreTasks[index].title)
+                            TextField("Name subtask \(index + 1)", text: $task.coreTasks[index].title)
                                 .textFieldStyle(.roundedBorder)
+                            Button(role: .destructive) {
+                                model.removeSubtask(taskID: task.id, subtaskID: task.coreTasks[index].id)
+                            } label: { Image(systemName: "minus.circle") }
+                            .buttonStyle(.borderless)
+                            .disabled(task.coreTasks.count <= 3)
+                          }
                         }
                     }
-                }
-                .padding(.leading, 30)
+              }
+              .padding(.leading, 30)
             }
         }
         .padding(.vertical, 12)
+    }
+
+    private var durationRange: ClosedRange<Int> {
+        switch task.fixedRole {
+        case .planTomorrow: 1...2
+        case .dayAnalysis, .revision: 1...1
+        case nil: task.kind == .normal ? 1...4 : 1...10
+        }
     }
 
     private func editorField<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
@@ -328,14 +365,19 @@ private struct SavedPlanView: View {
 }
 
 private struct SavedTaskCard: View {
+    @EnvironmentObject private var model: AppModel
     let task: PlanTask
     let isCurrent: Bool
+    @State private var rescheduleDate = Date()
+    @State private var showingReschedule = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
-                Image(systemName: task.isComplete ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(task.isComplete ? .green : .secondary)
+                Button { model.toggleTaskCompletion(task.id) } label: {
+                    Image(systemName: task.isComplete ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(task.isComplete ? .green : .secondary)
+                }.buttonStyle(.plain)
                 Text(task.title).font(.headline)
                 tag(task.priority, color: priorityColor)
                 tag(task.difficulty, color: difficultyColor)
@@ -343,23 +385,53 @@ private struct SavedTaskCard: View {
                 Text(MarkdownPlanCodec.time(task.startMinute) + "–" + MarkdownPlanCodec.time(task.endMinute))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
+                Button { model.toggleCollapsed(task.id) } label: {
+                    Image(systemName: model.collapsedTaskIDs.contains(task.id) ? "chevron.down" : "chevron.up")
+                }.buttonStyle(.plain)
             }
-            Text("MVP → \(task.mvp)")
+            if !model.collapsedTaskIDs.contains(task.id) {
+              Text("MVP → \(task.mvp)")
                 .font(.subheadline)
-            ForEach(Array(task.coreTasks.enumerated()), id: \.element.id) { index, core in
+              ForEach(Array(task.coreTasks.enumerated()), id: \.element.id) { index, core in
+                if model.showCompletedSubtasks || !core.isComplete {
                 HStack(spacing: 8) {
-                    Image(systemName: core.isComplete ? "checkmark.square.fill" : "square")
+                    Button { model.toggleSubtaskCompletion(taskID: task.id, subtaskID: core.id) } label: {
+                        Image(systemName: core.isComplete ? "checkmark.square.fill" : "square")
+                    }.buttonStyle(.plain)
                     Text("\(index + 1). \(core.title)")
                 }
                 .font(.caption)
                 .foregroundStyle(core.isComplete ? .green : .secondary)
                 .padding(.leading, 28)
+                }
+              }
+              if !task.isComplete && task.fixedRole == nil {
+                Button("Reschedule…") {
+                    rescheduleDate = WallClock.dhakaCalendar().date(byAdding: .day, value: 1, to: model.now) ?? model.now
+                    showingReschedule = true
+                }
+                .buttonStyle(.borderless)
+              }
             }
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(isCurrent ? Color.orange.opacity(0.20) : Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(isCurrent ? Color.orange.opacity(0.35) : Color.primary.opacity(0.08)))
+        .sheet(isPresented: $showingReschedule) {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("Reschedule \(task.title)").font(.title2.bold())
+                DatePicker("Future date", selection: $rescheduleDate, in: model.now..., displayedComponents: .date)
+                HStack {
+                    Spacer()
+                    Button("Cancel") { showingReschedule = false }
+                    Button("Move Task") {
+                        model.rescheduleTask(task.id, to: rescheduleDate)
+                        showingReschedule = false
+                    }.buttonStyle(.borderedProminent)
+                }
+            }.padding(24).frame(width: 420)
+        }
     }
 
     private func tag(_ text: String, color: Color) -> some View {
@@ -419,6 +491,229 @@ private struct TimeEditorField: View {
             text = MarkdownPlanCodec.time(value)
         } else {
             text = MarkdownPlanCodec.time(minute)
+        }
+    }
+}
+
+private enum AgendaRange: String, CaseIterable, Identifiable {
+    case week = "1 Week"
+    case month = "1 Month"
+    case all = "All Time"
+    var id: Self { self }
+}
+
+struct AgendaView: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var range: AgendaRange = .week
+    @State private var showingAdd = false
+
+    private var entries: [AgendaTask] {
+        let calendar = WallClock.dhakaCalendar()
+        let today = calendar.startOfDay(for: model.now)
+        let futureLimit: Date? = switch range {
+        case .week: calendar.date(byAdding: .day, value: 7, to: today)
+        case .month: calendar.date(byAdding: .month, value: 1, to: today)
+        case .all: nil
+        }
+        let todayEntries = model.tasks.map { AgendaTask(date: today, task: $0) }
+        return (todayEntries + model.agendaTasks)
+            .filter { futureLimit == nil || $0.date < futureLimit! }
+            .sorted {
+                if $0.date != $1.date { return $0.date < $1.date }
+                return $0.task.startMinute < $1.task.startMinute
+            }
+    }
+
+    private var grouped: [(Date, [AgendaTask])] {
+        let dictionary = Dictionary(grouping: entries) { WallClock.dhakaCalendar().startOfDay(for: $0.date) }
+        return dictionary.keys.sorted().map { ($0, dictionary[$0, default: []]) }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading) {
+                    Text("Agenda").font(.largeTitle.bold())
+                    Text("Today and scheduled work").foregroundStyle(.secondary)
+                }
+                Spacer()
+                Picker("Range", selection: $range) {
+                    ForEach(AgendaRange.allCases) { Text($0.rawValue).tag($0) }
+                }.pickerStyle(.segmented).frame(width: 260)
+                Button("Add Scheduled Task") { showingAdd = true }
+                Button {
+                    model.setAllTasksCollapsed(model.collapsedTaskIDs.count < entries.count)
+                } label: {
+                    Label("Collapse / Expand All", systemImage: "rectangle.compress.vertical")
+                }
+            }
+            .padding()
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 18) {
+                    ForEach(grouped, id: \.0) { date, items in
+                        AgendaDaySection(date: date, items: items)
+                    }
+                }
+                .padding()
+            }
+            if !model.agendaValidationIssues.isEmpty {
+                ScrollView(.horizontal) {
+                    HStack {
+                        ForEach(Array(model.agendaValidationIssues.enumerated()), id: \.offset) { _, issue in
+                            Label(issue.description, systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption)
+                                .foregroundStyle(issue.severity == .error ? .red : .yellow)
+                        }
+                    }.padding(.horizontal)
+                }.frame(height: 38)
+            }
+        }
+        .sheet(isPresented: $showingAdd) { ScheduledTaskSheet(isPresented: $showingAdd) }
+    }
+}
+
+private struct ScheduledTaskSheet: View {
+    @EnvironmentObject private var model: AppModel
+    @Binding var isPresented: Bool
+    @State private var date = WallClock.dhakaCalendar().date(byAdding: .day, value: 1, to: Date()) ?? Date()
+    @State private var task = PlanTask(
+        title: "", startMinute: 1080, cycles: 1, mvp: "",
+        coreTasks: [CoreTask(title: ""), CoreTask(title: ""), CoreTask(title: "")]
+    )
+
+    private var canSave: Bool {
+        !task.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !task.mvp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && task.coreTasks.count >= 3
+            && !task.coreTasks.contains { $0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Add Scheduled Task").font(.title2.bold())
+            DatePicker("Date", selection: $date, in: model.now..., displayedComponents: .date)
+            TextField("Task name", text: $task.title).textFieldStyle(.roundedBorder)
+            HStack {
+                TimeEditorField(minute: $task.startMinute)
+                Picker("Priority", selection: $task.priority) {
+                    ForEach(["Do/Die", "High", "Medium", "Low"], id: \.self) { Text($0).tag($0) }
+                }
+                Picker("Difficulty", selection: $task.difficulty) {
+                    ForEach(["Hard", "Moderate", "Easy"], id: \.self) { Text($0).tag($0) }
+                }
+                Picker("Kind", selection: $task.kind) {
+                    Text("Normal").tag(TaskKind.normal)
+                    Text("Contest").tag(TaskKind.contest)
+                }
+                Stepper("\(task.cycles) cycle\(task.cycles == 1 ? "" : "s")", value: $task.cycles, in: task.kind == .normal ? 1...4 : 1...10)
+            }
+            TextField("MVP · completion definition", text: $task.mvp, axis: .vertical)
+                .textFieldStyle(.roundedBorder).lineLimit(2...4)
+            HStack {
+                Text("SUBTASKS · at least three").font(.caption.bold()).foregroundStyle(.secondary)
+                Spacer()
+                Button("Add Subtask") { task.coreTasks.append(CoreTask(title: "")) }
+            }
+            ForEach(Array(task.coreTasks.indices), id: \.self) { index in
+                HStack {
+                    Text("\(index + 1).").foregroundStyle(.secondary)
+                    TextField("Subtask", text: $task.coreTasks[index].title).textFieldStyle(.roundedBorder)
+                    Button(role: .destructive) { task.coreTasks.remove(at: index) } label: { Image(systemName: "minus.circle") }
+                        .buttonStyle(.borderless).disabled(task.coreTasks.count <= 3)
+                }
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { isPresented = false }
+                Button("Add to Agenda") {
+                    model.addAgendaTask(task, on: date)
+                    isPresented = false
+                }.buttonStyle(.borderedProminent).disabled(!canSave)
+            }
+        }
+        .padding(24)
+        .frame(width: 720)
+    }
+}
+
+private struct AgendaDaySection: View {
+    @EnvironmentObject private var model: AppModel
+    let date: Date
+    let items: [AgendaTask]
+
+    private var heading: String {
+        let calendar = WallClock.dhakaCalendar()
+        if calendar.isDateInToday(date) { return "Today · \(date.formatted(.dateTime.month(.abbreviated).day()))" }
+        if calendar.isDateInTomorrow(date) { return "Tomorrow · \(date.formatted(.dateTime.month(.abbreviated).day()))" }
+        return date.formatted(.dateTime.weekday(.wide).month(.abbreviated).day())
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(heading).font(.title3.bold())
+            ForEach(items) { entry in
+                AgendaTaskRow(entry: entry)
+            }
+        }
+    }
+}
+
+private struct AgendaTaskRow: View {
+    @EnvironmentObject private var model: AppModel
+    let entry: AgendaTask
+    @State private var moveDate = Date()
+    @State private var showingMove = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Button {
+                    if WallClock.dhakaCalendar().isDateInToday(entry.date) {
+                        model.toggleTaskCompletion(entry.id)
+                    } else {
+                        model.toggleAgendaTaskCompletion(entry.id)
+                    }
+                } label: {
+                    Image(systemName: entry.task.isComplete ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(entry.task.isComplete ? .green : .secondary)
+                }.buttonStyle(.plain)
+                Text(MarkdownPlanCodec.time(entry.task.startMinute) + "–" + MarkdownPlanCodec.time(entry.task.endMinute))
+                    .monospacedDigit().foregroundStyle(.secondary).frame(width: 112, alignment: .leading)
+                Text(entry.task.title).font(.headline)
+                Spacer()
+                if !WallClock.dhakaCalendar().isDateInToday(entry.date), !entry.task.isComplete {
+                    Button("Move…") {
+                        moveDate = entry.date
+                        showingMove = true
+                    }.buttonStyle(.borderless)
+                }
+                Button { model.toggleCollapsed(entry.id) } label: {
+                    Image(systemName: model.collapsedTaskIDs.contains(entry.id) ? "chevron.down" : "chevron.up")
+                }.buttonStyle(.plain)
+            }
+            if !model.collapsedTaskIDs.contains(entry.id) {
+                HStack(spacing: 8) {
+                    Text(entry.task.priority).foregroundStyle(.orange)
+                    Text(entry.task.difficulty).foregroundStyle(.purple)
+                }.font(.caption.bold()).padding(.leading, 148)
+            }
+        }
+        .padding(12)
+        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
+        .sheet(isPresented: $showingMove) {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("Move \(entry.task.title)").font(.title2.bold())
+                DatePicker("Future date", selection: $moveDate, in: model.now..., displayedComponents: .date)
+                HStack {
+                    Spacer()
+                    Button("Cancel") { showingMove = false }
+                    Button("Move Task") {
+                        model.moveAgendaTask(entry.id, to: moveDate)
+                        showingMove = false
+                    }.buttonStyle(.borderedProminent)
+                }
+            }.padding(24).frame(width: 420)
         }
     }
 }
@@ -624,6 +919,13 @@ private struct TodayPlanPanel: View {
                 HStack {
                     Text("Today").font(.title2.bold())
                     Spacer()
+                    Button {
+                        model.setAllTasksCollapsed(model.collapsedTaskIDs.count < model.executionTasks.count)
+                    } label: {
+                        Image(systemName: "rectangle.compress.vertical")
+                    }.buttonStyle(.plain)
+                    Toggle("Completed subtasks", isOn: $model.showCompletedSubtasks)
+                        .toggleStyle(.checkbox).font(.caption)
                     Text(model.executionCycleSummaryText).foregroundStyle(.secondary)
                 }
                 if model.executionTasks.isEmpty {
@@ -634,18 +936,32 @@ private struct TodayPlanPanel: View {
                     ForEach(model.executionTasks) { task in
                         VStack(alignment: .leading, spacing: 8) {
                             HStack(alignment: .firstTextBaseline) {
-                                Image(systemName: task.isComplete ? "checkmark.circle.fill" : "circle")
+                                Button { model.toggleTaskCompletion(task.id) } label: {
+                                    Image(systemName: task.isComplete ? "checkmark.circle.fill" : "circle")
+                                }.buttonStyle(.plain)
                                 Text(task.title).font(.headline)
                                 Spacer()
                                 Text(MarkdownPlanCodec.time(task.startMinute) + "–" + MarkdownPlanCodec.time(task.endMinute))
                                     .monospacedDigit().foregroundStyle(.secondary)
+                                Button { model.toggleCollapsed(task.id) } label: {
+                                    Image(systemName: model.collapsedTaskIDs.contains(task.id) ? "chevron.down" : "chevron.up")
+                                }.buttonStyle(.plain)
                             }
-                            Text("MVP → \(task.mvp)").font(.subheadline)
-                            ForEach(Array(task.coreTasks.enumerated()), id: \.element.id) { index, core in
-                                Text("\(index + 1). \(core.title)")
-                                    .font(.caption)
-                                    .foregroundStyle(core.isComplete ? .green : .secondary)
-                                    .padding(.leading, 28)
+                            if !model.collapsedTaskIDs.contains(task.id) {
+                                Text("MVP → \(task.mvp)").font(.subheadline)
+                                ForEach(Array(task.coreTasks.enumerated()), id: \.element.id) { index, core in
+                                    if model.showCompletedSubtasks || !core.isComplete {
+                                        HStack {
+                                            Button { model.toggleSubtaskCompletion(taskID: task.id, subtaskID: core.id) } label: {
+                                                Image(systemName: core.isComplete ? "checkmark.square.fill" : "square")
+                                            }.buttonStyle(.plain)
+                                            Text("\(index + 1). \(core.title)")
+                                        }
+                                        .font(.caption)
+                                        .foregroundStyle(core.isComplete ? .green : .secondary)
+                                        .padding(.leading, 28)
+                                    }
+                                }
                             }
                         }
                         .padding()

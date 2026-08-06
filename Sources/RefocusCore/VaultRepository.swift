@@ -55,6 +55,8 @@ public final class VaultRepository: @unchecked Sendable {
     }
 
     public var tasksURL: URL { vaultURL.appendingPathComponent("tasks.md") }
+    public var dumpURL: URL { vaultURL.appendingPathComponent("dump.md") }
+    public var agendaURL: URL { vaultURL.appendingPathComponent("agenda.md") }
     public var streaksURL: URL {
         vaultURL
             .appendingPathComponent("log", isDirectory: true)
@@ -72,7 +74,7 @@ public final class VaultRepository: @unchecked Sendable {
         profile: DayProfileKind,
         expectedTasks: [PlanTask]? = nil
     ) throws {
-        let latest = try fileAccess.read(tasksURL)
+        var latest = FileManager.default.fileExists(atPath: tasksURL.path) ? try fileAccess.read(tasksURL) : ""
         let codec = MarkdownPlanCodec(calendar: calendar)
         if let expectedTasks {
             do {
@@ -81,9 +83,14 @@ public final class VaultRepository: @unchecked Sendable {
                 let expectedNormalized = codec.renderManagedBlock(tasks: expectedTasks, profile: current.profile)
                 if currentNormalized != expectedNormalized { throw VaultRepositoryError.planConflict }
             } catch PlanCodecError.missingToday where expectedTasks.isEmpty {
-                // The editor began from an unplanned day. Inserting the new
-                // dated section preserves stale Today, Later, and Inbox text.
+                // A new date starts a new dynamic tasks.md. The previous file
+                // is preserved verbatim in dump.md before replacement.
             }
+        }
+        let dateText = MarkdownPlanCodec.isoDate(date, calendar: calendar)
+        if !latest.contains("# Today - \(dateText)") && !latest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            try archiveInDump(latest, label: "tasks.md rollover")
+            latest = ""
         }
         let updated = try codec.replacingTodayBlock(
             in: latest,
@@ -91,7 +98,66 @@ public final class VaultRepository: @unchecked Sendable {
             tasks: tasks,
             profile: profile
         )
-        try fileAccess.write(updated, to: tasksURL)
+        var current = updated
+        if !current.contains("<!-- refocus:initial-plan") {
+            let initial = codec.renderInitialBlock(tasks: tasks, profile: profile)
+            if let planStart = current.range(of: "<!-- refocus:plan") {
+                current.insert(contentsOf: initial + "\n\n", at: planStart.lowerBound)
+            }
+        }
+        let compact = compactTodayDocument(current, date: date)
+        if compact != current && !current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            try archiveInDump(current, label: "tasks.md non-Today content")
+        }
+        try fileAccess.write(compact, to: tasksURL)
+        try savePlanSnapshots(date: date, initialTasks: tasks, modifiedTasks: tasks, profile: profile)
+    }
+
+    public func loadAgenda() throws -> [AgendaTask] {
+        var entries = FileManager.default.fileExists(atPath: agendaURL.path)
+            ? AgendaMarkdownCodec(calendar: calendar).parse(try fileAccess.read(agendaURL))
+            : []
+        let known = Set(entries.map(\.id))
+        let logDirectory = vaultURL.appendingPathComponent("log", isDirectory: true)
+        if let files = try? FileManager.default.contentsOfDirectory(
+            at: logDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) {
+            var seen = known
+            for file in files where file.pathExtension == "md" {
+                guard let text = try? fileAccess.read(file),
+                      let date = frontmatterDate(in: text),
+                      let start = text.range(of: "<!-- refocus:modified-plan-snapshot -->"),
+                      let end = text.range(of: "<!-- /refocus:modified-plan-snapshot -->", range: start.lowerBound..<text.endIndex) else { continue }
+                let block = String(text[start.upperBound..<end.lowerBound])
+                let synthetic = "# Today - \(MarkdownPlanCodec.isoDate(date, calendar: calendar))\n\n\(block)"
+                guard let plan = try? MarkdownPlanCodec(calendar: calendar).parseToday(synthetic, date: date) else { continue }
+                for task in plan.tasks where !task.isComplete && !seen.contains(task.id) {
+                    entries.append(AgendaTask(date: date, task: task))
+                    seen.insert(task.id)
+                }
+            }
+        }
+        if FileManager.default.fileExists(atPath: tasksURL.path),
+           let liveText = try? fileAccess.read(tasksURL),
+           let staleDate = todayHeadingDate(in: liveText),
+           staleDate < calendar.startOfDay(for: Date()),
+           let stalePlan = try? MarkdownPlanCodec(calendar: calendar).parseToday(liveText, date: staleDate) {
+            var seen = Set(entries.map(\.id))
+            for task in stalePlan.tasks where !task.isComplete && !seen.contains(task.id) {
+                entries.append(AgendaTask(date: staleDate, task: task))
+                seen.insert(task.id)
+            }
+        }
+        return entries.sorted {
+            if $0.date != $1.date { return $0.date < $1.date }
+            return $0.task.startMinute < $1.task.startMinute
+        }
+    }
+
+    public func saveAgenda(_ tasks: [AgendaTask]) throws {
+        try fileAccess.write(AgendaMarkdownCodec(calendar: calendar).render(tasks), to: agendaURL)
     }
 
     public func dailyLogURL(for date: Date) -> URL {
@@ -124,6 +190,7 @@ public final class VaultRepository: @unchecked Sendable {
             updated = existing + "\n# Focus Log\n\n\(block)\n"
         }
         try fileAccess.write(updated, to: url)
+        try saveCheckInToTasks(checkIn, date: date)
     }
 
     public func loadStreakDefinitions() throws -> [StreakDefinition] {
@@ -215,6 +282,10 @@ public final class VaultRepository: @unchecked Sendable {
 
         # Focus Log
 
+        # Summary
+
+        -
+
         # Progress
 
         -
@@ -231,6 +302,95 @@ public final class VaultRepository: @unchecked Sendable {
 
         \(streakLines)
         """
+    }
+
+    private func savePlanSnapshots(
+        date: Date,
+        initialTasks: [PlanTask],
+        modifiedTasks: [PlanTask],
+        profile: DayProfileKind
+    ) throws {
+        let definitions = (try? loadStreakDefinitions()) ?? Self.defaultStreaks
+        let url = dailyLogURL(for: date)
+        var text = FileManager.default.fileExists(atPath: url.path)
+            ? try fileAccess.read(url)
+            : initialDailyLog(date: date, streaks: definitions)
+        let codec = MarkdownPlanCodec(calendar: calendar)
+        if !text.contains("<!-- refocus:initial-plan-snapshot -->") {
+            text = upsertManagedBlock(
+                in: text,
+                startMarker: "<!-- refocus:initial-plan-snapshot -->",
+                endMarker: "<!-- /refocus:initial-plan-snapshot -->",
+                heading: "# Initial Plan",
+                body: codec.renderManagedBlock(tasks: initialTasks, profile: profile)
+            )
+        }
+        text = upsertManagedBlock(
+            in: text,
+            startMarker: "<!-- refocus:modified-plan-snapshot -->",
+            endMarker: "<!-- /refocus:modified-plan-snapshot -->",
+            heading: "# Modified Plan",
+            body: codec.renderManagedBlock(tasks: modifiedTasks, profile: profile)
+        )
+        try fileAccess.write(text, to: url)
+    }
+
+    private func saveCheckInToTasks(_ checkIn: CheckIn, date: Date) throws {
+        guard FileManager.default.fileExists(atPath: tasksURL.path) else { return }
+        var text = try fileAccess.read(tasksURL)
+        let dateText = MarkdownPlanCodec.isoDate(date, calendar: calendar)
+        guard text.contains("# Today - \(dateText)") else { return }
+        let rendered = render(checkIn: checkIn)
+        let start = "<!-- refocus:session id=\(checkIn.id) -->"
+        let end = "<!-- /refocus:session id=\(checkIn.id) -->"
+        if let startRange = text.range(of: start),
+           let endRange = text.range(of: end, range: startRange.lowerBound..<text.endIndex) {
+            text.replaceSubrange(startRange.lowerBound..<endRange.upperBound, with: rendered)
+        } else if let logEnd = text.range(of: "<!-- /refocus:day-log -->") {
+            text.insert(contentsOf: rendered + "\n\n", at: logEnd.lowerBound)
+        } else {
+            text += "\n\n# Screen Break Logs\n\n<!-- refocus:day-log -->\n\(rendered)\n<!-- /refocus:day-log -->\n"
+        }
+        try fileAccess.write(text, to: tasksURL)
+    }
+
+    private func compactTodayDocument(_ text: String, date: Date) -> String {
+        let heading = "# Today - \(MarkdownPlanCodec.isoDate(date, calendar: calendar))"
+        var parts = [heading]
+        for markers in [
+            ("## Initial Plan", "<!-- refocus:initial-plan", "<!-- /refocus:initial-plan -->"),
+            ("## Modified Plan", "<!-- refocus:plan", "<!-- /refocus:plan -->"),
+            ("## Screen Break Logs", "<!-- refocus:day-log -->", "<!-- /refocus:day-log -->"),
+        ] {
+            if let start = text.range(of: markers.1),
+               let end = text.range(of: markers.2, range: start.lowerBound..<text.endIndex) {
+                parts.append(markers.0 + "\n\n" + String(text[start.lowerBound..<end.upperBound]))
+            }
+        }
+        return parts.joined(separator: "\n\n") + "\n"
+    }
+
+    private func archiveInDump(_ content: String, label: String) throws {
+        let existing = FileManager.default.fileExists(atPath: dumpURL.path) ? try fileAccess.read(dumpURL) : "# Dump\n"
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let archived = "\(existing.trimmingCharacters(in: .newlines))\n\n<!-- refocus:archive at=\(timestamp) source=\(label.replacingOccurrences(of: " ", with: "-")) -->\n\(content.trimmingCharacters(in: .newlines))\n<!-- /refocus:archive -->\n"
+        try fileAccess.write(archived, to: dumpURL)
+    }
+
+    private func upsertManagedBlock(
+        in text: String,
+        startMarker: String,
+        endMarker: String,
+        heading: String,
+        body: String
+    ) -> String {
+        let block = "\(heading)\n\n\(startMarker)\n\(body)\n\(endMarker)"
+        if let start = text.range(of: startMarker),
+           let end = text.range(of: endMarker, range: start.lowerBound..<text.endIndex) {
+            let headingStart = text[..<start.lowerBound].range(of: heading, options: .backwards)?.lowerBound ?? start.lowerBound
+            return text.replacingCharacters(in: headingStart..<end.upperBound, with: block)
+        }
+        return text.trimmingCharacters(in: .newlines) + "\n\n" + block + "\n"
     }
 
     private func render(checkIn: CheckIn) -> String {
@@ -272,5 +432,25 @@ public final class VaultRepository: @unchecked Sendable {
         let marker = "refocus:streak-value id=\(definition.id)"
         guard let range = lineRange(containing: marker, in: text) else { return false }
         return text[range].contains("[x]") || text[range].contains("[X]")
+    }
+
+    private func frontmatterDate(in text: String) -> Date? {
+        guard let line = text.components(separatedBy: .newlines).first(where: { $0.hasPrefix("date: ") }) else { return nil }
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.date(from: String(line.dropFirst("date: ".count)))
+    }
+
+    private func todayHeadingDate(in text: String) -> Date? {
+        guard let line = text.components(separatedBy: .newlines).first(where: { $0.hasPrefix("# Today - ") }) else { return nil }
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.date(from: String(line.dropFirst("# Today - ".count)))
     }
 }
