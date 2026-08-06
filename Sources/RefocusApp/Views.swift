@@ -684,7 +684,7 @@ struct AgendaView: View {
             HStack {
                 VStack(alignment: .leading) {
                     Text("Agenda").font(.largeTitle.bold())
-                    Text("Work overview")
+                    Text("Work Overview")
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: true, vertical: false)
                 }
@@ -904,6 +904,32 @@ private struct AgendaTaskRow: View {
             }
             if !model.collapsedTaskIDs.contains(entry.id) {
                 VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 14) {
+                        Text("Priority")
+                            .font(.caption.bold())
+                            .foregroundStyle(.secondary)
+                        Picker("Priority", selection: taskBinding.priority) {
+                            ForEach(["Do/Die", "High", "Medium", "Low"], id: \.self) {
+                                Text($0).tag($0)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .frame(width: 120)
+
+                        Text("Difficulty")
+                            .font(.caption.bold())
+                            .foregroundStyle(.secondary)
+                        Picker("Difficulty", selection: taskBinding.difficulty) {
+                            ForEach(["Hard", "Moderate", "Easy"], id: \.self) {
+                                Text($0).tag($0)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .frame(width: 120)
+                        Spacer()
+                    }
                     TextField("Optional MVP · add when preparing the task", text: taskBinding.mvp, axis: .vertical)
                         .textFieldStyle(.roundedBorder)
                     HStack {
