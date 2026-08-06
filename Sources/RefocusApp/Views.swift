@@ -172,8 +172,9 @@ struct PlanEditorView: View {
                     )
                 }
                 .buttonStyle(.borderless)
-                Toggle("Show completed subtasks", isOn: $model.showCompletedSubtasks)
+                Toggle("Show completed", isOn: $model.showCompletedSubtasks)
                     .toggleStyle(.checkbox)
+                    .fixedSize(horizontal: true, vertical: false)
                 if model.isEditingPlan {
                     if model.planMessage == "Today is planned." {
                         Button("Cancel") { model.cancelEditingPlan() }
@@ -1108,8 +1109,8 @@ struct PlanningGateOverlayView: View {
                 VStack(spacing: 14) {
                     VStack(spacing: 12) {
                         Text("PLAN REQUIRED")
-                            .font(.caption.bold())
-                            .tracking(3)
+                            .font(.system(size: 18, weight: .heavy, design: .rounded))
+                            .tracking(4)
                             .foregroundStyle(.orange)
                         Text("Set the next work block before focus begins")
                             .font(.title2.bold())
@@ -1125,7 +1126,7 @@ struct PlanningGateOverlayView: View {
                 }
                 .padding(.horizontal, 34)
                 .padding(.bottom, 28)
-                .padding(.top, 72)
+                .padding(.top, 38)
             } else {
                 VStack(spacing: 12) {
                     Image(systemName: "checklist")
@@ -1216,8 +1217,9 @@ private struct TodayPlanPanel: View {
                             .contentShape(Rectangle())
                     }.buttonStyle(.plain)
                     if !isEditing {
-                        Toggle("Completed subtasks", isOn: $model.showCompletedSubtasks)
+                        Toggle("Show completed", isOn: $model.showCompletedSubtasks)
                             .toggleStyle(.checkbox).font(.caption)
+                            .fixedSize(horizontal: true, vertical: false)
                         Text(model.executionCycleSummaryText).foregroundStyle(.secondary)
                     }
                 }

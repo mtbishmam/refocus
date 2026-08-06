@@ -36,7 +36,10 @@ private struct MenuBarClockLabel: View {
 
 @MainActor
 final class ReFocusAppDelegate: NSObject, NSApplicationDelegate {
+    private var globalQuickNote: GlobalQuickNoteController?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        globalQuickNote = GlobalQuickNoteController(model: ReFocusRuntime.model)
         // MenuBarExtra apps do not automatically instantiate ordinary windows.
         // Show the dashboard explicitly so `open ReFocus.app` has visible output.
         DispatchQueue.main.async {
