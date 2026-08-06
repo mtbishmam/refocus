@@ -28,6 +28,10 @@ actor VaultWorker {
         try repository.saveAgenda(tasks)
     }
 
+    func appendQuickNote(_ line: String) throws {
+        try repository.appendQuickNote(line)
+    }
+
     func loadTemplates() throws -> [PlanTask] {
         try repository.loadTemplates()
     }

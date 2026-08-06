@@ -37,6 +37,36 @@ public final class CoordinatedFileAccess: @unchecked Sendable {
         if let coordinationError { throw coordinationError }
         if let writeError { throw writeError }
     }
+
+    public func appendLine(_ line: String, to url: URL) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+        var coordinationError: NSError?
+        var appendError: Error?
+        let coordinator = NSFileCoordinator()
+        coordinator.coordinate(writingItemAt: url, options: .forMerging, error: &coordinationError) { coordinatedURL in
+            do {
+                let handle = try FileHandle(forUpdating: coordinatedURL)
+                defer { try? handle.close() }
+                let offset = try handle.seekToEnd()
+                var prefix = ""
+                if offset > 0 {
+                    try handle.seek(toOffset: offset - 1)
+                    let lastByte = try handle.read(upToCount: 1)
+                    if lastByte != Data([0x0A]) { prefix = "\n" }
+                    _ = try handle.seekToEnd()
+                }
+                try handle.write(contentsOf: Data("\(prefix)\(line)\n".utf8))
+                try handle.synchronize()
+            } catch {
+                appendError = error
+            }
+        }
+        if let coordinationError { throw coordinationError }
+        if let appendError { throw appendError }
+    }
 }
 
 public final class VaultRepository: @unchecked Sendable {
@@ -152,38 +182,9 @@ public final class VaultRepository: @unchecked Sendable {
     }
 
     public func loadAgenda() throws -> [AgendaTask] {
-        var entries = FileManager.default.fileExists(atPath: agendaURL.path)
+        let entries = FileManager.default.fileExists(atPath: agendaURL.path)
             ? AgendaMarkdownCodec(calendar: calendar).parse(try fileAccess.read(agendaURL))
             : []
-        let known = Set(entries.map(\.id))
-        let logDirectory = vaultURL.appendingPathComponent("log", isDirectory: true)
-        if let files = try? FileManager.default.contentsOfDirectory(
-            at: logDirectory,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        ) {
-            var seen = known
-            for file in files where file.pathExtension == "md" {
-                guard let text = try? fileAccess.read(file),
-                      let date = frontmatterDate(in: text),
-                      let plan = try? MarkdownPlanCodec(calendar: calendar).parseToday(text, date: date) else { continue }
-                for task in plan.tasks where !task.isComplete && !seen.contains(task.id) {
-                    entries.append(AgendaTask(date: date, task: task))
-                    seen.insert(task.id)
-                }
-            }
-        }
-        if FileManager.default.fileExists(atPath: tasksURL.path),
-           let liveText = try? fileAccess.read(tasksURL),
-           let staleDate = todayHeadingDate(in: liveText),
-           staleDate < calendar.startOfDay(for: Date()),
-           let stalePlan = try? MarkdownPlanCodec(calendar: calendar).parseToday(liveText, date: staleDate) {
-            var seen = Set(entries.map(\.id))
-            for task in stalePlan.tasks where !task.isComplete && !seen.contains(task.id) {
-                entries.append(AgendaTask(date: staleDate, task: task))
-                seen.insert(task.id)
-            }
-        }
         return entries.sorted {
             if $0.date != $1.date { return $0.date < $1.date }
             return $0.task.startMinute < $1.task.startMinute
@@ -192,6 +193,12 @@ public final class VaultRepository: @unchecked Sendable {
 
     public func saveAgenda(_ tasks: [AgendaTask]) throws {
         try fileAccess.write(AgendaMarkdownCodec(calendar: calendar).render(tasks), to: agendaURL)
+    }
+
+    public func appendQuickNote(_ line: String) throws {
+        let clean = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        try fileAccess.appendLine(clean, to: dumpURL)
     }
 
     public func loadTemplates() throws -> [PlanTask] {

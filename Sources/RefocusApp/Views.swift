@@ -9,6 +9,7 @@ struct MenuContentView: View {
         VStack(alignment: .leading, spacing: 12) {
             MenuClockStatus(model: model, clock: model.clockDisplay)
             Text(model.planMessage).font(.caption).foregroundStyle(.secondary)
+            QuickNoteBar(compact: true)
             Divider()
             if model.isArmed {
                 Button("End Work") { model.stopWork() }
@@ -69,7 +70,11 @@ struct DashboardView: View {
             .labelsHidden()
             .frame(width: 480)
             .padding(.top, 16)
-            .padding(.bottom, 12)
+            .padding(.bottom, 8)
+
+            QuickNoteBar()
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
 
             Group {
                 switch selectedTab {
@@ -109,16 +114,47 @@ private enum DashboardTab: Hashable {
     case settings
 }
 
+private struct QuickNoteBar: View {
+    @EnvironmentObject private var model: AppModel
+    var compact = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if !compact {
+                Label("Quick note", systemImage: "square.and.pencil")
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+            }
+            TextField("Append one line to dump.md", text: $model.quickNote)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { model.submitQuickNote() }
+            Button {
+                model.submitQuickNote()
+            } label: {
+                Image(systemName: model.isSavingQuickNote ? "ellipsis" : "arrow.down.doc")
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .disabled(model.quickNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isSavingQuickNote)
+            .help("Append to dump.md")
+        }
+    }
+}
+
 struct PlanEditorView: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                VStack(alignment: .leading) {
+                VStack(alignment: .leading, spacing: 7) {
                     Text("Today").font(.largeTitle.bold())
-                    Text("\(profileName) · \(model.cycleSummaryText)")
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 7) {
+                        headerTag(profileName, color: .secondary)
+                        headerTag(model.activeSegment.title, color: .blue)
+                        headerTag("\(model.plannedCycles) / \(model.requiredCycleMinimum) cycles", color: model.isPlanReady ? .green : .orange)
+                    }
                     if !model.isPlanReady {
                         Text("Planning gate locked")
                             .font(.caption.bold())
@@ -221,6 +257,16 @@ struct PlanEditorView: View {
         case .universityLate: "Sunday/Tuesday University"
         case .fridaySSC: "Friday SSC"
         }
+    }
+
+    private func headerTag(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.caption.bold())
+            .foregroundStyle(color)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4)
+            .background(color.opacity(0.12), in: Capsule())
+            .fixedSize()
     }
 }
 
@@ -587,7 +633,7 @@ private enum AgendaRange: String, CaseIterable, Identifiable {
 
 struct AgendaView: View {
     @EnvironmentObject private var model: AppModel
-    @State private var range: AgendaRange = .week
+    @State private var range: AgendaRange = .month
     @State private var showingAdd = false
 
     private var entries: [AgendaTask] {
@@ -625,14 +671,6 @@ struct AgendaView: View {
                 Picker("Range", selection: $range) {
                     ForEach(AgendaRange.allCases) { Text($0.rawValue).tag($0) }
                 }.pickerStyle(.segmented).frame(width: 260)
-                if model.planIsDirty {
-                    Button("Save Today") { model.savePlan() }
-                        .disabled(!model.isPlanReady || model.isSavingPlan)
-                }
-                if model.tomorrowIsDirty {
-                    Button("Save Tomorrow") { model.saveTomorrowPlan() }
-                        .disabled(!model.tomorrowIsReady || model.isSavingTomorrow)
-                }
                 Button("Add Scheduled Task") { showingAdd = true }
                 Button {
                     model.toggleAllTasksCollapsed(entries.map(\.task))
@@ -780,9 +818,11 @@ private struct AgendaTaskRow: View {
                 if isLiveToday, let index = model.tasks.firstIndex(where: { $0.id == entry.id }) {
                     model.tasks[index] = updated
                     model.markPlanDirty()
+                    model.scheduleAgendaTodayAutosave()
                 } else if isLiveTomorrow, let index = model.tomorrowTasks.firstIndex(where: { $0.id == entry.id }) {
                     model.tomorrowTasks[index] = updated
                     model.markTomorrowDirty()
+                    model.scheduleAgendaTomorrowAutosave()
                 } else {
                     model.updateAgendaTask(updated)
                 }
@@ -817,9 +857,24 @@ private struct AgendaTaskRow: View {
                         showingMove = true
                     }.buttonStyle(.borderless)
                 }
+                if isScheduledAgenda && !isLiveTomorrow {
+                    Button(role: .destructive) {
+                        model.deleteAgendaTask(entry.id)
+                    } label: {
+                        Image(systemName: "trash")
+                            .frame(width: 32, height: 32)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Delete from Agenda")
+                }
                 Button { model.toggleCollapsed(entry.id) } label: {
                     Image(systemName: model.collapsedTaskIDs.contains(entry.id) ? "chevron.down" : "chevron.up")
-                }.buttonStyle(.plain)
+                        .frame(width: 38, height: 34)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(model.collapsedTaskIDs.contains(entry.id) ? "Expand task" : "Collapse task")
             }
             if !model.collapsedTaskIDs.contains(entry.id) {
                 VStack(alignment: .leading, spacing: 8) {
@@ -1073,6 +1128,7 @@ private struct CheckInPanel: View {
             checkInField("What could you do better?", text: binding(\.better))
             checkInField("What could you do faster?", text: binding(\.faster))
             Spacer()
+            QuickNoteBar()
             Text("Only the first answer is required. Everything autosaves to today’s Markdown log.")
                 .font(.caption).foregroundStyle(.secondary)
         }
@@ -1105,6 +1161,7 @@ private struct CheckInPanel: View {
 
 private struct TodayPlanPanel: View {
     @EnvironmentObject private var model: AppModel
+    @State private var isEditing = false
 
     var body: some View {
         ScrollView {
@@ -1112,19 +1169,63 @@ private struct TodayPlanPanel: View {
                 HStack {
                     Text("Today").font(.title2.bold())
                     Spacer()
+                    if isEditing {
+                        Button("Cancel") {
+                            model.cancelEditingPlan()
+                            isEditing = false
+                        }
+                        Button("Add Task") { model.addTask() }
+                        Button(model.isSavingPlan ? "Saving…" : "Save Changes") { model.savePlan() }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(!model.isPlanReady || model.isSavingPlan || !model.planIsDirty)
+                    } else {
+                        Button("Edit Today") {
+                            model.beginEditingPlan()
+                            isEditing = true
+                        }
+                    }
                     Button {
-                        model.toggleAllTasksCollapsed(model.executionTasks)
+                        model.toggleAllTasksCollapsed(isEditing ? model.tasks : model.executionTasks)
                     } label: {
-                        Image(systemName: model.allTasksCollapsed(model.executionTasks) ? "rectangle.expand.vertical" : "rectangle.compress.vertical")
+                        let visibleTasks = isEditing ? model.tasks : model.executionTasks
+                        Image(systemName: model.allTasksCollapsed(visibleTasks) ? "rectangle.expand.vertical" : "rectangle.compress.vertical")
+                            .frame(width: 34, height: 32)
+                            .contentShape(Rectangle())
                     }.buttonStyle(.plain)
-                    Toggle("Completed subtasks", isOn: $model.showCompletedSubtasks)
-                        .toggleStyle(.checkbox).font(.caption)
-                    Text(model.executionCycleSummaryText).foregroundStyle(.secondary)
+                    if !isEditing {
+                        Toggle("Completed subtasks", isOn: $model.showCompletedSubtasks)
+                            .toggleStyle(.checkbox).font(.caption)
+                        Text(model.executionCycleSummaryText).foregroundStyle(.secondary)
+                    }
                 }
                 if model.executionTasks.isEmpty {
                     Text("Today has not been planned.").font(.headline)
                     Text("Work is locked. Complete and save a valid \(model.requiredCycleMinimum)-cycle Today plan first.")
                         .foregroundStyle(.secondary)
+                } else if isEditing {
+                    ForEach(Array(model.tasks.enumerated()), id: \.element.id) { index, task in
+                        TaskEditorRow(
+                            task: $model.tasks[index],
+                            cyclesChanged: { model.normalizeCoreTasks(for: task.id) },
+                            delete: { model.removeTask(id: task.id) },
+                            addSubtask: { model.addSubtask(to: task.id) },
+                            removeSubtask: { model.removeSubtask(taskID: task.id, subtaskID: $0) },
+                            saveTemplate: { model.saveTaskAsTemplate(task) }
+                        )
+                        .id(task.id)
+                        .onChange(of: task) { model.markPlanDirty() }
+                        .padding(.horizontal, 14)
+                        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 12))
+                    }
+                    if !model.validationIssues.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(Array(model.validationIssues.enumerated()), id: \.offset) { _, issue in
+                                Label(issue.description, systemImage: "exclamationmark.triangle.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(model.isBlocking(issue) ? .red : .yellow)
+                            }
+                        }
+                    }
                 } else {
                     ForEach(model.executionTasks) { task in
                         VStack(alignment: .leading, spacing: 8) {
@@ -1165,5 +1266,8 @@ private struct TodayPlanPanel: View {
             .padding(28)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onChange(of: model.planIsDirty) { _, dirty in
+            if !dirty { isEditing = false }
+        }
     }
 }

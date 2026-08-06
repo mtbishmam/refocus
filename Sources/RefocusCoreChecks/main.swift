@@ -425,6 +425,41 @@ do {
         let oldLog = try String(contentsOf: repository.dailyLogURL(for: oldDate), encoding: .utf8)
         try expect(oldLog.contains("Old work"), "Old Today was not archived in its daily log")
     }
+    try check("Quick notes append one line at the end of dump.md") {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-quick-note-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let repository = VaultRepository(vaultURL: temporary, calendar: calendar)
+        try "existing capture".write(to: repository.dumpURL, atomically: true, encoding: .utf8)
+        try repository.appendQuickNote("first quick note")
+        try repository.appendQuickNote("second quick note")
+        let dump = try String(contentsOf: repository.dumpURL, encoding: .utf8)
+        try expect(dump == "existing capture\nfirst quick note\nsecond quick note\n", "Quick notes were not appended cleanly")
+    }
+    try check("Archived daily logs do not repopulate Agenda") {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-agenda-archive-\(UUID().uuidString)")
+        let logDirectory = temporary.appendingPathComponent("log", isDirectory: true)
+        try FileManager.default.createDirectory(at: logDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let archived = """
+        ---
+        date: 2026-08-05
+        refocus_schema: 1
+        ---
+
+        # Today - 2026-08-05
+
+        <!-- refocus:plan v=1 profile=standard -->
+        - [ ] 18:00–18:30 → Archived task
+          <!-- refocus:task id=11111111-1111-1111-1111-111111111111 start=18:00 cycles=1 kind=normal priority=Medium difficulty=Moderate -->
+          - MVP → Archived result
+        <!-- /refocus:plan -->
+        """
+        try archived.write(to: logDirectory.appendingPathComponent("aug-5.md"), atomically: true, encoding: .utf8)
+        let repository = VaultRepository(vaultURL: temporary, calendar: calendar)
+        let agenda = try repository.loadAgenda()
+        try expect(agenda.isEmpty, "Archived task leaked back into Agenda")
+    }
     print("\nAll \(checks) ReFocus core checks passed.")
 } catch {
     fputs("ReFocus core check failed: \(error)\n", stderr)

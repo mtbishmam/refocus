@@ -22,10 +22,12 @@
   three live Modified snapshots, completion state, and screen-break logs.
 - `agenda.md` stores future scheduled tasks. Agenda capture requires a real
   title only; MVP and subtasks are optional until the task is promoted into
-  Tomorrow or Today.
+  Tomorrow or Today. The Agenda UI may delete entries from `agenda.md`; archived
+  daily logs must never repopulate deleted Agenda history.
 - `task-templates.md` stores reusable task definitions.
 - `dump.md` is only the user's fast raw capture surface. Never use it as a
-  daily-plan archive.
+  daily-plan archive. Quick Note appends one trimmed line to its end from the
+  dashboard, screen-break overlay, or menu-bar panel.
 - `log/mon-D.md` is the permanent daily record; store the ISO date in
   frontmatter. When a dated Today is rolled over, archive it in that date's
   daily log, never in `dump.md`.
@@ -55,6 +57,9 @@ The day is independently planned and snapshotted in three super-blocks:
   accepted for that date. Sort tasks by start time before validating; any
   unapproved collision remains red.
 - Planning is a hard gate, but Command-Q must always remain available.
+- During a screen break, the user may switch Today into the same structured
+  task editor, save a modification, and thereby refresh the active Modified
+  snapshot without rewriting its Initial snapshot.
 
 ## Task rules
 

@@ -54,6 +54,12 @@ it once, then enable the option in ReFocus Settings.
 Persistence is coordinated plain Markdown; ReFocus has no database. The
 execution/check-in overlay renders only Today.
 
+Agenda defaults to a one-month range. Scheduled and historical Agenda entries
+can be deleted without deleting their permanent daily logs. Today/Tomorrow
+details edited from Agenda autosave after validation. Quick Note is available in
+the dashboard, screen-break overlay, and menu-bar panel and appends one line to
+`dump.md`.
+
 ## Safety boundary
 
 The break overlay uses native screen-saver-level windows on every display and

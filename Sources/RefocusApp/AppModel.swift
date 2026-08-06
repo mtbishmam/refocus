@@ -40,6 +40,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var initialSegments: Set<PlanningSegment> = []
     @Published var collapsedTaskIDs: Set<UUID> = []
     @Published var showCompletedSubtasks = false
+    @Published var quickNote = ""
+    @Published var isSavingQuickNote = false
 
     private let clock = WallClock()
     private let resolver = RoutineProfileResolver()
@@ -49,6 +51,8 @@ final class AppModel: ObservableObject {
     private var ticker: Task<Void, Never>?
     private var saveTask: Task<Void, Never>?
     private var agendaSaveTask: Task<Void, Never>?
+    private var agendaPlanSaveTask: Task<Void, Never>?
+    private var agendaTomorrowSaveTask: Task<Void, Never>?
     private var activeBreakID: String?
     private var baselineTasks: [PlanTask] = []
     private var tomorrowBaselineTasks: [PlanTask] = []
@@ -66,6 +70,8 @@ final class AppModel: ObservableObject {
         ticker?.cancel()
         saveTask?.cancel()
         agendaSaveTask?.cancel()
+        agendaPlanSaveTask?.cancel()
+        agendaTomorrowSaveTask?.cancel()
     }
 
     var currentTask: PlanTask? {
@@ -391,6 +397,7 @@ final class AppModel: ObservableObject {
         guard let index = tomorrowTasks.firstIndex(where: { $0.id == taskID }) else { return }
         tomorrowTasks[index].isComplete.toggle()
         markTomorrowDirty()
+        scheduleAgendaTomorrowAutosave()
     }
 
     func normalizeTomorrowSubtasks(for id: UUID) {
@@ -707,6 +714,56 @@ final class AppModel: ObservableObject {
             guard !Task.isCancelled, let self, let worker = self.worker else { return }
             do { try await worker.saveAgenda(self.agendaTasks) }
             catch { self.errorMessage = "Could not update agenda: \(error.localizedDescription)" }
+        }
+    }
+
+    func deleteAgendaTask(_ taskID: UUID) {
+        guard let worker, agendaTasks.contains(where: { $0.id == taskID }) else { return }
+        agendaTasks.removeAll { $0.id == taskID }
+        let remaining = agendaTasks
+        Task { [weak self] in
+            do { try await worker.saveAgenda(remaining) }
+            catch {
+                self?.errorMessage = "Could not delete agenda task: \(error.localizedDescription)"
+                self?.reloadVault(force: true)
+            }
+        }
+    }
+
+    func scheduleAgendaTodayAutosave() {
+        agendaPlanSaveTask?.cancel()
+        agendaPlanSaveTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled, let self, self.planIsDirty, self.isPlanReady else { return }
+            self.savePlan()
+        }
+    }
+
+    func scheduleAgendaTomorrowAutosave() {
+        agendaTomorrowSaveTask?.cancel()
+        agendaTomorrowSaveTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled, let self, self.tomorrowIsDirty, self.tomorrowIsReady else { return }
+            self.saveTomorrowPlan()
+        }
+    }
+
+    func submitQuickNote() {
+        guard let worker, !isSavingQuickNote else { return }
+        let line = quickNote.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !line.isEmpty else { return }
+        quickNote = ""
+        isSavingQuickNote = true
+        Task { [weak self] in
+            do {
+                try await worker.appendQuickNote(line)
+                self?.isSavingQuickNote = false
+            } catch {
+                guard let self else { return }
+                self.isSavingQuickNote = false
+                if self.quickNote.isEmpty { self.quickNote = line }
+                self.errorMessage = "Could not save quick note: \(error.localizedDescription)"
+            }
         }
     }
 
