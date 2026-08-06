@@ -60,7 +60,7 @@ final class GlobalQuickNoteController {
 
         let identifier = EventHotKeyID(signature: Self.signature, id: 1)
         RegisterEventHotKey(
-            UInt32(kVK_ANSI_D),
+            UInt32(kVK_Space),
             UInt32(controlKey),
             identifier,
             GetApplicationEventTarget(),

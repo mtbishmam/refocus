@@ -59,7 +59,7 @@ can be deleted without deleting their permanent daily logs. Today/Tomorrow
 details edited from Agenda autosave after validation. Fixed recurring evening
 tasks are hidden from Agenda, and Agenda can be filtered by priority. Quick Note
 is available below dashboard warnings, in the screen-break overlay, and in the
-menu-bar panel and appends one line to `dump.md`. Press `Control-D`
+menu-bar panel and appends one line to `dump.md`. Press `Control-Space`
 anywhere in macOS to open the focused Quick Note capture; Return saves it.
 
 ## Safety boundary
