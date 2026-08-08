@@ -31,9 +31,12 @@ public struct AgendaMarkdownCodec: Sendable {
         return entries.sorted(by: Self.isEarlier)
     }
 
-    public func render(_ entries: [AgendaTask]) -> String {
+    public func render(_ entries: [AgendaTask], carriedForwardIDs: Set<UUID> = []) -> String {
         let grouped = Dictionary(grouping: entries) { calendar.startOfDay(for: $0.date) }
         var lines = ["# Agenda", "", "<!-- refocus:agenda v=1 -->"]
+        for id in carriedForwardIDs.sorted(by: { $0.uuidString < $1.uuidString }) {
+            lines.append("<!-- refocus:agenda-carried id=\(id.uuidString) -->")
+        }
         for date in grouped.keys.sorted() {
             lines.append("")
             lines.append("## \(MarkdownPlanCodec.isoDate(date, calendar: calendar))")
@@ -44,6 +47,16 @@ public struct AgendaMarkdownCodec: Sendable {
         }
         lines.append("<!-- /refocus:agenda -->")
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    public func carriedForwardIDs(in markdown: String) -> Set<UUID> {
+        Set(markdown.components(separatedBy: .newlines).compactMap { line in
+            let prefix = "<!-- refocus:agenda-carried id="
+            guard line.hasPrefix(prefix), line.hasSuffix(" -->") else { return nil }
+            let start = line.index(line.startIndex, offsetBy: prefix.count)
+            let end = line.index(line.endIndex, offsetBy: -4)
+            return UUID(uuidString: String(line[start..<end]))
+        })
     }
 
     private func date(from value: String) -> Date? {

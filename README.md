@@ -1,14 +1,43 @@
 # ReFocus
 
-ReFocus is a native macOS menu-bar Pomodoro and screen-break app backed entirely
-by an Obsidian vault. The timer follows fixed wall-clock phases, renders only
-the current `Today` plan, writes focus check-ins to `log/mon-D.md`, and applies
-the routine exceptions from the user's Ikigai system.
+ReFocus is a speed-first daily execution system. The macOS app remains native
+SwiftUI/AppKit so the wall-clock timer and blocking overlays stay immediate.
+SQLite is the local source of truth, Cloudflare D1 synchronizes devices, and a
+small offline-first PWA provides the same agenda and daily inputs on iPhone,
+Ubuntu, and any modern browser.
+
+## What changed
+
+The old runtime treated `tasks.md`, `agenda.md`, and daily Markdown logs as a
+distributed database. A single edit could rewrite several iCloud files, trigger
+broad vault watchers, reparse the same content repeatedly, and let a stale reload
+overwrite a reschedule. That was the source of both latency and the intermittent
+Agenda bugs.
+
+The new data path is:
+
+```text
+SwiftUI / PWA → local transaction → sync outbox → Cloudflare D1
+                         └────────→ background clean Markdown projection
+```
+
+- Task edits and reschedules commit once in SQLite WAL on macOS or IndexedDB in
+  the PWA.
+- Sync is field-level latest-wins with hybrid clocks, idempotent mutation IDs,
+  tombstones, and an offline outbox.
+- D1 is durable cross-device truth. A 90-second server lease ensures only one Mac
+  writes iCloud projections.
+- `tasks.md` is output-only and deliberately contains no UUIDs, HTML comments,
+  or machine metadata.
+- Clean machine logs are written to `log/YYYY-MM-DD.md`; human writing and approved day analysis live in `journal/mon-D.md`.
+- The old Markdown files are imported once, preserved, and recorded in
+  `legacy-import-report.json` beside the local database.
+
+The full design is in [docs/architecture.md](docs/architecture.md), migration
+details are in [docs/migration.md](docs/migration.md), and AI access is described
+in [docs/mcp.md](docs/mcp.md).
 
 ## Build and verify
-
-The current project builds with Apple Command Line Tools; full Xcode is optional
-for code signing, profiling, and future distribution work.
 
 ```sh
 swift build
@@ -17,54 +46,41 @@ scripts/package-app.sh
 open .build/release/ReFocus.app
 ```
 
-Launching the packaged app opens the dashboard and adds the live timer to the
-menu bar. If it is already running, the same command brings the dashboard to
-the front.
+The web client lives in `web/` and uses the bundled Sites/vinext toolchain:
 
-The fixed wall-clock timer is gated by planning. If the active work block is missing or invalid,
-ReFocus opens a persistent full-screen planning gate. The primary display embeds
-the complete dashboard—Agenda, Today, Tomorrow, Streaks, and Settings—so the plan can be created
-without leaving the blocker. The gate remains across timer boundaries until a
-valid plan is saved. Morning (`06:00–11:00`) and Afternoon (`12:00–17:00`)
-independently require the smaller of ten and the usable cycles remaining in that
-block. Evening (`18:00–21:30`) requires the smaller of seven and its usable
-remaining cycles. ReFocus then arms automatically
-and uses its check-in overlay at `:25–:30` and `:55–:00`.
+```sh
+cd web
+pnpm install --frozen-lockfile
+pnpm exec tsc --noEmit
+pnpm run build
+node --test tests/rendered-html.test.mjs
+```
 
-Normal tasks are capped at four cycles. Every contest uses the single `contest`
-kind and may use up to ten cycles in any otherwise valid time window.
+Its canonical production host is `https://refocus.mtbishmam.chatgpt.site`.
+The mtbishmam-owned D1 was seeded from the local SQLite source of truth and
+verified against the previous Bari cloud on 2026-08-08. Runtime no longer
+depends on the previous deployment.
 
-On first launch, choose the Obsidian vault containing `tasks.md` and
-`ego/ikigai.md`. ReFocus stores a security-scoped bookmark and does not hard-code
-the vault as its runtime data source.
+Deployment identity is intentionally account-stable: `mtbishmam@gmail.com` is
+the official owner, while `bari86838683@gmail.com` is a secondary access/Codex
+account. Changing Codex sessions or IDs must not change the Sites project,
+hostname, D1 owner, or native pairing target. See
+[docs/deployment.md](docs/deployment.md).
 
-For reliable “Launch at Login,” move the packaged app to `/Applications`, open
-it once, then enable the option in ReFocus Settings.
+## Daily context and AI
 
-## Markdown contract
+Daily fields are extensible instead of hard-coded streak columns. The initial
+set includes all migrated non-negotiables plus Weight (kg), Calories (kcal),
+Solved problems, and Daily summary. New number, text, and tri-state fields fit
+the same storage and trend model.
 
-- Plan source: `tasks.md`, with dated Today and relative Tomorrow sections.
-- Future schedule: `agenda.md`; reusable definitions: `task-templates.md`.
-- Execution log: `log/aug-4.md` style filenames with ISO date frontmatter.
-- Streak definitions: live bullets in `ego/non-negotiables.md`; tri-state daily
-  values remain in the daily log.
-- ReFocus patches only `<!-- refocus:... -->` managed blocks and reloads after
-  external Obsidian or Codex writes.
-
-Persistence is coordinated plain Markdown; ReFocus has no database. The
-execution/check-in overlay renders only Today.
-
-Agenda defaults to a one-month range. Scheduled and historical Agenda entries
-can be deleted without deleting their permanent daily logs. Today/Tomorrow
-details edited from Agenda autosave after validation. Fixed recurring evening
-tasks are hidden from Agenda, and Agenda can be filtered by priority. Quick Note
-is available below dashboard warnings, in the screen-break overlay, and in the
-menu-bar panel and appends one line to `dump.md`. Press `Control-Space`
-anywhere in macOS to open the focused Quick Note capture; Return saves it.
+The read-only MCP endpoint is `/api/mcp`. AI clients should call
+`get_optimization_context` first; narrower day, agenda, and metric tools are for
+follow-up detail. Responses omit internal IDs and empty fields. A clean Markdown
+projection remains available as the zero-setup fallback.
 
 ## Safety boundary
 
-The break overlay uses native screen-saver-level windows on every display and
-disables ordinary process switching. ReFocus deliberately leaves its standard
-Command-Q quit path available; macOS Force Quit, logout, restart, and system
-security interfaces also remain unavoidable escape routes.
+The screen-break overlay stays native and leaves Command-Q, Force Quit, logout,
+restart, and system security interfaces available. ReFocus contains no Electron,
+Tauri, embedded web runtime, in-app terminal, or AI model API.

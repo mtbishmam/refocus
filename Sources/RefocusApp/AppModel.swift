@@ -29,6 +29,8 @@ final class AppModel: ObservableObject {
     @Published var currentCheckIn: CheckIn?
     @Published var streakDefinitions: [StreakDefinition] = []
     @Published var streakSummaries: [StreakSummary] = []
+    @Published var dailyFieldDefinitions: [DailyFieldDefinition] = []
+    @Published var dailyFieldValues: [String: String] = [:]
     @Published var errorMessage: String?
     @Published var vaultURL: URL?
     @Published var launchAtLogin = false
@@ -42,6 +44,16 @@ final class AppModel: ObservableObject {
     @Published var showCompletedSubtasks = false
     @Published var quickNote = ""
     @Published var isSavingQuickNote = false
+    @Published var quickNoteError: String?
+    private var quickNoteSubmissionID: UUID?
+    @Published var cloudPairingToken = ""
+    @Published var cloudSyncPaired = CloudCredentials.load() != nil
+    @Published var isConnectingCloud = false
+    @Published var cloudConnectionMessage: String?
+    @Published var cloudSyncStatus = CloudCredentials.load() != nil ? "Ready" : "Local only"
+    @Published var cloudSyncPendingCount = 0
+    @Published var cloudSyncLastSuccess: Date?
+    @Published var cloudSyncIssue: String?
 
     private let clock = WallClock()
     private let resolver = RoutineProfileResolver()
@@ -49,13 +61,16 @@ final class AppModel: ObservableObject {
     private var worker: VaultWorker?
     private var watchers: [VaultWatcher] = []
     private var ticker: Task<Void, Never>?
+    private var cloudSyncTicker: Task<Void, Never>?
     private var saveTask: Task<Void, Never>?
     private var agendaSaveTask: Task<Void, Never>?
     private var agendaPlanSaveTask: Task<Void, Never>?
     private var agendaTomorrowSaveTask: Task<Void, Never>?
+    private var dailyFieldSaveTasks: [String: Task<Void, Never>] = [:]
     private var activeBreakID: String?
     private var baselineTasks: [PlanTask] = []
     private var tomorrowBaselineTasks: [PlanTask] = []
+    private var knownTaskIDs: Set<UUID> = []
     private var userRequestedEditing = false
     private var accessedSecurityScopedResource = false
     private lazy var overlayController = BreakOverlayController()
@@ -63,15 +78,18 @@ final class AppModel: ObservableObject {
     init() {
         restoreVault()
         refreshLoginStatus()
+        ensureLaunchAtLogin()
         startTicker()
     }
 
     deinit {
         ticker?.cancel()
+        cloudSyncTicker?.cancel()
         saveTask?.cancel()
         agendaSaveTask?.cancel()
         agendaPlanSaveTask?.cancel()
         agendaTomorrowSaveTask?.cancel()
+        dailyFieldSaveTasks.values.forEach { $0.cancel() }
     }
 
     var currentTask: PlanTask? {
@@ -105,7 +123,9 @@ final class AppModel: ObservableObject {
 
     var hasInitialPlan: Bool { initialSegments.contains(activeSegment) }
 
-    var plannedCycles: Int { tasks.filter(activeSegment.contains).reduce(0) { $0 + $1.cycles } }
+    var plannedCycles: Int {
+        tasks.reduce(0) { $0 + $1.planningCycles(in: activeSegment) }
+    }
 
     var cycleSummaryText: String {
         "\(activeSegment.title) · \(plannedCycles) planned · \(requiredCycleMinimum) required now"
@@ -126,7 +146,7 @@ final class AppModel: ObservableObject {
     }
 
     var executionCycleSummaryText: String {
-        let cycles = executionTasks.filter(activeSegment.contains).reduce(0) { $0 + $1.cycles }
+        let cycles = executionTasks.reduce(0) { $0 + $1.planningCycles(in: activeSegment) }
         return "\(activeSegment.title) · \(cycles) planned · \(requiredCycleMinimum) required now"
     }
 
@@ -149,12 +169,13 @@ final class AppModel: ObservableObject {
 
     var tomorrowCycleSummary: String {
         PlanningSegment.allCases.map { segment in
-            "\(segment.title.replacingOccurrences(of: " Block", with: "")) \(tomorrowTasks.filter(segment.contains).reduce(0) { $0 + $1.cycles })/\(tomorrowRequiredCycles(segment))"
+            "\(segment.title.replacingOccurrences(of: " Block", with: "")) \(tomorrowTasks.reduce(0) { $0 + $1.planningCycles(in: segment) })/\(tomorrowRequiredCycles(segment))"
         }.joined(separator: " · ")
     }
 
     var planGateMessage: String {
-        guard !isPlanReady else { return "Today is ready." }
+        if isPlanCommitted { return "Today is ready." }
+        if isPlanReady { return "Save Today to unlock focused work." }
         return "Plan the \(activeSegment.title.lowercased()) before focused work begins: \(requiredCycleMinimum) available work cycles."
     }
 
@@ -201,12 +222,18 @@ final class AppModel: ObservableObject {
         configureVault(url)
     }
 
-    func reloadVault(force: Bool = false) {
+    func reloadVault(force: Bool = false, preservingLocalEdits: Bool = false) {
         guard let worker else { return }
-        if planIsDirty && !force {
+        if planIsDirty && !force && !preservingLocalEdits {
             planMessage = "External changes detected — reload or save to resolve."
             return
         }
+        let localToday = tasks
+        let localTodayBaseline = baselineTasks
+        let hadTodayEdits = planIsDirty
+        let localTomorrow = tomorrowTasks
+        let localTomorrowBaseline = tomorrowBaselineTasks
+        let hadTomorrowEdits = tomorrowIsDirty
         let date = now
         Task { [weak self] in
             guard let self else { return }
@@ -216,7 +243,9 @@ final class AppModel: ObservableObject {
             let streakResult: Result<[StreakDefinition], Error>
             do { streakResult = .success(try await worker.loadStreakDefinitions()) }
             catch { streakResult = .failure(error) }
-            let agendaResult = (try? await worker.loadAgenda()) ?? []
+            let agendaResult = (try? await worker.loadAgenda(asOf: date)) ?? []
+            let fieldDefinitions = (try? await worker.loadDailyFieldDefinitions()) ?? []
+            let fieldValues = (try? await worker.loadDailyFieldValues(for: date)) ?? []
             let templatesResult = (try? await worker.loadTemplates()) ?? []
             let nextDate = WallClock.dhakaCalendar().date(byAdding: .day, value: 1, to: date) ?? date
             let tomorrowResult = try? await worker.loadTomorrow(date: nextDate)
@@ -231,16 +260,23 @@ final class AppModel: ObservableObject {
                 self.hasPersistedToday = true
                 self.initialSegments = plan.initialSegments
                 let normalized = self.withRecurringFixedTasks(plan.tasks)
-                self.tasks = normalized
-                self.baselineTasks = plan.tasks
-                let issues = self.currentValidation(normalized)
+                self.baselineTasks = normalized
+                self.tasks = preservingLocalEdits && hadTodayEdits
+                    ? self.mergeRemoteTasks(current: localToday, baseline: localTodayBaseline, remote: normalized)
+                    : normalized
+                // Fixed routine tasks are deterministic parts of the saved
+                // plan even when an older/local sync record omitted their task
+                // rows. Validate execution against the same normalized plan
+                // shown by the cycle counter so a green 3/3 cannot remain
+                // trapped behind the planning overlay.
+                let issues = self.currentValidation(self.tasks)
                 self.validationIssues = issues
                 let blockers = self.blockingIssues(in: issues)
                 let committed = self.hasInitialPlan && blockers.isEmpty
                 self.planMessage = committed ? "Today is planned." : "Today plan is incomplete."
                 self.isArmed = committed
-                self.planIsDirty = normalized != plan.tasks
-                self.isEditingPlan = normalized != plan.tasks || (blockers.isEmpty ? self.userRequestedEditing : true)
+                self.planIsDirty = self.tasks != self.baselineTasks
+                self.isEditingPlan = self.planIsDirty || (blockers.isEmpty ? self.userRequestedEditing : true)
             case .failure:
                 self.hasPersistedToday = false
                 self.initialSegments = []
@@ -261,14 +297,19 @@ final class AppModel: ObservableObject {
             let existingTomorrowIDs = Set(tomorrowBase.map(\.id))
             tomorrowBase.append(contentsOf: scheduledTomorrow.filter { !existingTomorrowIDs.contains($0.id) })
             let preparedTomorrow = self.withRecurringFixedTasks(tomorrowBase)
-            self.tomorrowTasks = preparedTomorrow
-            self.tomorrowBaselineTasks = tomorrowResult?.tasks ?? []
-            self.tomorrowIsDirty = preparedTomorrow != self.tomorrowBaselineTasks
+            self.tomorrowBaselineTasks = preparedTomorrow
+            self.tomorrowTasks = preservingLocalEdits && hadTomorrowEdits
+                ? self.mergeRemoteTasks(current: localTomorrow, baseline: localTomorrowBaseline, remote: preparedTomorrow)
+                : preparedTomorrow
+            self.tomorrowIsDirty = self.tomorrowTasks != self.tomorrowBaselineTasks
             self.tomorrowValidationIssues = self.validateTomorrow(preparedTomorrow)
+            self.collapseNewTasks()
             switch streakResult {
             case .success(let definitions): self.streakDefinitions = definitions
             case .failure: self.streakDefinitions = VaultRepository.defaultStreaks
             }
+            self.dailyFieldDefinitions = fieldDefinitions
+            self.dailyFieldValues = Dictionary(uniqueKeysWithValues: fieldValues.map { ($0.definitionID, $0.value) })
             self.reloadStreakSummaries()
         }
     }
@@ -352,10 +393,12 @@ final class AppModel: ObservableObject {
             segment.startMinute,
             tomorrowTasks.filter { $0.fixedRole == nil && segment.contains($0) }.map(\.endMinute).max() ?? segment.startMinute
         )
-        tomorrowTasks.append(PlanTask(
+        let task = PlanTask(
             title: "New task", startMinute: nextStart, cycles: 1, mvp: "",
             coreTasks: [CoreTask(title: ""), CoreTask(title: ""), CoreTask(title: "")]
-        ))
+        )
+        tomorrowTasks.append(task)
+        registerNewTask(task.id)
         markTomorrowDirty()
     }
 
@@ -379,12 +422,16 @@ final class AppModel: ObservableObject {
     }
 
     func addTemplateToToday(_ template: PlanTask) {
-        tasks.append(freshCopy(of: template))
+        let task = freshCopy(of: template)
+        tasks.append(task)
+        registerNewTask(task.id)
         markPlanDirty()
     }
 
     func addTemplateToTomorrow(_ template: PlanTask) {
-        tomorrowTasks.append(freshCopy(of: template))
+        let task = freshCopy(of: template)
+        tomorrowTasks.append(task)
+        registerNewTask(task.id)
         markTomorrowDirty()
     }
 
@@ -475,10 +522,12 @@ final class AppModel: ObservableObject {
             currentCycleStart,
             tasks.filter { $0.fixedRole == nil && activeSegment.contains($0) }.map(\.endMinute).max() ?? currentCycleStart
         )
-        tasks.append(PlanTask(
+        let task = PlanTask(
             title: "New task", startMinute: nextStart, cycles: 1, mvp: "",
             coreTasks: [CoreTask(title: ""), CoreTask(title: ""), CoreTask(title: "")]
-        ))
+        )
+        tasks.append(task)
+        registerNewTask(task.id)
         markPlanDirty()
     }
 
@@ -588,6 +637,18 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func registerNewTask(_ id: UUID) {
+        knownTaskIDs.insert(id)
+        collapsedTaskIDs.insert(id)
+    }
+
+    private func collapseNewTasks() {
+        let currentIDs = Set(tasks.map(\.id) + tomorrowTasks.map(\.id) + agendaTasks.map(\.id))
+        collapsedTaskIDs.formUnion(currentIDs.subtracting(knownTaskIDs))
+        collapsedTaskIDs.formIntersection(currentIDs)
+        knownTaskIDs = currentIDs
+    }
+
     func toggleTaskCompletion(_ taskID: UUID) {
         guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { return }
         tasks[index].isComplete.toggle()
@@ -604,46 +665,55 @@ final class AppModel: ObservableObject {
     }
 
     func rescheduleTask(_ taskID: UUID, to date: Date) {
-        guard let worker,
-              let index = tasks.firstIndex(where: { $0.id == taskID }),
-              !tasks[index].isComplete,
-              tasks[index].fixedRole == nil else { return }
-        var rescheduledTask = tasks[index]
-        rescheduledTask.routineOverride = false
-        let sameDay = agendaTasks.filter { WallClock.dhakaCalendar().isDate($0.date, inSameDayAs: date) }.map(\.task) + [rescheduledTask]
-        let destinationIssues = validator.validate(
-            tasks: sameDay, profile: resolver.profile(for: date), minimumCycles: 0,
-            requireFixedTasks: false, requireTaskDetails: false
-        )
-        let blockers = destinationIssues.filter { $0.severity == .error }
-        guard blockers.isEmpty else {
-            errorMessage = blockers.map(\.description).joined(separator: "\n")
-            return
-        }
-        if destinationIssues.contains(where: { $0.severity == .warning }) { rescheduledTask.routineOverride = true }
-        tasks.remove(at: index)
-        let moved = AgendaTask(date: WallClock.dhakaCalendar().startOfDay(for: date), task: rescheduledTask)
-        agendaTasks.append(moved)
-        agendaTasks.sort(by: agendaSort)
-        markPlanDirty()
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                try await worker.saveAgenda(self.agendaTasks)
-                self.savePlan()
-            } catch {
-                self.errorMessage = "Could not reschedule task: \(error.localizedDescription)"
-            }
-        }
+        moveTask(taskID, fromToday: true, to: date)
     }
 
     func moveAgendaTask(_ taskID: UUID, to date: Date) {
-        guard let worker, let index = agendaTasks.firstIndex(where: { $0.id == taskID }) else { return }
-        var movedTask = agendaTasks[index].task
+        moveTask(taskID, fromToday: false, to: date)
+    }
+
+    private func moveTask(_ taskID: UUID, fromToday: Bool, to requestedDate: Date) {
+        guard let worker else { return }
+        let calendar = WallClock.dhakaCalendar()
+        let date = calendar.startOfDay(for: requestedDate)
+        let today = calendar.startOfDay(for: now)
+        let targetIsToday = calendar.isDate(date, inSameDayAs: today)
+        let targetIsTomorrow = calendar.isDate(date, inSameDayAs: tomorrowDate)
+        let todayIndex = fromToday ? tasks.firstIndex(where: { $0.id == taskID }) : nil
+        let agendaIndex = agendaTasks.firstIndex(where: { $0.id == taskID })
+        let tomorrowIndex = tomorrowTasks.firstIndex(where: { $0.id == taskID })
+        guard todayIndex != nil || agendaIndex != nil || tomorrowIndex != nil else { return }
+
+        let sourceDate: Date
+        if todayIndex != nil { sourceDate = today }
+        else if let agendaIndex { sourceDate = agendaTasks[agendaIndex].date }
+        else { sourceDate = tomorrowDate }
+        guard !calendar.isDate(sourceDate, inSameDayAs: date) else { return }
+
+        let sourceTask: PlanTask
+        if let todayIndex {
+            sourceTask = tasks[todayIndex]
+        } else if let agendaIndex {
+            sourceTask = agendaTasks[agendaIndex].task
+        } else if let tomorrowIndex {
+            sourceTask = tomorrowTasks[tomorrowIndex]
+        } else {
+            return
+        }
+        guard !sourceTask.isComplete, sourceTask.fixedRole == nil else { return }
+
+        var movedTask = sourceTask
         movedTask.routineOverride = false
-        let sameDay = agendaTasks.filter {
-            $0.id != taskID && WallClock.dhakaCalendar().isDate($0.date, inSameDayAs: date)
-        }.map(\.task) + [movedTask]
+        let sameDay: [PlanTask]
+        if targetIsToday {
+            sameDay = tasks.filter { $0.id != taskID } + [movedTask]
+        } else if targetIsTomorrow {
+            sameDay = tomorrowTasks.filter { $0.id != taskID } + [movedTask]
+        } else {
+            sameDay = agendaTasks.filter {
+                $0.id != taskID && calendar.isDate($0.date, inSameDayAs: date)
+            }.map(\.task) + [movedTask]
+        }
         let issues = validator.validate(
             tasks: sameDay, profile: resolver.profile(for: date), minimumCycles: 0,
             requireFixedTasks: false, requireTaskDetails: false
@@ -654,13 +724,51 @@ final class AppModel: ObservableObject {
             return
         }
         if issues.contains(where: { $0.severity == .warning }) { movedTask.routineOverride = true }
-        agendaTasks[index].task = movedTask
-        agendaTasks[index].date = WallClock.dhakaCalendar().startOfDay(for: date)
+
+        let sourceWasToday = todayIndex != nil
+        tasks.removeAll { $0.id == taskID }
+        tomorrowTasks.removeAll { $0.id == taskID }
+        agendaTasks.removeAll { $0.id == taskID }
+
+        if targetIsToday {
+            tasks.append(movedTask)
+            markPlanDirty()
+        } else if targetIsTomorrow {
+            tomorrowTasks.append(movedTask)
+            markTomorrowDirty()
+        } else {
+            agendaTasks.append(AgendaTask(date: date, task: movedTask))
+        }
         agendaTasks.sort(by: agendaSort)
+        collapseNewTasks()
+        let remainingSourceTasks = tasks
+        let destinationTasks = tasks
         Task { [weak self] in
             guard let self else { return }
-            do { try await worker.saveAgenda(self.agendaTasks) }
-            catch { self.errorMessage = "Could not move agenda task: \(error.localizedDescription)" }
+            do {
+                if sourceWasToday {
+                    try await worker.rescheduleTodayTask(
+                        taskID, to: date, sourceDate: today, remainingTasks: remainingSourceTasks,
+                        profile: self.dayProfile.kind, segment: self.activeSegment
+                    )
+                    self.baselineTasks = remainingSourceTasks
+                } else if targetIsToday {
+                    try await worker.rescheduleTaskIntoToday(
+                        taskID, date: today, tasks: destinationTasks,
+                        profile: self.dayProfile.kind, segment: self.activeSegment
+                    )
+                    self.baselineTasks = destinationTasks
+                    self.hasPersistedToday = true
+                } else {
+                    try await worker.rescheduleTask(taskID, to: date)
+                }
+                self.markPlanDirty()
+                self.markTomorrowDirty()
+                self.planMessage = self.isPlanCommitted ? "Today is planned." : "Today plan is incomplete."
+            } catch {
+                self.errorMessage = "Could not reschedule task: \(error.localizedDescription)"
+                self.reloadVault(force: true)
+            }
         }
     }
 
@@ -687,6 +795,7 @@ final class AppModel: ObservableObject {
             entry.task = scheduledTask
         }
         agendaTasks = (agendaTasks + [entry]).sorted(by: agendaSort)
+        registerNewTask(entry.id)
         Task { [weak self] in
             guard let self else { return }
             do { try await worker.saveAgenda(self.agendaTasks) }
@@ -720,9 +829,8 @@ final class AppModel: ObservableObject {
     func deleteAgendaTask(_ taskID: UUID) {
         guard let worker, agendaTasks.contains(where: { $0.id == taskID }) else { return }
         agendaTasks.removeAll { $0.id == taskID }
-        let remaining = agendaTasks
         Task { [weak self] in
-            do { try await worker.saveAgenda(remaining) }
+            do { try await worker.deleteTask(taskID) }
             catch {
                 self?.errorMessage = "Could not delete agenda task: \(error.localizedDescription)"
                 self?.reloadVault(force: true)
@@ -734,8 +842,19 @@ final class AppModel: ObservableObject {
         agendaPlanSaveTask?.cancel()
         agendaPlanSaveTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 250_000_000)
-            guard !Task.isCancelled, let self, self.planIsDirty, self.isPlanReady else { return }
-            self.savePlan()
+            guard !Task.isCancelled, let self, self.planIsDirty, let worker = self.worker else { return }
+            let edited = self.tasks
+            do {
+                try await worker.saveAgendaEdits(date: self.now, tasks: edited, profile: self.dayProfile.kind)
+                self.baselineTasks = edited
+                self.markPlanDirty()
+                let blockers = self.blockingIssues(in: self.currentValidation(edited))
+                let committed = self.hasInitialPlan && blockers.isEmpty
+                self.planMessage = committed ? "Today is planned." : "Today plan is incomplete."
+                self.isArmed = committed
+            } catch {
+                self.errorMessage = "Could not save Agenda edit: \(error.localizedDescription)"
+            }
         }
     }
 
@@ -743,26 +862,39 @@ final class AppModel: ObservableObject {
         agendaTomorrowSaveTask?.cancel()
         agendaTomorrowSaveTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 250_000_000)
-            guard !Task.isCancelled, let self, self.tomorrowIsDirty, self.tomorrowIsReady else { return }
-            self.saveTomorrowPlan()
+            guard !Task.isCancelled, let self, self.tomorrowIsDirty, let worker = self.worker else { return }
+            let edited = self.tomorrowTasks
+            let profile = self.resolver.profile(for: self.tomorrowDate)
+            do {
+                try await worker.saveAgendaEdits(date: self.tomorrowDate, tasks: edited, profile: profile.kind)
+                self.tomorrowBaselineTasks = edited
+                self.markTomorrowDirty()
+            } catch {
+                self.errorMessage = "Could not save Tomorrow Agenda edit: \(error.localizedDescription)"
+            }
         }
     }
 
-    func submitQuickNote() {
+    func submitQuickNote(onSaved: (() -> Void)? = nil) {
         guard let worker, !isSavingQuickNote else { return }
         let line = quickNote.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !line.isEmpty else { return }
         quickNote = ""
         isSavingQuickNote = true
+        quickNoteError = nil
+        let submissionID = quickNoteSubmissionID ?? UUID()
+        quickNoteSubmissionID = submissionID
         Task { [weak self] in
             do {
-                try await worker.appendQuickNote(line)
+                try await worker.appendQuickNote(line, submissionID: submissionID)
                 self?.isSavingQuickNote = false
+                self?.quickNoteSubmissionID = nil
+                onSaved?()
             } catch {
                 guard let self else { return }
                 self.isSavingQuickNote = false
                 if self.quickNote.isEmpty { self.quickNote = line }
-                self.errorMessage = "Could not save quick note: \(error.localizedDescription)"
+                self.quickNoteError = error.localizedDescription
             }
         }
     }
@@ -782,6 +914,19 @@ final class AppModel: ObservableObject {
         guard let date = WallClock.dhakaCalendar().date(from: components) else { return }
         let next = (summary.statuses[day] ?? .blank).next
         setStreak(summary.definition, status: next, date: date)
+    }
+
+    func setDailyField(_ definition: DailyFieldDefinition, value: String) {
+        guard let worker else { return }
+        dailyFieldValues[definition.id] = value
+        let date = now
+        dailyFieldSaveTasks[definition.id]?.cancel()
+        dailyFieldSaveTasks[definition.id] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled else { return }
+            do { try await worker.setDailyFieldValue(definition, value: value, date: date) }
+            catch { self?.errorMessage = "Could not save \(definition.name): \(error.localizedDescription)" }
+        }
     }
 
     private func setStreak(_ definition: StreakDefinition, status: StreakStatus, date: Date) {
@@ -809,6 +954,59 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func saveCloudPairingToken() {
+        let token = cloudPairingToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let worker, !token.isEmpty, !isConnectingCloud else { return }
+        isConnectingCloud = true
+        cloudConnectionMessage = "Connecting…"
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try CloudCredentials.savePairingValue(token)
+                UserDefaults.standard.set(0, forKey: "cloudSyncCursor")
+                let result = try await worker.connectCloudSync()
+                self.cloudSyncPaired = true
+                self.cloudPairingToken = ""
+                self.applyCloudSyncResult(result)
+                self.cloudConnectionMessage = result.issue == nil ? "Connected and synced." : "Connected. Sync will retry automatically."
+                self.isConnectingCloud = false
+                self.startCloudSyncLoop()
+                self.reloadVault()
+            } catch {
+                try? CloudCredentials.clear()
+                self.cloudSyncPaired = false
+                self.cloudConnectionMessage = "Connection failed: \(error.localizedDescription)"
+                self.isConnectingCloud = false
+                self.errorMessage = "Could not connect ReFocus sync: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func pasteCloudPairingToken() {
+        guard let value = NSPasteboard.general.string(forType: .string) else {
+            cloudConnectionMessage = "The clipboard does not contain text."
+            return
+        }
+        cloudPairingToken = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        cloudConnectionMessage = nil
+    }
+
+    func disconnectCloudSync() {
+        do {
+            try CloudCredentials.clear()
+            cloudSyncTicker?.cancel()
+            cloudSyncTicker = nil
+            cloudSyncPaired = false
+            cloudSyncStatus = "Local only"
+            cloudSyncPendingCount = 0
+            cloudSyncIssue = nil
+            cloudPairingToken = ""
+            cloudConnectionMessage = "Disconnected."
+        } catch {
+            errorMessage = "Could not remove the pairing token: \(error.localizedDescription)"
+        }
+    }
+
     func tick(at date: Date = Date()) {
         now = date
         clockDisplay.snapshot = clock.snapshot(at: date)
@@ -822,12 +1020,34 @@ final class AppModel: ObservableObject {
             validationIssues = currentValidation(tasks)
         }
 
-        // The sleep cutoff is a true execution boundary, not another planning
-        // gate. ReFocus disarms and gets out of the way after 21:30.
-        if clock.minuteOfDay(for: date) >= 1290 {
+        let minute = clock.minuteOfDay(for: date)
+
+        // Screen breaks are a device-level productivity guard, not a planning
+        // feature. They remain active around the clock whenever ReFocus is
+        // running, including after the 21:30 planning cutoff.
+        if snapshot.phase == .screenBreak {
+            let breakID = sessionID(for: snapshot.cycleStart)
+            if activeBreakID != breakID || overlayController.mode != .screenBreak {
+                activeBreakID = breakID
+                beginCheckIn(id: breakID)
+                isBreakVisible = true
+                overlayController.showBreak(model: self)
+            }
+            return
+        }
+
+        if overlayController.mode == .screenBreak {
+            finalizeCurrentCheckIn()
+            overlayController.hide()
+            isBreakVisible = false
+        }
+        activeBreakID = nil
+
+        // Planning gates apply only to the active day. Outside the routine
+        // window ReFocus stays quiet until the next five-minute screen break.
+        guard minute >= 330 && minute < 1290 else {
             isArmed = false
-            activeBreakID = nil
-            if overlayController.mode != nil { overlayController.hide() }
+            if overlayController.mode == .planningGate { overlayController.hide() }
             isBreakVisible = false
             return
         }
@@ -845,28 +1065,6 @@ final class AppModel: ObservableObject {
         }
 
         if overlayController.mode == .planningGate {
-            overlayController.hide()
-            isBreakVisible = false
-        }
-        let active = isArmed
-
-        if snapshot.phase == .screenBreak && active {
-            let breakID = sessionID(for: snapshot.cycleStart)
-            if activeBreakID != breakID {
-                activeBreakID = breakID
-                beginCheckIn(id: breakID)
-                isBreakVisible = true
-                overlayController.showBreak(model: self)
-            }
-        } else if snapshot.phase == .focus {
-            if overlayController.mode == .screenBreak {
-                finalizeCurrentCheckIn()
-                overlayController.hide()
-                isBreakVisible = false
-            }
-            activeBreakID = nil
-        } else if !active && overlayController.mode == .screenBreak {
-            finalizeCurrentCheckIn()
             overlayController.hide()
             isBreakVisible = false
         }
@@ -957,7 +1155,7 @@ final class AppModel: ObservableObject {
             requireTaskDetails: true
         )
         for segment in PlanningSegment.allCases {
-            let actual = candidate.filter(segment.contains).reduce(0) { $0 + $1.cycles }
+            let actual = candidate.reduce(0) { $0 + $1.planningCycles(in: segment) }
             let required = tomorrowRequiredCycles(segment)
             if actual < required {
                 issues.append(.insufficientSegment(segment: segment, actual: actual, required: required))
@@ -967,7 +1165,8 @@ final class AppModel: ObservableObject {
     }
 
     private func withRecurringFixedTasks(_ existing: [PlanTask]) -> [PlanTask] {
-        var result = existing
+        var seen = Set<UUID>()
+        var result = existing.filter { seen.insert($0.id).inserted }
         for fixed in FixedPlanTasks.daily() {
             if let index = result.firstIndex(where: {
                 if $0.fixedRole == fixed.fixedRole || $0.title.caseInsensitiveCompare(fixed.title) == .orderedSame { return true }
@@ -1000,7 +1199,11 @@ final class AppModel: ObservableObject {
 
     private func agendaSort(_ lhs: AgendaTask, _ rhs: AgendaTask) -> Bool {
         if lhs.date != rhs.date { return lhs.date < rhs.date }
-        return lhs.task.startMinute < rhs.task.startMinute
+        let left = lhs.task.hasScheduledTime ? lhs.task.startMinute : Int.max
+        let right = rhs.task.hasScheduledTime ? rhs.task.startMinute : Int.max
+        return left == right
+            ? lhs.task.title.localizedCaseInsensitiveCompare(rhs.task.title) == .orderedAscending
+            : left < right
     }
 
     private func freshCopy(of template: PlanTask) -> PlanTask {
@@ -1037,13 +1240,19 @@ final class AppModel: ObservableObject {
         if accessedSecurityScopedResource { vaultURL?.stopAccessingSecurityScopedResource() }
         vaultURL = url
         accessedSecurityScopedResource = url.startAccessingSecurityScopedResource()
-        worker = VaultWorker(vaultURL: url)
-        watchers = [VaultWatcher(url: url) { [weak self] in self?.reloadVault() }]
-        let logURL = url.appendingPathComponent("log", isDirectory: true)
-        if FileManager.default.fileExists(atPath: logURL.path) {
-            watchers.append(VaultWatcher(url: logURL) { [weak self] in self?.reloadStreakData() })
+        do {
+            worker = try VaultWorker(vaultURL: url)
+        } catch {
+            worker = nil
+            errorMessage = "Could not open ReFocus storage: \(error.localizedDescription)"
+            return
         }
+        // The database owns live state. iCloud Markdown is output-only, so
+        // projection writes must never trigger a broad vault reload.
+        watchers = []
+        if let worker { Task { await worker.refreshProjections() } }
         reloadVault()
+        startCloudSyncLoop()
     }
 
     private func persistVault(_ url: URL) {
@@ -1069,6 +1278,20 @@ final class AppModel: ObservableObject {
         launchAtLogin = SMAppService.mainApp.status == .enabled
     }
 
+    private func ensureLaunchAtLogin() {
+        guard SMAppService.mainApp.status != .enabled else {
+            launchAtLogin = true
+            return
+        }
+        do {
+            try SMAppService.mainApp.register()
+            refreshLoginStatus()
+        } catch {
+            refreshLoginStatus()
+            errorMessage = "ReFocus could not enable launch at login: \(error.localizedDescription)"
+        }
+    }
+
     private func reloadStreakSummaries() {
         guard let worker else { return }
         let definitions = streakDefinitions
@@ -1086,5 +1309,105 @@ final class AppModel: ObservableObject {
             self.streakDefinitions = definitions
             self.reloadStreakSummaries()
         }
+    }
+
+    private func startCloudSyncLoop() {
+        cloudSyncTicker?.cancel()
+        guard let worker else { return }
+        cloudSyncTicker = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                self.cloudSyncStatus = self.cloudSyncPaired ? "Syncing" : "Checking pairing"
+                let result = await worker.syncNow()
+                self.applyCloudSyncResult(result)
+                if result.changedLocally { self.reloadVault(preservingLocalEdits: true) }
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+        }
+    }
+
+    func syncCloudNow() {
+        guard let worker else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            self.cloudSyncStatus = self.cloudSyncPaired ? "Syncing" : "Checking pairing"
+            let result = await worker.syncNow()
+            self.applyCloudSyncResult(result)
+            if result.changedLocally { self.reloadVault(preservingLocalEdits: true) }
+        }
+    }
+
+    private func applyCloudSyncResult(_ result: CloudSyncResult) {
+        cloudSyncPaired = result.isPaired
+        cloudSyncPendingCount = result.pendingMutations
+        cloudSyncIssue = result.issue
+        if !result.isPaired {
+            cloudSyncStatus = "Local only"
+        } else if result.issue != nil {
+            cloudSyncStatus = "Needs attention"
+        } else {
+            cloudSyncStatus = "Synced"
+            cloudSyncLastSuccess = Date()
+        }
+    }
+
+    private func mergeRemoteTasks(
+        current: [PlanTask], baseline: [PlanTask], remote: [PlanTask]
+    ) -> [PlanTask] {
+        let currentByID = Dictionary(uniqueKeysWithValues: current.map { ($0.id, $0) })
+        let baselineByID = Dictionary(uniqueKeysWithValues: baseline.map { ($0.id, $0) })
+        let remoteIDs = Set(remote.map(\.id))
+        var merged: [PlanTask] = []
+
+        for remoteTask in remote {
+            guard let currentTask = currentByID[remoteTask.id] else {
+                if baselineByID[remoteTask.id] == nil { merged.append(remoteTask) }
+                continue
+            }
+            guard let baselineTask = baselineByID[remoteTask.id] else {
+                merged.append(currentTask)
+                continue
+            }
+            merged.append(mergeTask(current: currentTask, baseline: baselineTask, remote: remoteTask))
+        }
+        for currentTask in current where !remoteIDs.contains(currentTask.id) {
+            guard let baselineTask = baselineByID[currentTask.id] else {
+                merged.append(currentTask)
+                continue
+            }
+            if currentTask != baselineTask { merged.append(currentTask) }
+        }
+        return merged.sorted(by: taskSort)
+    }
+
+    private func mergeTask(current: PlanTask, baseline: PlanTask, remote: PlanTask) -> PlanTask {
+        var value = remote
+        if current.title != baseline.title { value.title = current.title }
+        if current.startMinute != baseline.startMinute { value.startMinute = current.startMinute }
+        if current.cycles != baseline.cycles { value.cycles = current.cycles }
+        if current.kind != baseline.kind { value.kind = current.kind }
+        if current.priority != baseline.priority { value.priority = current.priority }
+        if current.difficulty != baseline.difficulty { value.difficulty = current.difficulty }
+        if current.mvp != baseline.mvp { value.mvp = current.mvp }
+        if current.coreTasks != baseline.coreTasks { value.coreTasks = current.coreTasks }
+        if current.isComplete != baseline.isComplete { value.isComplete = current.isComplete }
+        if current.fixedRole != baseline.fixedRole { value.fixedRole = current.fixedRole }
+        if current.routineOverride != baseline.routineOverride { value.routineOverride = current.routineOverride }
+        if current.routineBlock != baseline.routineBlock { value.routineBlock = current.routineBlock }
+        if current.durationMinutes != baseline.durationMinutes { value.durationMinutes = current.durationMinutes }
+        if current.displayColor != baseline.displayColor { value.displayColor = current.displayColor }
+        if current.predefinedKind != baseline.predefinedKind { value.predefinedKind = current.predefinedKind }
+        if current.predefinedKey != baseline.predefinedKey { value.predefinedKey = current.predefinedKey }
+        if current.predefinedVersion != baseline.predefinedVersion { value.predefinedVersion = current.predefinedVersion }
+        if current.timeAssigned != baseline.timeAssigned { value.timeAssigned = current.timeAssigned }
+        return value
+    }
+
+    private func taskSort(_ lhs: PlanTask, _ rhs: PlanTask) -> Bool {
+        let left = lhs.hasScheduledTime ? lhs.startMinute : Int.max
+        let right = rhs.hasScheduledTime ? rhs.startMinute : Int.max
+        return left == right
+            ? lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+            : left < right
     }
 }

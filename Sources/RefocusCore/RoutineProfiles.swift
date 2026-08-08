@@ -44,7 +44,7 @@ public enum FixedPlanTasks {
     public static let planTomorrowName = "Plan Tomorrow + Miscel Tasks"
     public static let revisionName = "ReVision"
 
-    public static let hardRestWindows = [
+    public static let defaultRestWindows = [
         RoutineWindow(660, 720, .protected, "Rest Block"),
         RoutineWindow(1020, 1080, .protected, "Rest Block"),
     ]
@@ -82,6 +82,194 @@ public enum FixedPlanTasks {
                 ], fixedRole: .revision
             ),
         ]
+    }
+}
+
+/// Editable defaults derived from the live Ikigai routine and the current
+/// university timetable. IDs are stable per date and block so deleting a
+/// default creates a durable tombstone instead of making it reappear.
+public enum PredefinedRoutineBlocks {
+    public static func daily(for date: Date, calendar: Calendar = WallClock.dhakaCalendar()) -> [PlanTask] {
+        let weekday = calendar.component(.weekday, from: date)
+        var blocks = [block(
+            date: date, key: "morning-routine", title: "Morning Routine",
+            start: 330, end: 360, mvp: "Audio Wakeup + Bath & Weight + Coffee & Water",
+            predefinedKind: .morningRoutine, calendar: calendar
+        )]
+
+        switch weekday {
+        case 7, 5: // Saturday, Thursday
+            blocks += [
+                university(date: date, key: "cse220", title: "CSE220 Class", detail: "CSE220-15-SHBZ-09D-17C", start: 480, end: 570, calendar: calendar),
+                block(date: date, key: "cse111-220-study", title: "CSE111/220 Study", start: 570, end: 615, predefinedKind: .study, calendar: calendar),
+                block(date: date, key: "sta201-study", title: "STA201 Study", start: 615, end: 660, predefinedKind: .study, calendar: calendar),
+                university(date: date, key: "sta201", title: "STA201 Class", detail: "STA201-16-SFQR-09H-37C", start: 660, end: 750, calendar: calendar),
+                transition(date: date, key: "return-home", start: 750, end: 780, calendar: calendar),
+                rest(date: date, key: "rest-afternoon", start: 780, end: 840, calendar: calendar),
+                mashup(date: date, key: "mashup-afternoon", start: 840, end: 1140, calendar: calendar),
+            ]
+        case 1: // Sunday
+            blocks.append(mashup(date: date, key: "mashup-morning", start: 360, end: 660, calendar: calendar))
+            blocks += lateUniversity(date: date, finalTitle: "CSE220L Class", finalDetail: "CSE220L-15-TBA-09B-09L", calendar: calendar)
+        case 3: // Tuesday
+            blocks.append(mashup(date: date, key: "mashup-morning", start: 360, end: 660, calendar: calendar))
+            blocks += lateUniversity(date: date, finalTitle: "CSE111 Class", finalDetail: "CSE111-08-KNI-09B-11L", calendar: calendar)
+        default:
+            blocks += standardWorkday(date: date, calendar: calendar)
+        }
+        return blocks.sorted { $0.startMinute < $1.startMinute }
+    }
+
+    private static func lateUniversity(date: Date, finalTitle: String, finalDetail: String, calendar: Calendar) -> [PlanTask] {
+        [
+            rest(date: date, key: "rest-midday", start: 660, end: 720, calendar: calendar),
+            university(date: date, key: "cse111", title: "CSE111 Class", detail: "CSE111-06-ADU-09H-35C", start: 750, end: 840, calendar: calendar),
+            university(date: date, key: "university-final", title: finalTitle, detail: finalDetail, start: 840, end: 1020, calendar: calendar),
+            transition(date: date, key: "return-home", start: 1020, end: 1050, calendar: calendar),
+            rest(date: date, key: "rest-evening", start: 1050, end: 1080, calendar: calendar),
+        ]
+    }
+
+    private static func standardWorkday(date: Date, calendar: Calendar) -> [PlanTask] {
+        [
+            mashup(date: date, key: "mashup-morning", start: 360, end: 660, calendar: calendar),
+            rest(date: date, key: "rest-midday", start: 660, end: 720, calendar: calendar),
+            block(date: date, key: "upsolve-1", title: "Upsolve 1", start: 720, end: 840, predefinedKind: .upsolve, calendar: calendar),
+            block(date: date, key: "upsolve-2", title: "Upsolve 2", start: 840, end: 1020, predefinedKind: .upsolve, calendar: calendar),
+            rest(date: date, key: "rest-evening", start: 1020, end: 1080, calendar: calendar),
+        ]
+    }
+
+    private static func rest(date: Date, key: String, start: Int, end: Int, calendar: Calendar) -> PlanTask {
+        block(
+            date: date, key: key, title: "Rest", start: start, end: end,
+            mvp: "InstaS + Bath + Food + Coffee", displayColor: .green,
+            predefinedKind: .rest, calendar: calendar
+        )
+    }
+
+    private static func transition(date: Date, key: String, start: Int, end: Int, calendar: Calendar) -> PlanTask {
+        block(
+            date: date, key: key, title: "Return Home / Transition",
+            start: start, end: end, predefinedKind: .transition, calendar: calendar
+        )
+    }
+
+    private static func university(
+        date: Date, key: String, title: String, detail: String, start: Int, end: Int, calendar: Calendar
+    ) -> PlanTask {
+        block(
+            date: date, key: key, title: title, start: start, end: end, mvp: detail,
+            displayColor: .red, predefinedKind: .university, calendar: calendar
+        )
+    }
+
+    private static func mashup(date: Date, key: String, start: Int, end: Int, calendar: Calendar) -> PlanTask {
+        let labels: [String]
+        if start == 840 {
+            labels = [
+                "2 - 2.5 -> Skim & Write approaches, tags",
+                "2.5 - 3 -> Try the most solveable one",
+                "3 - 4 -> 2nd most solveable one",
+                "4 - 5 -> 3rd most solveable one",
+                "5 - 6 -> if 3 unsolved, then retry; else 4th",
+                "6 - 7 -> if 4 unsolved, then retry; else 5th",
+            ]
+        } else {
+            labels = [
+                "6 - 6.5 -> Skim & Write approaches, tags",
+                "6.5 - 7 -> Try the most solveable one",
+                "7 - 8 -> 2nd most solveable one",
+                "8 - 9 -> 3rd most solveable one",
+                "9 - 10 -> if 3 unsolved, then retry; else 4th",
+                "10 - 11 -> if 4 unsolved, then retry; else 5th",
+            ]
+        }
+        var task = block(
+            date: date, key: key, title: "5H Mashup", start: start, end: end,
+            mvp: "Just start the contest", kind: .contest, displayColor: .yellow,
+            predefinedKind: .mashup, calendar: calendar
+        )
+        task.priority = "High"
+        task.difficulty = "Hard"
+        task.coreTasks = labels.map { CoreTask(title: $0) }
+        task.predefinedVersion = 3
+        return task
+    }
+
+    private static func block(
+        date: Date, key: String, title: String, start: Int, end: Int,
+        mvp: String = "", kind: TaskKind = .normal, displayColor: TaskDisplayColor = .none,
+        predefinedKind: PredefinedBlockKind, calendar: Calendar
+    ) -> PlanTask {
+        PlanTask(
+            id: stableID(date: date, key: key, calendar: calendar), title: title,
+            startMinute: start, cycles: max(1, (end - start + 29) / 30),
+            kind: kind, priority: "Medium", difficulty: "Easy", mvp: mvp,
+            routineOverride: true, routineBlock: true, durationMinutes: end - start,
+            displayColor: displayColor, predefinedKind: predefinedKind,
+            predefinedKey: key, predefinedVersion: 2
+        )
+    }
+
+    public static func retiredIDs(for date: Date, calendar: Calendar = WallClock.dhakaCalendar()) -> [UUID] {
+        guard [5, 7].contains(calendar.component(.weekday, from: date)) else { return [] }
+        return ["rest-evening", "mashup-evening"].map { stableID(date: date, key: $0, calendar: calendar) }
+    }
+
+    public static func upgrade(_ existing: PlanTask, to definition: PlanTask) -> PlanTask {
+        var task = existing
+        let key = definition.predefinedKey ?? existing.predefinedKey
+        let legacyTitles: Set<String> = [
+            "Morning Routine — Audio Wakeup + Bath & Weight + Coffee & Water",
+            "Rest — InstaS + Bath + Food + Coffee",
+            "CSE220-15-SHBZ-09D-17C", "CSE220L-15-TBA-09B-09L",
+            "STA201-16-SFQR-09H-37C", "CSE111-06-ADU-09H-35C", "CSE111-08-KNI-09B-11L",
+        ]
+        if legacyTitles.contains(task.title) || task.title.isEmpty { task.title = definition.title }
+        if definition.predefinedKind == .mashup {
+            // Version 3 intentionally normalizes every recurring Mashup to the
+            // exact contest definition requested by the user.
+            task.title = definition.title
+            task.startMinute = definition.startMinute
+            task.durationMinutes = definition.durationMinutes
+            task.cycles = definition.cycles
+            task.kind = definition.kind
+            task.priority = definition.priority
+            task.difficulty = definition.difficulty
+            task.mvp = definition.mvp
+            task.coreTasks = definition.coreTasks
+            task.displayColor = definition.displayColor
+        } else {
+            if task.mvp.isEmpty { task.mvp = definition.mvp }
+            if task.displayColor == nil { task.displayColor = definition.displayColor }
+        }
+        task.routineBlock = true
+        task.predefinedKind = definition.predefinedKind
+        task.predefinedKey = key
+        task.predefinedVersion = definition.predefinedVersion
+        return task
+    }
+
+    public static func stableID(date: Date, key: String, calendar: Calendar = WallClock.dhakaCalendar()) -> UUID {
+        let day = MarkdownPlanCodec.isoDate(date, calendar: calendar)
+        let input = "refocus-routine:\(day):\(key)"
+        var bytes = [UInt8](repeating: 0, count: 16)
+        for salt in 0..<4 {
+            var hash: UInt32 = 2_166_136_261
+            for byte in "\(input)#\(salt)".utf8 {
+                hash = (hash ^ UInt32(byte)) &* 16_777_619
+            }
+            for offset in 0..<4 {
+                bytes[salt * 4 + offset] = UInt8((hash >> UInt32((3 - offset) * 8)) & 0xff)
+            }
+        }
+        bytes[6] = (bytes[6] & 0x0f) | 0x50
+        bytes[8] = (bytes[8] & 0x3f) | 0x80
+        return UUID(uuid: (
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+        ))
     }
 }
 
@@ -157,7 +345,7 @@ public struct PlanValidator: Sendable {
         var available = 0
         var cursor = firstAvailableSlot
         while cursor + 30 <= segment.endMinute {
-            let blocked = (profile.protectedWindows + FixedPlanTasks.hardRestWindows)
+            let blocked = (profile.protectedWindows + FixedPlanTasks.defaultRestWindows)
                 .contains { $0.overlaps(start: cursor, end: cursor + 30) }
             if !blocked { available += 1 }
             cursor += 30
@@ -174,13 +362,19 @@ public struct PlanValidator: Sendable {
         countedSegment: PlanningSegment? = nil
     ) -> [PlanValidationIssue] {
         var issues: [PlanValidationIssue] = []
-        let countedTasks = countedSegment.map { segment in tasks.filter(segment.contains) } ?? tasks
-        let totalCycles = countedTasks.reduce(0) { $0 + $1.cycles }
+        var seenTaskIDs = Set<UUID>()
+        let uniqueTasks = tasks.filter { seenTaskIDs.insert($0.id).inserted }
+        let totalCycles: Int
+        if let countedSegment {
+            totalCycles = uniqueTasks.reduce(0) { $0 + $1.planningCycles(in: countedSegment) }
+        } else {
+            totalCycles = uniqueTasks.filter(\.hasScheduledTime).filter(\.countsTowardPlanning).reduce(0) { $0 + $1.cycles }
+        }
         if totalCycles < minimumCycles {
             issues.append(.insufficientCycles(actual: totalCycles, required: minimumCycles))
         }
 
-        for task in tasks {
+        for task in uniqueTasks {
             let cleanTitle = task.title.trimmingCharacters(in: .whitespacesAndNewlines)
             let displayTitle = cleanTitle.isEmpty ? "Unnamed task" : cleanTitle
             if cleanTitle.isEmpty || cleanTitle.caseInsensitiveCompare("New task") == .orderedSame {
@@ -194,14 +388,16 @@ public struct PlanValidator: Sendable {
             }
             switch task.kind {
             case .normal:
-                if !(1...4).contains(task.cycles) { issues.append(.invalidCycleCount(task: displayTitle)) }
+                if !(1...(task.isRoutineBlock ? 10 : 4)).contains(task.cycles) {
+                    issues.append(.invalidCycleCount(task: displayTitle))
+                }
             case .contest:
                 if !(1...10).contains(task.cycles) {
                     issues.append(.invalidContest(task: displayTitle))
                 }
             }
 
-            if requireTaskDetails {
+            if requireTaskDetails && !task.isRoutineBlock {
                 if task.mvp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     issues.append(.missingMVP(task: displayTitle))
                 }
@@ -213,11 +409,12 @@ public struct PlanValidator: Sendable {
                     issues.append(.emptyCoreTask(task: displayTitle))
                 }
             }
-            if task.endMinute > 1290 { issues.append(.afterSleepCutoff(task: displayTitle)) }
-            for window in FixedPlanTasks.hardRestWindows where window.overlaps(start: task.startMinute, end: task.endMinute) {
-                issues.append(.hardRest(task: displayTitle, startMinute: window.startMinute, endMinute: window.endMinute))
+            if requireTaskDetails && !task.hasScheduledTime {
+                issues.append(.missingTime(task: displayTitle))
             }
-            if !task.routineOverride {
+            guard task.hasScheduledTime else { continue }
+            if task.endMinute > 1290 { issues.append(.afterSleepCutoff(task: displayTitle)) }
+            if !task.routineOverride && !task.isRoutineBlock {
                 for window in profile.protectedWindows where window.overlaps(start: task.startMinute, end: task.endMinute) {
                     issues.append(.routineConflict(
                         taskID: task.id,
@@ -230,9 +427,9 @@ public struct PlanValidator: Sendable {
             }
         }
 
-        if requireFixedTasks { validateFixedTasks(tasks, issues: &issues) }
+        if requireFixedTasks { validateFixedTasks(uniqueTasks, issues: &issues) }
 
-        let ordered = tasks.sorted { $0.startMinute < $1.startMinute }
+        let ordered = uniqueTasks.filter(\.hasScheduledTime).sorted { $0.startMinute < $1.startMinute }
         for pair in zip(ordered, ordered.dropFirst()) where pair.0.endMinute > pair.1.startMinute {
             let allowedEveningOverlap = Set([pair.0.fixedRole, pair.1.fixedRole]) == Set([.planTomorrow, .revision])
                 && max(pair.0.startMinute, pair.1.startMinute) >= 1260

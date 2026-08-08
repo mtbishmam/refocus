@@ -89,22 +89,19 @@ final class GlobalQuickNoteController {
         )
         position(panel)
         panel.orderFrontRegardless()
-        NSApp.activate()
-        panel.makeKeyAndOrderFront(nil)
-        // The global key-down event is still being dispatched while this runs.
-        // Repeat activation just after it finishes so the previous application
-        // cannot reclaim keyboard focus from the capture field.
+        panel.makeKey()
+        // A non-activating panel accepts typing without bringing ReFocus or its
+        // dashboard forward. Focus once more after the hot-key event finishes.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak panel] in
             guard let panel, panel.isVisible else { return }
-            NSApp.activate()
-            panel.makeKeyAndOrderFront(nil)
+            panel.makeKey()
         }
     }
 
     private func makePanel() -> QuickNotePanel {
         let panel = QuickNotePanel(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 74),
-            styleMask: [.borderless],
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 92),
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
@@ -114,6 +111,7 @@ final class GlobalQuickNoteController {
         panel.isOpaque = false
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
+        panel.becomesKeyOnlyIfNeeded = true
         panel.isReleasedWhenClosed = false
         return panel
     }
@@ -140,26 +138,31 @@ private struct GlobalQuickNoteView: View {
     let dismiss: () -> Void
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "square.and.pencil")
-                .font(.title3.bold())
-                .foregroundStyle(.orange)
-            TextField("Quick note → dump.md", text: $model.quickNote)
-                .textFieldStyle(.plain)
-                .font(.system(size: 16, weight: .medium))
-                .focused($isFocused)
-                .onSubmit {
-                    let hasText = !model.quickNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    guard hasText else { return }
-                    model.submitQuickNote()
-                    dismiss()
-                }
-            Text("↩ Save")
-                .font(.caption.bold())
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 10) {
+                Image(systemName: "square.and.pencil")
+                    .font(.title3.bold())
+                    .foregroundStyle(.orange)
+                TextField("Quick note → dump.md", text: $model.quickNote)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 16, weight: .medium))
+                    .focused($isFocused)
+                    .onSubmit {
+                        let hasText = !model.quickNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        guard hasText else { return }
+                        model.submitQuickNote(onSaved: dismiss)
+                    }
+                    .disabled(model.isSavingQuickNote)
+                Text(model.isSavingQuickNote ? "Saving…" : "↩ Save")
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+            }
+            if let error = model.quickNoteError {
+                Text(error).font(.caption2).foregroundStyle(.red).lineLimit(1)
+            }
         }
         .padding(.horizontal, 18)
-        .frame(width: 460, height: 74)
+        .frame(width: 460, height: 92)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.18)))
         .onAppear {

@@ -9,7 +9,6 @@ struct MenuContentView: View {
         VStack(alignment: .leading, spacing: 12) {
             MenuClockStatus(model: model, clock: model.clockDisplay)
             Text(model.planMessage).font(.caption).foregroundStyle(.secondary)
-            QuickNoteBar(compact: true)
             Divider()
             if model.isArmed {
                 Button("End Work") { model.stopWork() }
@@ -63,7 +62,7 @@ struct DashboardView: View {
                 Text("Agenda").tag(DashboardTab.agenda)
                 Text("Today").tag(DashboardTab.today)
                 Text("Tomorrow").tag(DashboardTab.tomorrow)
-                Text("Streaks").tag(DashboardTab.streaks)
+                Text("Daily").tag(DashboardTab.streaks)
                 Text("Settings").tag(DashboardTab.settings)
             }
             .pickerStyle(.segmented)
@@ -83,10 +82,6 @@ struct DashboardView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            QuickNoteBar()
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-                .padding(.bottom, 12)
         }
         .background(dashboardBackground)
         .frame(minWidth: 860, minHeight: 620)
@@ -115,36 +110,39 @@ private enum DashboardTab: Hashable {
     case settings
 }
 
-private struct QuickNoteBar: View {
-    @EnvironmentObject private var model: AppModel
-    var compact = false
+private func taskVisible(
+    _ task: PlanTask, showUser: Bool, showPredefined: Bool, showFixed: Bool
+) -> Bool {
+    if task.fixedRole != nil { return showFixed }
+    if task.isRoutineBlock { return showPredefined }
+    return showUser
+}
+
+private struct TaskVisibilityMenu: View {
+    @Binding var showUser: Bool
+    @Binding var showPredefined: Bool
+    @Binding var showFixed: Bool
 
     var body: some View {
-        HStack(spacing: 8) {
-            if !compact {
-                Label("Quick note", systemImage: "square.and.pencil")
-                    .font(.caption.bold())
-                    .foregroundStyle(.secondary)
+        Menu("Filter") {
+            Toggle("User tasks", isOn: $showUser)
+            Toggle("Predefined blocks", isOn: $showPredefined)
+            Toggle("Fixed blocks", isOn: $showFixed)
+            Divider()
+            Button("Show All") {
+                showUser = true
+                showPredefined = true
+                showFixed = true
             }
-            TextField("Append one line to dump.md", text: $model.quickNote)
-                .textFieldStyle(.roundedBorder)
-                .onSubmit { model.submitQuickNote() }
-            Button {
-                model.submitQuickNote()
-            } label: {
-                Image(systemName: model.isSavingQuickNote ? "ellipsis" : "arrow.down.doc")
-                    .frame(width: 22, height: 22)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.borderless)
-            .disabled(model.quickNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isSavingQuickNote)
-            .help("Append to dump.md")
         }
     }
 }
 
 struct PlanEditorView: View {
     @EnvironmentObject private var model: AppModel
+    @AppStorage("taskFilterShowUser") private var showUserTasks = true
+    @AppStorage("taskFilterShowPredefined") private var showPredefinedBlocks = true
+    @AppStorage("taskFilterShowFixed") private var showFixedBlocks = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -163,6 +161,7 @@ struct PlanEditorView: View {
                     }
                 }
                 Spacer()
+                TaskVisibilityMenu(showUser: $showUserTasks, showPredefined: $showPredefinedBlocks, showFixed: $showFixedBlocks)
                 Button {
                     model.toggleAllTasksCollapsed(model.tasks)
                 } label: {
@@ -210,7 +209,9 @@ struct PlanEditorView: View {
             } else if model.isEditingPlan {
                 ScrollView {
                     LazyVStack(spacing: 12) {
-                        ForEach(Array(model.tasks.enumerated()), id: \.element.id) { index, task in
+                        ForEach(Array(model.tasks.enumerated()).filter {
+                            taskVisible($0.element, showUser: showUserTasks, showPredefined: showPredefinedBlocks, showFixed: showFixedBlocks)
+                        }, id: \.element.id) { index, task in
                             TaskEditorRow(task: $model.tasks[index], cyclesChanged: {
                                 model.normalizeCoreTasks(for: task.id)
                             }, delete: {
@@ -225,7 +226,7 @@ struct PlanEditorView: View {
                             .id(task.id)
                             .onChange(of: task) { model.markPlanDirty() }
                             .padding(.horizontal, 16)
-                            .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 14))
+                            .background((task.displayColor ?? .none).swiftUIColor.opacity(task.displayColor == nil ? 0.055 : 0.13), in: RoundedRectangle(cornerRadius: 14))
                             .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.09)))
                         }
                     }
@@ -274,6 +275,9 @@ struct PlanEditorView: View {
 
 struct TomorrowPlanView: View {
     @EnvironmentObject private var model: AppModel
+    @AppStorage("taskFilterShowUser") private var showUserTasks = true
+    @AppStorage("taskFilterShowPredefined") private var showPredefinedBlocks = true
+    @AppStorage("taskFilterShowFixed") private var showFixedBlocks = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -285,6 +289,7 @@ struct TomorrowPlanView: View {
                     Text(model.tomorrowCycleSummary).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
+                TaskVisibilityMenu(showUser: $showUserTasks, showPredefined: $showPredefinedBlocks, showFixed: $showFixedBlocks)
                 Button {
                     model.toggleAllTasksCollapsed(model.tomorrowTasks)
                 } label: {
@@ -309,7 +314,9 @@ struct TomorrowPlanView: View {
 
             ScrollView {
                 LazyVStack(spacing: 12) {
-                    ForEach(Array(model.tomorrowTasks.enumerated()), id: \.element.id) { index, task in
+                    ForEach(Array(model.tomorrowTasks.enumerated()).filter {
+                        taskVisible($0.element, showUser: showUserTasks, showPredefined: showPredefinedBlocks, showFixed: showFixedBlocks)
+                    }, id: \.element.id) { index, task in
                         TaskEditorRow(
                             task: $model.tomorrowTasks[index],
                             cyclesChanged: { model.normalizeTomorrowSubtasks(for: task.id) },
@@ -321,7 +328,7 @@ struct TomorrowPlanView: View {
                         .id(task.id)
                         .onChange(of: task) { model.markTomorrowDirty() }
                         .padding(.horizontal, 16)
-                        .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 14))
+                        .background((task.displayColor ?? .none).swiftUIColor.opacity(task.displayColor == nil ? 0.055 : 0.13), in: RoundedRectangle(cornerRadius: 14))
                         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.09)))
                     }
                 }.padding()
@@ -358,24 +365,12 @@ private struct TaskEditorRow: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .bottom, spacing: 12) {
                 Toggle("", isOn: $task.isComplete).labelsHidden()
-                editorField("Task name") {
-                    TextField("Rename this task", text: $task.title)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.headline)
-                        .disabled(task.fixedRole != nil)
-                }
-                .frame(minWidth: 260)
-                VStack(alignment: .trailing, spacing: 4) {
-                    Text("TIME BLOCK").font(.caption2.bold()).foregroundStyle(.secondary)
-                    Text(MarkdownPlanCodec.time(task.startMinute) + "–" + MarkdownPlanCodec.time(task.endMinute))
-                        .monospacedDigit()
-                }
-                Button(role: .destructive, action: delete) {
-                    Image(systemName: "trash")
-                }
-                .buttonStyle(.borderless)
-                .disabled(task.fixedRole != nil)
-                .help("Delete task")
+                Text(task.hasScheduledTime
+                    ? MarkdownPlanCodec.time(task.startMinute) + "–" + MarkdownPlanCodec.time(task.endMinute)
+                    : "No time")
+                    .monospacedDigit().foregroundStyle(.secondary).frame(width: 112, alignment: .leading)
+                Text(task.title).font(.headline)
+                Spacer()
                 Button { model.toggleCollapsed(task.id) } label: {
                     Image(systemName: model.collapsedTaskIDs.contains(task.id) ? "chevron.down" : "chevron.up")
                 }
@@ -383,10 +378,25 @@ private struct TaskEditorRow: View {
             }
 
             if !model.collapsedTaskIDs.contains(task.id) {
+              editorField("Task name") {
+                TextField("Rename this task", text: $task.title)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.headline)
+                    .disabled(task.fixedRole != nil)
+              }
               HStack(alignment: .bottom, spacing: 14) {
                 editorField("Start") {
-                    TimeEditorField(minute: $task.startMinute)
-                        .disabled(task.fixedRole != nil)
+                    if task.fixedRole != nil || task.isRoutineBlock {
+                        TimeEditorField(minute: $task.startMinute).disabled(task.fixedRole != nil)
+                    } else {
+                        HStack {
+                            Toggle("Scheduled", isOn: Binding(
+                                get: { task.hasScheduledTime },
+                                set: { task.timeAssigned = $0 ? nil : false }
+                            )).toggleStyle(.checkbox)
+                            if task.hasScheduledTime { TimeEditorField(minute: $task.startMinute) }
+                        }
+                    }
                 }
                 editorField("Priority") {
                     Picker("", selection: $task.priority) {
@@ -417,8 +427,21 @@ private struct TaskEditorRow: View {
                         value: $task.cycles,
                         in: durationRange
                     )
-                    .onChange(of: task.cycles) { cyclesChanged() }
+                    .onChange(of: task.cycles) {
+                        task.durationMinutes = nil
+                        cyclesChanged()
+                    }
                     .frame(width: 145)
+                }
+                editorField("Color") {
+                    Picker("", selection: Binding(
+                        get: { task.displayColor ?? TaskDisplayColor.none },
+                        set: { task.displayColor = $0 == TaskDisplayColor.none ? nil : $0 }
+                    )) {
+                        ForEach(TaskDisplayColor.allCases, id: \.self) { Text($0.label).tag($0) }
+                    }
+                    .labelsHidden()
+                    .frame(width: 110)
                 }
               }
 
@@ -428,6 +451,7 @@ private struct TaskEditorRow: View {
                     .lineLimit(2...4)
               }
 
+              if !task.isRoutineBlock {
               VStack(alignment: .leading, spacing: 8) {
                     HStack {
                     Text("SUBTASKS · at least three")
@@ -456,6 +480,12 @@ private struct TaskEditorRow: View {
                     }
               }
               .padding(.leading, 30)
+              }
+              HStack {
+                Spacer()
+                Button("Delete", role: .destructive, action: delete)
+                    .disabled(task.fixedRole != nil)
+              }
             }
         }
         .padding(.vertical, 12)
@@ -465,7 +495,7 @@ private struct TaskEditorRow: View {
         switch task.fixedRole {
         case .planTomorrow: 1...2
         case .dayAnalysis, .revision: 1...1
-        case nil: task.kind == .normal ? 1...4 : 1...10
+        case nil: task.isRoutineBlock ? 1...10 : (task.kind == .normal ? 1...4 : 1...10)
         }
     }
 
@@ -481,11 +511,16 @@ private struct TaskEditorRow: View {
 
 private struct SavedPlanView: View {
     @EnvironmentObject private var model: AppModel
+    @AppStorage("taskFilterShowUser") private var showUserTasks = true
+    @AppStorage("taskFilterShowPredefined") private var showPredefinedBlocks = true
+    @AppStorage("taskFilterShowFixed") private var showFixedBlocks = true
 
     var body: some View {
         ScrollView {
             LazyVStack(spacing: 14) {
-                ForEach(model.tasks) { task in
+                ForEach(model.tasks.filter {
+                    taskVisible($0, showUser: showUserTasks, showPredefined: showPredefinedBlocks, showFixed: showFixedBlocks)
+                }) { task in
                     SavedTaskCard(task: task, isCurrent: task.id == model.executionTask?.id)
                 }
             }
@@ -509,20 +544,18 @@ private struct SavedTaskCard: View {
                     Image(systemName: task.isComplete ? "checkmark.circle.fill" : "circle")
                         .foregroundStyle(task.isComplete ? .green : .secondary)
                 }.buttonStyle(.plain)
+                Text(MarkdownPlanCodec.time(task.startMinute) + "–" + MarkdownPlanCodec.time(task.endMinute))
+                    .monospacedDigit().foregroundStyle(.secondary).frame(width: 112, alignment: .leading)
                 Text(task.title).font(.headline)
                 tag(task.priority, color: priorityColor)
                 tag(task.difficulty, color: difficultyColor)
                 Spacer()
-                Text(MarkdownPlanCodec.time(task.startMinute) + "–" + MarkdownPlanCodec.time(task.endMinute))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
                 Button { model.toggleCollapsed(task.id) } label: {
                     Image(systemName: model.collapsedTaskIDs.contains(task.id) ? "chevron.down" : "chevron.up")
                 }.buttonStyle(.plain)
             }
             if !model.collapsedTaskIDs.contains(task.id) {
-              Text("MVP → \(task.mvp)")
-                .font(.subheadline)
+              if !task.mvp.isEmpty { Text("MVP → \(task.mvp)").font(.subheadline) }
               ForEach(Array(task.coreTasks.enumerated()), id: \.element.id) { index, core in
                 if model.showCompletedSubtasks || !core.isComplete {
                 HStack(spacing: 8) {
@@ -547,12 +580,19 @@ private struct SavedTaskCard: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(isCurrent ? Color.orange.opacity(0.20) : Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 12))
+        .background(
+            isCurrent ? Color.orange.opacity(0.20) : (task.displayColor ?? .none).swiftUIColor.opacity(task.displayColor == nil ? 0.055 : 0.13),
+            in: RoundedRectangle(cornerRadius: 12)
+        )
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(isCurrent ? Color.orange.opacity(0.35) : Color.primary.opacity(0.08)))
         .sheet(isPresented: $showingReschedule) {
             VStack(alignment: .leading, spacing: 18) {
                 Text("Reschedule \(task.title)").font(.title2.bold())
-                DatePicker("Future date", selection: $rescheduleDate, in: model.now..., displayedComponents: .date)
+                DatePicker(
+                    "Date", selection: $rescheduleDate,
+                    in: WallClock.dhakaCalendar().startOfDay(for: model.now)...,
+                    displayedComponents: .date
+                )
                 HStack {
                     Spacer()
                     Button("Cancel") { showingReschedule = false }
@@ -665,12 +705,16 @@ struct AgendaView: View {
         let tomorrowEntries = model.tomorrowTasks.map { AgendaTask(date: model.tomorrowDate, task: $0) }
         let liveIDs = Set((todayEntries + tomorrowEntries).map(\.id))
         return (todayEntries + tomorrowEntries + model.agendaTasks.filter { !liveIDs.contains($0.id) })
-            .filter { $0.task.fixedRole == nil }
+            .filter { $0.task.fixedRole == nil && !$0.task.isRoutineBlock }
             .filter { priority.includes($0.task) }
             .filter { futureLimit == nil || $0.date < futureLimit! }
             .sorted {
                 if $0.date != $1.date { return $0.date < $1.date }
-                return $0.task.startMinute < $1.task.startMinute
+                let left = $0.task.hasScheduledTime ? $0.task.startMinute : Int.max
+                let right = $1.task.hasScheduledTime ? $1.task.startMinute : Int.max
+                return left == right
+                    ? $0.task.title.localizedCaseInsensitiveCompare($1.task.title) == .orderedAscending
+                    : left < right
             }
     }
 
@@ -697,7 +741,7 @@ struct AgendaView: View {
                 }
                 .pickerStyle(.menu)
                 .frame(width: 145)
-                Button("Add Scheduled Task") { showingAdd = true }
+                Button("Add Task") { showingAdd = true }
                 Button {
                     model.toggleAllTasksCollapsed(entries.map(\.task))
                 } label: {
@@ -738,7 +782,7 @@ private struct ScheduledTaskSheet: View {
     @Binding var isPresented: Bool
     @State private var date = WallClock.dhakaCalendar().date(byAdding: .day, value: 1, to: Date()) ?? Date()
     @State private var task = PlanTask(
-        title: "", startMinute: 1080, cycles: 1, mvp: "", coreTasks: []
+        title: "", startMinute: 540, cycles: 1, mvp: "", coreTasks: [], timeAssigned: false
     )
 
     private var canSave: Bool {
@@ -747,38 +791,23 @@ private struct ScheduledTaskSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Add Scheduled Task").font(.title2.bold())
-            DatePicker("Date", selection: $date, in: model.now..., displayedComponents: .date)
+            Text("Add Task").font(.title2.bold())
+            DatePicker(
+                "Date", selection: $date,
+                in: WallClock.dhakaCalendar().startOfDay(for: model.now)...,
+                displayedComponents: .date
+            )
             TextField("Task name", text: $task.title).textFieldStyle(.roundedBorder)
             HStack {
-                TimeEditorField(minute: $task.startMinute)
-                Picker("Priority", selection: $task.priority) {
-                    ForEach(["Do/Die", "High", "Medium", "Low"], id: \.self) { Text($0).tag($0) }
-                }
-                Picker("Difficulty", selection: $task.difficulty) {
-                    ForEach(["Hard", "Moderate", "Easy"], id: \.self) { Text($0).tag($0) }
-                }
-                Picker("Kind", selection: $task.kind) {
-                    Text("Normal").tag(TaskKind.normal)
-                    Text("Contest").tag(TaskKind.contest)
-                }
-                Stepper("\(task.cycles) cycle\(task.cycles == 1 ? "" : "s")", value: $task.cycles, in: task.kind == .normal ? 1...4 : 1...10)
-            }
-            TextField("MVP · completion definition", text: $task.mvp, axis: .vertical)
-                .textFieldStyle(.roundedBorder).lineLimit(2...4)
-            HStack {
-                Text("OPTIONAL SUBTASKS").font(.caption.bold()).foregroundStyle(.secondary)
+                Toggle("Assign a time now", isOn: Binding(
+                    get: { task.hasScheduledTime },
+                    set: { task.timeAssigned = $0 ? nil : false }
+                ))
+                if task.hasScheduledTime { TimeEditorField(minute: $task.startMinute) }
                 Spacer()
-                Button("Add Subtask") { task.coreTasks.append(CoreTask(title: "")) }
             }
-            ForEach(Array(task.coreTasks.indices), id: \.self) { index in
-                HStack {
-                    Text("\(index + 1).").foregroundStyle(.secondary)
-                    TextField("Subtask", text: $task.coreTasks[index].title).textFieldStyle(.roundedBorder)
-                    Button(role: .destructive) { task.coreTasks.remove(at: index) } label: { Image(systemName: "minus.circle") }
-                        .buttonStyle(.borderless)
-                }
-            }
+            Text("You can add the time, MVP, and subtasks later when you prepare the day.")
+                .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Spacer()
                 Button("Cancel") { isPresented = false }
@@ -856,6 +885,40 @@ private struct AgendaTaskRow: View {
         )
     }
 
+    private var cycleBinding: Binding<Int> {
+        Binding(
+            get: { taskBinding.wrappedValue.cycles },
+            set: { value in
+                var task = taskBinding.wrappedValue
+                task.cycles = value
+                task.durationMinutes = nil
+                taskBinding.wrappedValue = task
+            }
+        )
+    }
+
+    private var colorBinding: Binding<TaskDisplayColor> {
+        Binding(
+            get: { taskBinding.wrappedValue.displayColor ?? .none },
+            set: { value in
+                var task = taskBinding.wrappedValue
+                task.displayColor = value == .none ? nil : value
+                taskBinding.wrappedValue = task
+            }
+        )
+    }
+
+    private var hasTimeBinding: Binding<Bool> {
+        Binding(
+            get: { taskBinding.wrappedValue.hasScheduledTime },
+            set: { value in
+                var task = taskBinding.wrappedValue
+                task.timeAssigned = value ? nil : false
+                taskBinding.wrappedValue = task
+            }
+        )
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -871,29 +934,14 @@ private struct AgendaTaskRow: View {
                     Image(systemName: entry.task.isComplete ? "checkmark.circle.fill" : "circle")
                         .foregroundStyle(entry.task.isComplete ? .green : .secondary)
                 }.buttonStyle(.plain)
-                Text(MarkdownPlanCodec.time(entry.task.startMinute) + "–" + MarkdownPlanCodec.time(entry.task.endMinute))
+                Text(entry.task.hasScheduledTime
+                    ? MarkdownPlanCodec.time(entry.task.startMinute) + "–" + MarkdownPlanCodec.time(entry.task.endMinute)
+                    : "No time")
                     .monospacedDigit().foregroundStyle(.secondary).frame(width: 112, alignment: .leading)
                 Text(entry.task.title).font(.headline)
                 Spacer()
                 agendaTag(entry.task.priority, color: priorityColor)
                 agendaTag(entry.task.difficulty, color: difficultyColor)
-                if !entry.task.isComplete && entry.task.fixedRole == nil && (isLiveToday || isScheduledAgenda) {
-                    Button("Reschedule") {
-                        moveDate = entry.date
-                        showingMove = true
-                    }.buttonStyle(.borderless)
-                }
-                if isScheduledAgenda && !isLiveTomorrow {
-                    Button(role: .destructive) {
-                        model.deleteAgendaTask(entry.id)
-                    } label: {
-                        Image(systemName: "trash")
-                            .frame(width: 32, height: 32)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("Delete from Agenda")
-                }
                 Button { model.toggleCollapsed(entry.id) } label: {
                     Image(systemName: model.collapsedTaskIDs.contains(entry.id) ? "chevron.down" : "chevron.up")
                         .frame(width: 38, height: 34)
@@ -904,10 +952,23 @@ private struct AgendaTaskRow: View {
             }
             if !model.collapsedTaskIDs.contains(entry.id) {
                 VStack(alignment: .leading, spacing: 8) {
+                    TextField("Task name", text: taskBinding.title)
+                        .textFieldStyle(.roundedBorder)
                     HStack(spacing: 14) {
-                        Text("Priority")
-                            .font(.caption.bold())
-                            .foregroundStyle(.secondary)
+                        Toggle("Assign time", isOn: hasTimeBinding).toggleStyle(.checkbox)
+                        if taskBinding.wrappedValue.hasScheduledTime {
+                            TimeEditorField(minute: taskBinding.startMinute).frame(width: 74)
+                        }
+                        Text("Duration").font(.caption.bold()).foregroundStyle(.secondary)
+                        Stepper(
+                            "\(taskBinding.wrappedValue.cycles)×",
+                            value: cycleBinding,
+                            in: 1...(taskBinding.wrappedValue.kind == .contest || taskBinding.wrappedValue.isRoutineBlock ? 10 : 4)
+                        ).frame(width: 92)
+                        Picker("Kind", selection: taskBinding.kind) {
+                            Text("Normal").tag(TaskKind.normal)
+                            Text("Contest").tag(TaskKind.contest)
+                        }.frame(width: 105)
                         Picker("Priority", selection: taskBinding.priority) {
                             ForEach(["Do/Die", "High", "Medium", "Low"], id: \.self) {
                                 Text($0).tag($0)
@@ -917,9 +978,6 @@ private struct AgendaTaskRow: View {
                         .pickerStyle(.menu)
                         .frame(width: 120)
 
-                        Text("Difficulty")
-                            .font(.caption.bold())
-                            .foregroundStyle(.secondary)
                         Picker("Difficulty", selection: taskBinding.difficulty) {
                             ForEach(["Hard", "Moderate", "Easy"], id: \.self) {
                                 Text($0).tag($0)
@@ -928,6 +986,11 @@ private struct AgendaTaskRow: View {
                         .labelsHidden()
                         .pickerStyle(.menu)
                         .frame(width: 120)
+                        Picker("Color", selection: colorBinding) {
+                            ForEach(TaskDisplayColor.allCases, id: \.self) { Text($0.label).tag($0) }
+                        }
+                        .pickerStyle(.menu)
+                        .frame(width: 105)
                         Spacer()
                     }
                     TextField("Optional MVP · add when preparing the task", text: taskBinding.mvp, axis: .vertical)
@@ -954,26 +1017,65 @@ private struct AgendaTaskRow: View {
                             .buttonStyle(.borderless)
                         }
                     }
+                    HStack {
+                        if !entry.task.isComplete && entry.task.fixedRole == nil && (isLiveToday || isLiveTomorrow || isScheduledAgenda) {
+                            Button("Reschedule") {
+                                moveDate = isLiveToday
+                                    ? (WallClock.dhakaCalendar().date(byAdding: .day, value: 1, to: model.now) ?? model.now)
+                                    : entry.date
+                                showingMove = true
+                            }
+                        }
+                        Spacer()
+                        if isScheduledAgenda && !isLiveTomorrow {
+                            Button("Delete", role: .destructive) { model.deleteAgendaTask(entry.id) }
+                        } else if entry.task.isRoutineBlock && (isLiveToday || isLiveTomorrow) {
+                            Button("Remove for this day", role: .destructive) {
+                                if isLiveToday {
+                                    model.removeTask(id: entry.id)
+                                    model.scheduleAgendaTodayAutosave()
+                                } else {
+                                    model.removeTomorrowTask(id: entry.id)
+                                    model.scheduleAgendaTomorrowAutosave()
+                                }
+                            }
+                        }
+                    }
                 }.padding(.leading, 148)
             }
         }
         .padding(12)
-        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
+        .background(rowColor.opacity(entry.task.displayColor == nil ? 0.05 : 0.13), in: RoundedRectangle(cornerRadius: 10))
         .sheet(isPresented: $showingMove) {
             VStack(alignment: .leading, spacing: 18) {
                 Text("Reschedule \(entry.task.title)").font(.title2.bold())
-                DatePicker("Future date", selection: $moveDate, in: model.now..., displayedComponents: .date)
+                HStack {
+                    Button("Today") {
+                        moveDate = WallClock.dhakaCalendar().startOfDay(for: model.now)
+                    }
+                    Button("Tomorrow") {
+                        moveDate = WallClock.dhakaCalendar().startOfDay(for: model.tomorrowDate)
+                    }
+                }
+                DatePicker(
+                    "Date", selection: $moveDate,
+                    in: WallClock.dhakaCalendar().startOfDay(for: model.now)...,
+                    displayedComponents: .date
+                )
                 HStack {
                     Spacer()
                     Button("Cancel") { showingMove = false }
                     Button("Reschedule") {
+                        let normalized = WallClock.dhakaCalendar().startOfDay(for: moveDate)
                         if isLiveToday {
-                            model.rescheduleTask(entry.id, to: moveDate)
+                            model.rescheduleTask(entry.id, to: normalized)
                         } else {
-                            model.moveAgendaTask(entry.id, to: moveDate)
+                            model.moveAgendaTask(entry.id, to: normalized)
                         }
                         showingMove = false
-                    }.buttonStyle(.borderedProminent)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(WallClock.dhakaCalendar().isDate(moveDate, inSameDayAs: entry.date))
                 }
             }.padding(24).frame(width: 420)
         }
@@ -1001,6 +1103,44 @@ private struct AgendaTaskRow: View {
         default: .green
         }
     }
+
+    private var rowColor: Color {
+        switch entry.task.displayColor ?? .none {
+        case .none: .primary
+        case .red: .red
+        case .green: .green
+        case .blue: .blue
+        case .orange: .orange
+        case .yellow: .yellow
+        case .purple: .purple
+        }
+    }
+}
+
+private extension TaskDisplayColor {
+    var label: String {
+        switch self {
+        case .none: "No Color"
+        case .red: "Red"
+        case .green: "Green"
+        case .blue: "Blue"
+        case .orange: "Orange"
+        case .yellow: "Yellow"
+        case .purple: "Purple"
+        }
+    }
+
+    var swiftUIColor: Color {
+        switch self {
+        case .none: .primary
+        case .red: .red
+        case .green: .green
+        case .blue: .blue
+        case .orange: .orange
+        case .yellow: .yellow
+        case .purple: .purple
+        }
+    }
 }
 
 struct StreaksView: View {
@@ -1013,11 +1153,38 @@ struct StreaksView: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 16) {
-                Text("Streaks").font(.largeTitle.bold())
+                Text("Daily Context").font(.largeTitle.bold())
+                Text("Fast structured inputs for your logs and AI context. Changes save immediately.")
+                    .foregroundStyle(.secondary)
+                let inputs = model.dailyFieldDefinitions.filter { $0.kind != .triState }
+                if !inputs.isEmpty {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 12)], spacing: 12) {
+                        ForEach(inputs) { definition in
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack(spacing: 4) {
+                                    Text(definition.name).font(.caption.bold())
+                                    if let unit = definition.unit { Text("(\(unit))").font(.caption).foregroundStyle(.secondary) }
+                                }
+                                TextField(
+                                    definition.kind == .number ? "0" : "Add context…",
+                                    text: Binding(
+                                        get: { model.dailyFieldValues[definition.id, default: ""] },
+                                        set: { model.setDailyField(definition, value: $0) }
+                                    )
+                                )
+                                .textFieldStyle(.roundedBorder)
+                            }
+                            .padding(12)
+                            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+                        }
+                    }
+                }
+                Divider()
+                Text("Streaks").font(.title2.bold())
                 ForEach(model.streakSummaries) { summary in
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
-                            Text(displayName(summary.definition.name)).font(.headline)
+                            Text(displayName(summary.definition)).font(.headline)
                             Spacer()
                             Text("Current \(summary.current) · Max \(summary.longest) · Wins \(summary.totalWins) / Fails \(summary.totalFails)")
                                 .foregroundStyle(.secondary)
@@ -1056,7 +1223,11 @@ struct StreaksView: View {
         }
     }
 
-    private func displayName(_ name: String) -> String {
+    private func displayName(_ definition: StreakDefinition) -> String {
+        if definition.id == "no-unplanned-insta-s-11-5-return-home-wake-up" {
+            return "no unplanned insta s"
+        }
+        let name = definition.name
         guard let first = name.first else { return name }
         return first.uppercased() + name.dropFirst()
     }
@@ -1077,9 +1248,45 @@ struct SettingsView: View {
                     set: { _ in model.toggleLaunchAtLogin() }
                 ))
             }
+            Section("Cloud sync") {
+                LabeledContent("Status", value: model.cloudSyncStatus)
+                if model.cloudSyncPendingCount > 0 {
+                    LabeledContent("Pending uploads", value: String(model.cloudSyncPendingCount))
+                }
+                if let lastSuccess = model.cloudSyncLastSuccess {
+                    LabeledContent("Last synced", value: lastSuccess.formatted(date: .omitted, time: .standard))
+                }
+                HStack {
+                    SecureField("Paste Mac pairing token", text: $model.cloudPairingToken)
+                    Button("Paste") { model.pasteCloudPairingToken() }
+                }
+                HStack {
+                    Button(model.isConnectingCloud ? "Connecting…" : "Connect") { model.saveCloudPairingToken() }
+                        .disabled(
+                            model.cloudPairingToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                || model.isConnectingCloud
+                        )
+                    if model.cloudSyncPaired {
+                        Button("Disconnect") { model.disconnectCloudSync() }
+                    }
+                    Link("Open ReFocus Web", destination: CloudSyncClient.baseURL)
+                }
+                if let message = model.cloudConnectionMessage {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(model.cloudSyncPaired ? .green : .secondary)
+                }
+                if let issue = model.cloudSyncIssue {
+                    Text(issue).font(.caption).foregroundStyle(.orange)
+                }
+                Text("Generate a Mac pairing token from the Connections section on the web app.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section("Timer") {
                 Text("Focus: :00–:25 and :30–:55")
                 Text("Screen break: :25–:30 and :55–:00")
+                Text("Screen breaks stay active around the clock while ReFocus is running.")
                 Text("Timezone: Asia/Dhaka")
             }
         }
@@ -1180,7 +1387,6 @@ private struct CheckInPanel: View {
             checkInField("What could you do better?", text: binding(\.better))
             checkInField("What could you do faster?", text: binding(\.faster))
             Spacer()
-            QuickNoteBar()
             Text("Only the first answer is required. Everything autosaves to today’s Markdown log.")
                 .font(.caption).foregroundStyle(.secondary)
         }

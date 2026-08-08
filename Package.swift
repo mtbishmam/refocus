@@ -11,10 +11,12 @@ let package = Package(
         .executable(name: "RefocusCoreChecks", targets: ["RefocusCoreChecks"]),
     ],
     targets: [
-        .target(name: "RefocusCore"),
+        .systemLibrary(name: "CSQLite"),
+        .target(name: "RefocusCore", dependencies: ["CSQLite"]),
         .executableTarget(
             name: "RefocusApp",
-            dependencies: ["RefocusCore"]
+            dependencies: ["RefocusCore"],
+            linkerSettings: [.linkedFramework("Security")]
         ),
         .executableTarget(
             name: "RefocusCoreChecks",

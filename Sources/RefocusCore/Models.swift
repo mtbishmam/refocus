@@ -11,6 +11,26 @@ public enum FixedTaskRole: String, Codable, CaseIterable, Sendable {
     case revision
 }
 
+public enum TaskDisplayColor: String, Codable, CaseIterable, Sendable {
+    case none
+    case red
+    case green
+    case blue
+    case orange
+    case yellow
+    case purple
+}
+
+public enum PredefinedBlockKind: String, Codable, CaseIterable, Sendable {
+    case morningRoutine
+    case rest
+    case university
+    case study
+    case transition
+    case mashup
+    case upsolve
+}
+
 public enum PlanningSegment: String, Codable, CaseIterable, Sendable {
     case morning
     case afternoon
@@ -104,6 +124,15 @@ public struct PlanTask: Identifiable, Codable, Equatable, Sendable {
     public var isComplete: Bool
     public var fixedRole: FixedTaskRole?
     public var routineOverride: Bool
+    public var routineBlock: Bool?
+    public var durationMinutes: Int?
+    public var displayColor: TaskDisplayColor?
+    public var predefinedKind: PredefinedBlockKind?
+    public var predefinedKey: String?
+    public var predefinedVersion: Int?
+    /// Agenda tasks can be captured for a date before a start time is chosen.
+    /// A missing value keeps older records compatible because they always had a time.
+    public var timeAssigned: Bool?
 
     public init(
         id: UUID = UUID(),
@@ -117,7 +146,14 @@ public struct PlanTask: Identifiable, Codable, Equatable, Sendable {
         coreTasks: [CoreTask] = [],
         isComplete: Bool = false,
         fixedRole: FixedTaskRole? = nil,
-        routineOverride: Bool = false
+        routineOverride: Bool = false,
+        routineBlock: Bool = false,
+        durationMinutes: Int? = nil,
+        displayColor: TaskDisplayColor = .none,
+        predefinedKind: PredefinedBlockKind? = nil,
+        predefinedKey: String? = nil,
+        predefinedVersion: Int? = nil,
+        timeAssigned: Bool = true
     ) {
         self.id = id
         self.title = title
@@ -131,9 +167,33 @@ public struct PlanTask: Identifiable, Codable, Equatable, Sendable {
         self.isComplete = isComplete
         self.fixedRole = fixedRole
         self.routineOverride = routineOverride
+        self.routineBlock = routineBlock ? true : nil
+        self.durationMinutes = durationMinutes
+        self.displayColor = displayColor == .none ? nil : displayColor
+        self.predefinedKind = predefinedKind
+        self.predefinedKey = predefinedKey
+        self.predefinedVersion = predefinedVersion
+        self.timeAssigned = timeAssigned ? nil : false
     }
 
-    public var endMinute: Int { startMinute + cycles * 30 }
+    public var endMinute: Int { startMinute + (durationMinutes ?? cycles * 30) }
+    public var hasScheduledTime: Bool { timeAssigned != false }
+    public var isRoutineBlock: Bool { routineBlock == true }
+    public var countsTowardPlanning: Bool {
+        guard isRoutineBlock else { return true }
+        return predefinedKind == .mashup || predefinedKind == .upsolve
+    }
+
+    public func planningCycles(in segment: PlanningSegment) -> Int {
+        guard hasScheduledTime, countsTowardPlanning else { return 0 }
+        if segment.contains(self) { return cycles }
+        // A predefined five-hour contest remains one editable task even when
+        // it crosses a planning-gate boundary. Count only the half-hour cycles
+        // physically inside that gate.
+        guard isRoutineBlock, predefinedKind == .mashup else { return 0 }
+        let overlap = max(0, min(endMinute, segment.endMinute) - max(startMinute, segment.startMinute))
+        return overlap / 30
+    }
 
     public func contains(minuteOfDay: Int) -> Bool {
         minuteOfDay >= startMinute && minuteOfDay < endMinute
@@ -170,6 +230,64 @@ public struct AgendaTask: Identifiable, Equatable, Sendable {
     public init(date: Date, task: PlanTask) {
         self.date = date
         self.task = task
+    }
+}
+
+public enum DailyFieldKind: String, Codable, CaseIterable, Sendable {
+    case triState
+    case number
+    case text
+}
+
+public struct DailyFieldDefinition: Identifiable, Codable, Equatable, Sendable {
+    public var id: String
+    public var name: String
+    public var kind: DailyFieldKind
+    public var unit: String?
+    public var position: Int
+    public var successRule: String?
+
+    public init(
+        id: String,
+        name: String,
+        kind: DailyFieldKind,
+        unit: String? = nil,
+        position: Int = 0,
+        successRule: String? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.kind = kind
+        self.unit = unit
+        self.position = position
+        self.successRule = successRule
+    }
+}
+
+public struct DailyFieldValue: Identifiable, Codable, Equatable, Sendable {
+    public var id: String { "\(definitionID):\(date)" }
+    public var definitionID: String
+    public var date: String
+    public var value: String
+
+    public init(definitionID: String, date: String, value: String) {
+        self.definitionID = definitionID
+        self.date = date
+        self.value = value
+    }
+}
+
+public struct DayAnalysis: Codable, Equatable, Sendable {
+    public var summary: String
+    public var progress: String
+    public var mistakes: String
+    public var gains: String
+
+    public init(summary: String = "", progress: String = "", mistakes: String = "", gains: String = "") {
+        self.summary = summary
+        self.progress = progress
+        self.mistakes = mistakes
+        self.gains = gains
     }
 }
 
@@ -296,11 +414,11 @@ public enum PlanValidationIssue: Equatable, Sendable, CustomStringConvertible {
     case invalidPriority(task: String)
     case invalidDifficulty(task: String)
     case missingMVP(task: String)
+    case missingTime(task: String)
     case tooFewSubtasks(task: String)
     case emptyCoreTask(task: String)
     case overlap(first: String, second: String)
     case routineConflict(taskID: UUID, task: String, reason: String, startMinute: Int, endMinute: Int)
-    case hardRest(task: String, startMinute: Int, endMinute: Int)
     case afterSleepCutoff(task: String)
     case missingFixedTask(name: String)
     case invalidFixedTask(name: String, requirement: String)
@@ -323,13 +441,12 @@ public enum PlanValidationIssue: Equatable, Sendable, CustomStringConvertible {
         case .invalidPriority(let task): return "\(task) needs a valid priority."
         case .invalidDifficulty(let task): return "\(task) needs a valid difficulty."
         case .missingMVP(let task): return "\(task) needs a concrete MVP."
+        case .missingTime(let task): return "\(task) needs a start time before it can be planned."
         case .tooFewSubtasks(let task): return "\(task) needs at least three subtasks."
         case .emptyCoreTask(let task): return "\(task) cannot contain an unnamed subtask."
         case .overlap(let first, let second): return "\(first) overlaps \(second)."
         case .routineConflict(_, let task, let reason, let start, let end):
             return "\(task) overlaps \(Self.time(start))–\(Self.time(end)), protected for \(reason)."
-        case .hardRest(let task, let start, let end):
-            return "\(task) overlaps the non-overridable \(Self.time(start))–\(Self.time(end)) Rest Block."
         case .afterSleepCutoff(let task): return "\(task) runs after the 9:30 PM cutoff."
         case .missingFixedTask(let name): return "The fixed daily block \(name) is missing."
         case .invalidFixedTask(let name, let requirement): return "\(name) must \(requirement)."

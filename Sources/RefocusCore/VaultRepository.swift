@@ -129,6 +129,7 @@ public final class VaultRepository: @unchecked Sendable {
         }
         let dateText = MarkdownPlanCodec.isoDate(date, calendar: calendar)
         if !latest.contains("# Today - \(dateText)"), let staleDate = todayHeadingDate(in: latest), staleDate != date {
+            try migrateIncompleteTasksToAgenda(in: latest, date: staleDate)
             try archiveTasksInDailyLog(latest, date: staleDate)
             latest = removingTopSection(
                 from: latest,
@@ -181,10 +182,20 @@ public final class VaultRepository: @unchecked Sendable {
         try fileAccess.write(text, to: tasksURL)
     }
 
-    public func loadAgenda() throws -> [AgendaTask] {
-        let entries = FileManager.default.fileExists(atPath: agendaURL.path)
-            ? AgendaMarkdownCodec(calendar: calendar).parse(try fileAccess.read(agendaURL))
+    public func loadAgenda(asOf date: Date = Date()) throws -> [AgendaTask] {
+        let codec = AgendaMarkdownCodec(calendar: calendar)
+        var entries = FileManager.default.fileExists(atPath: agendaURL.path)
+            ? codec.parse(try fileAccess.read(agendaURL))
             : []
+        if FileManager.default.fileExists(atPath: tasksURL.path),
+           let liveText = try? fileAccess.read(tasksURL),
+           let staleDate = todayHeadingDate(in: liveText),
+           calendar.startOfDay(for: staleDate) < calendar.startOfDay(for: date) {
+            try migrateIncompleteTasksToAgenda(in: liveText, date: staleDate)
+            if FileManager.default.fileExists(atPath: agendaURL.path) {
+                entries = codec.parse(try fileAccess.read(agendaURL))
+            }
+        }
         return entries.sorted {
             if $0.date != $1.date { return $0.date < $1.date }
             return $0.task.startMinute < $1.task.startMinute
@@ -192,7 +203,15 @@ public final class VaultRepository: @unchecked Sendable {
     }
 
     public func saveAgenda(_ tasks: [AgendaTask]) throws {
-        try fileAccess.write(AgendaMarkdownCodec(calendar: calendar).render(tasks), to: agendaURL)
+        let codec = AgendaMarkdownCodec(calendar: calendar)
+        let carriedForwardIDs: Set<UUID>
+        if FileManager.default.fileExists(atPath: agendaURL.path),
+           let existing = try? fileAccess.read(agendaURL) {
+            carriedForwardIDs = codec.carriedForwardIDs(in: existing)
+        } else {
+            carriedForwardIDs = []
+        }
+        try fileAccess.write(codec.render(tasks, carriedForwardIDs: carriedForwardIDs), to: agendaURL)
     }
 
     public func appendQuickNote(_ line: String) throws {
@@ -226,7 +245,7 @@ public final class VaultRepository: @unchecked Sendable {
         let months = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
         let monthIndex = max(1, min(12, components.month ?? 1)) - 1
         return vaultURL
-            .appendingPathComponent("log", isDirectory: true)
+            .appendingPathComponent("journal", isDirectory: true)
             .appendingPathComponent("\(months[monthIndex])-\(components.day ?? 1).md")
     }
 
@@ -328,7 +347,7 @@ public final class VaultRepository: @unchecked Sendable {
         StreakDefinition(id: "five-harder-problems", name: "Solve five harder problems", mode: .manual),
         StreakDefinition(id: "no-food-after-8", name: "no food after 8", mode: .manual),
         StreakDefinition(id: "no-unplanned-entertainment", name: "no unplanned entertainment", mode: .manual),
-        StreakDefinition(id: "no-unplanned-insta-s-11-5-return-home-wake-up", name: "no unplanned insta s (@11, @5, return home / wake up)", mode: .manual),
+        StreakDefinition(id: "no-unplanned-insta-s-11-5-return-home-wake-up", name: "no unplanned insta s", mode: .manual),
     ]
 
     private func initialDailyLog(date: Date, streaks: [StreakDefinition]) -> String {
@@ -486,6 +505,34 @@ public final class VaultRepository: @unchecked Sendable {
             body: daySection
         )
         try fileAccess.write(log, to: url)
+    }
+
+    private func migrateIncompleteTasksToAgenda(in tasksMarkdown: String, date: Date) throws {
+        guard let daySection = extractTopSection(
+            from: tasksMarkdown,
+            heading: "# Today - \(MarkdownPlanCodec.isoDate(date, calendar: calendar))"
+        ) else { return }
+        let synthetic = daySection + "\n"
+        guard let plan = try? MarkdownPlanCodec(calendar: calendar).parseToday(synthetic, date: date) else { return }
+        let codec = AgendaMarkdownCodec(calendar: calendar)
+        let existingMarkdown = FileManager.default.fileExists(atPath: agendaURL.path)
+            ? try fileAccess.read(agendaURL)
+            : ""
+        var entries = codec.parse(existingMarkdown)
+        let carriedForwardIDs = codec.carriedForwardIDs(in: existingMarkdown)
+        let existingIDs = Set(entries.map(\.id))
+        let unfinished = plan.tasks.filter {
+            !$0.isComplete &&
+            $0.fixedRole == nil &&
+            !existingIDs.contains($0.id) &&
+            !carriedForwardIDs.contains($0.id)
+        }
+        guard !unfinished.isEmpty else { return }
+        entries.append(contentsOf: unfinished.map { AgendaTask(date: date, task: $0) })
+        try fileAccess.write(
+            codec.render(entries, carriedForwardIDs: carriedForwardIDs.union(unfinished.map(\.id))),
+            to: agendaURL
+        )
     }
 
     private func section(_ text: String, headedBy heading: String) -> String {

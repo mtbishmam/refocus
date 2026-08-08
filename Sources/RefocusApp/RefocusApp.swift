@@ -20,6 +20,18 @@ struct ReFocusApplication: App {
             MenuBarClockLabel(clock: model.clockDisplay)
         }
         .menuBarExtraStyle(.window)
+        .commands {
+            CommandGroup(replacing: .pasteboard) {
+                Button("Cut") { NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: nil) }
+                    .keyboardShortcut("x")
+                Button("Copy") { NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil) }
+                    .keyboardShortcut("c")
+                Button("Paste") { NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil) }
+                    .keyboardShortcut("v")
+                Button("Select All") { NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil) }
+                    .keyboardShortcut("a")
+            }
+        }
     }
 }
 
@@ -48,7 +60,12 @@ final class ReFocusAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        ReFocusRuntime.model.syncCloudNow()
         DashboardWindowController.shared.show(model: ReFocusRuntime.model)
         return true
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        ReFocusRuntime.model.syncCloudNow()
     }
 }

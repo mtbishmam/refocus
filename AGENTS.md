@@ -6,34 +6,45 @@
   `scripts/package-app.sh`.
 - Keep ReFocus native to SwiftUI/AppKit. Speed is the primary product
   constraint.
-- Persistence is plain Markdown coordinated through `NSFileCoordinator`; there
-  is no database. Do not add Electron, Tauri, a web runtime, an AI API, an
-  in-app terminal, or a database without explicit approval.
+- The user explicitly approved the database/cloud redesign on 2026-08-07.
+  SQLite WAL is the native local source of truth, IndexedDB is the web cache,
+  and Cloudflare D1 is durable cross-device truth. Do not add Electron, Tauri,
+  an embedded web runtime, an in-app terminal, or an AI model API.
+- A universal PWA lives in `web/`; it must remain offline-first and fast. Its
+  canonical Sites host is `refocus.mtbishmam.chatgpt.site`. Its mtbishmam-owned
+  D1 was seeded and verified on 2026-08-08; runtime has no dependency on the
+  previous Bari-owned Site or database.
+- The canonical Site and D1 owner account is `mtbishmam@gmail.com`. The
+  `bari86838683@gmail.com` account is secondary and may run Codex or access the
+  private web app, but it must never replace the canonical deployment owner.
+  Codex/session IDs are transient and must not be used as deployment identity;
+  use the documented project ID, slug, hostname, and canonical owner instead.
+- Site-identity gate: before creating a new ChatGPT Site, confirm the exact
+  display name, owner namespace, slug, and complete hostname. Do not ask again
+  for rebuilds, updates, or redeployments to an already confirmed Site. Ask
+  again only when creating a new Site or changing its slug, namespace, or
+  hostname. Never infer, normalize, shorten, or substitute a slug from the app
+  name, repo name, prior project, or hostname. Treat a mismatched account,
+  owner namespace, hostname, or deployment target as a deployment issue to
+  diagnose and resolve.
 - The vault is
   `/Users/mtbishmam/Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian`.
-- ReFocus may change only its managed Markdown blocks. Preserve unrelated
-  content exactly and treat an external Obsidian/Codex edit as a conflict rather
-  than overwriting it.
+- Legacy Markdown is read once during migration and preserved. Runtime state
+  must never be reloaded from a Markdown projection.
 
 ## Files and ownership
 
-- `tasks.md` is the mobile-readable operational file. It may contain the live
-  dated Today and relative Tomorrow plans, three immutable Initial snapshots,
-  three live Modified snapshots, completion state, and screen-break logs.
-- `agenda.md` stores future scheduled tasks. Agenda capture requires a real
-  title only; MVP and subtasks are optional until the task is promoted into
-  Tomorrow or Today. The Agenda UI may delete entries from `agenda.md`; archived
-  daily logs must never repopulate deleted Agenda history.
-- `task-templates.md` stores reusable task definitions.
-- `dump.md` is only the user's fast raw capture surface. Never use it as a
-  daily-plan archive. Quick Note appends one trimmed line to its end from the
-  dashboard, screen-break overlay, or menu-bar panel.
-- `log/mon-D.md` is the permanent daily record; store the ISO date in
-  frontmatter. When a dated Today is rolled over, archive it in that date's
-  daily log, never in `dump.md`.
-- Read streak definitions from the live `ego/non-negotiables.md`. Store daily
-  blank/win/fail values in `log/mon-D.md`; `log/streaks.md` documents the
-  mapping.
+- SQLite stores live tasks, templates, captures, snapshots, check-ins, analyses,
+  extensible daily fields, tombstones, and the sync outbox.
+- `tasks.md` is a one-way, read-only mobile projection containing unfinished
+  overdue work, all Today tasks, and all future tasks. It must contain no UUIDs,
+  HTML comments, or machine metadata.
+- `log/YYYY-MM-DD.md` is a one-way clean machine activity projection without internal IDs or end-of-day analysis.
+- `journal/mon-D.md` is the human-authored daily journal. Preserve unrelated writing exactly; approved `analyze_day` output belongs in its managed analysis block.
+- `agenda.md`, `task-templates.md`, `dump.md`, legacy `journal/mon-D.md`, and
+  `ego/non-negotiables.md` are preserved migration sources, not runtime stores.
+- Cloud-paired projection writes require the D1 export lease. A denied or failed
+  lease must not write to iCloud.
 
 ## Three planning gates
 
@@ -47,7 +58,9 @@ The day is independently planned and snapshotted in three super-blocks:
 
 - Floor the current time to its active wall-clock cycle. At 07:13 the current
   cycle begins at 07:00.
-- Only tasks wholly inside the active block count toward that block's gate.
+- Only tasks wholly inside the active block count toward that block's gate,
+  except the predefined five-hour Mashup: it remains one task and contributes
+  only the half-hour cycles that physically overlap each gate.
   The fixed evening tasks count only toward the Evening gate.
 - The first successful save in each block creates its immutable Initial
   snapshot. Later saves refresh that block's Modified snapshot. A save also
@@ -69,8 +82,12 @@ The day is independently planned and snapshotted in three super-blocks:
   definition and at least three named subtasks; more are allowed.
 - Scheduled Agenda tasks may omit MVP and subtasks. They must satisfy the full
   task rules when promoted into Tomorrow or Today.
-- Nothing may overlap the non-overridable 11:00–12:00 or 17:00–18:00 Rest
-  Blocks or run after 21:30.
+- Ikigai-derived University, Rest, Morning Routine, and Return Home blocks are
+  predefined synchronized routine blocks. They are deliberately editable and
+  removable for a date; a deletion is durable and must not silently reappear.
+- User-planned tasks may not run after 21:30. The five-minute screen-break
+  blocker is independent of this task cutoff and runs around the clock whenever
+  ReFocus is running.
 - Every day includes:
   - 20:00–20:30 — `Day Analysis and Streaks (CF & Git)`.
   - 20:30–21:00 — `Plan Tomorrow + Miscel Tasks`, extendable to 21:30.
@@ -99,25 +116,26 @@ Precedence: explicit dated instruction, live Special Event, recurring
 University Hours, Standard Routine. If live exceptions conflict without a
 precedence rule, ask. University/special-event protection is a yellow,
 date-overridable warning that must name its exact window and reason. Rest,
-collision, malformed-task, duration, and cutoff failures are red.
+collision, malformed-task, duration, and cutoff failures are red. University
+protection remains a named yellow warning that can be accepted for the date.
 
 ## Codex commands
 
 `sort_tasks` is an alias for the complete `plan_tasks` workflow. Read the live
-Ikigai, the current plan, Agenda, and dump captures; resolve conflicts; show the
-complete proposed Today/Tomorrow/Agenda changes; and obtain explicit approval
-before writing.
+Ikigai and obtain current application context through the read-only MCP (prefer
+`get_optimization_context`) or the clean projections. Resolve conflicts, show
+the complete proposed Today/Tomorrow/Agenda changes, and obtain explicit user
+approval before the user applies writes in ReFocus.
 
 `analyze_day`:
 
-1. Read the day's log plus all three Initial and Modified snapshots, completion
-   states, and screen-break answers.
+1. Read the day's context plus all three Initial and Modified snapshots,
+   completion states, metrics, and screen-break answers through MCP or clean log.
 2. Compare planned versus actual work and discuss causes that the evidence
    supports. Ask when the cause is unclear.
 3. Propose Summary, Progress, Mistakes, and Gains and obtain explicit approval.
-4. Write the approved analysis to `log/mon-D.md`, preserving all managed data.
-5. Archive the full dated `tasks.md` Today record in that log and remove the
-   analyzed Today section. Do not touch `dump.md`.
+4. Store the approved analysis transactionally and update only the managed analysis block in `journal/mon-D.md`, preserving all user writing.
+5. Keep `log/YYYY-MM-DD.md` machine-generated; never put the end-of-day Summary, Progress, Mistakes, or Gains there.
 
 `clean_dump`:
 
@@ -130,12 +148,93 @@ before writing.
 4. Move only approved, unambiguous content, preserve meaning, and remove from
    `dump.md` only the captures successfully committed elsewhere.
 
-The intended evening sequence is `analyze_day` → `clean_dump` → save the plan
-in the relative Tomorrow view. Saving Tomorrow writes `# Tomorrow - YYYY-MM-DD`
-to `tasks.md`; it becomes Today on that date.
+The intended evening sequence is `analyze_day` → review captures → save the plan
+in Tomorrow. Tomorrow becomes Today by scheduled date inside the database; no
+Markdown promotion is involved.
 
 ## Streaks
 
-- Use every bullet in the live `ego/non-negotiables.md`, in file order.
+- Import every bullet in the legacy `ego/non-negotiables.md`, then manage fields
+  in the extensible daily-field table.
 - Each date cycles blank → green win → red fail → blank.
 - Display current streak, maximum streak, total wins, and total fails.
+
+## ChatGPT Account, Site, and Codex Context
+
+### ChatGPT accounts
+
+- Both ChatGPT accounts may be used to build, edit, debug, and test these
+  projects:
+  - `mtbishmam@gmail.com`
+  - `bari86838683@gmail.com`
+- ChatGPT Site deployment currently works through `mtbishmam@gmail.com`.
+- When working from `bari86838683@gmail.com`, build and stress-test locally
+  using localhost, development servers, local APIs, local databases, mocks,
+  browser testing, automated tests, and production-style build checks whenever
+  possible.
+- Treat final deployment as a handoff step to `mtbishmam@gmail.com`. Do not
+  claim that a Site was deployed until deployment has been performed or
+  independently verified through that account.
+- Both accounts use the same local project and source files. Account
+  differences do not imply separate codebases.
+
+### Secondary-account workflow
+
+- If the active ChatGPT account is `bari86838683@gmail.com`, treat the
+  secondary account as a build, test, and preparation environment only.
+- Do not attempt to deploy a ChatGPT Site or claim that a Site deployment
+  succeeded from the secondary account.
+- For any task involving application data, create or refresh a local snapshot
+  of the current persistence layer before testing:
+  - D1: use a local D1 database seeded from the available schema and data
+    snapshot.
+  - R2: use a local R2 simulation populated from the available object
+    snapshot.
+  - If the project uses another database or storage system, create the
+    equivalent isolated local snapshot.
+- Keep local bindings pointed at local resources. Do not enable remote
+  bindings or connect destructive tests to production D1, R2, or equivalent
+  storage.
+- Run the local build, migrations, unit tests, API tests, browser checks, and
+  relevant insert/update/delete stress tests against the local snapshot.
+- If an exact production snapshot is unavailable, say so explicitly and use
+  schema-valid fixtures or seed data. Do not claim that production data was
+  verified.
+- Treat all database and storage changes made from the secondary account as
+  local-only. They do not change the deployed Site.
+- Before handing work back, report clearly: **Site not yet deployed. Deploy
+  the verified build from `mtbishmam@gmail.com`.**
+- The primary account is responsible for deploying the approved saved version
+  and for any intended production database or storage mutation. After the
+  primary account deploys, verify the canonical hostname and report the
+  production result separately from local test results.
+
+### Canonical deployed Sites
+
+| Project | Hostname | Description |
+|---|---|---|
+| ReSync | https://resync.mtbishmam.chatgpt.site | Intentional video and reading consumption system using RePlay, ReRead, Inbox, cooldown, Queue, Finished, AI summaries, value scoring, grounded chat, notes, and learning memory. |
+| ReFocus | https://refocus.mtbishmam.chatgpt.site | Personal planning and focus-control system for daily plans, prioritized tasks, work cycles, screen-break overlays, agendas, routines, check-ins, streaks, metrics, offline use, and synchronization. |
+| ReSolve | https://resolve.mtbishmam.chatgpt.site | Competitive-programming learning and active-recall system for problem capture, structured reflections, mistakes, mental models, memory cues, difficulty, status, review history, and spaced repetition. |
+
+### Site identity rules
+
+- Before creating a new ChatGPT Site, confirm the exact display name, owner
+  namespace, slug, and complete hostname.
+- Do not ask again for rebuilds, updates, or redeployments to an already
+  confirmed Site.
+- Ask again only when creating a new Site or changing its slug, namespace, or
+  hostname.
+- Never infer, rename, shorten, or substitute a Site slug or hostname.
+- Treat a mismatched account, owner namespace, hostname, or deployment target
+  as a deployment issue to diagnose and resolve.
+
+### Codex context
+
+- Codex task, thread, and conversation IDs may change frequently and are
+  session-specific.
+- Do not use Codex IDs as permanent project, Site, or deployment identifiers.
+- Use the repository path, Git remote, branch, commit, canonical Site
+  hostname, and active ChatGPT account as stable references.
+- If an old Codex ID cannot be found, re-establish context from those stable
+  references instead of assuming that the project or Site has changed.
