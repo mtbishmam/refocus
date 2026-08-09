@@ -66,6 +66,7 @@ final class AppModel: ObservableObject {
     private var agendaSaveTask: Task<Void, Never>?
     private var agendaPlanSaveTask: Task<Void, Never>?
     private var agendaTomorrowSaveTask: Task<Void, Never>?
+    private var rescheduleTaskQueue: Task<Void, Never>?
     private var dailyFieldSaveTasks: [String: Task<Void, Never>] = [:]
     private var activeBreakID: String?
     private var baselineTasks: [PlanTask] = []
@@ -89,6 +90,7 @@ final class AppModel: ObservableObject {
         agendaSaveTask?.cancel()
         agendaPlanSaveTask?.cancel()
         agendaTomorrowSaveTask?.cancel()
+        rescheduleTaskQueue?.cancel()
         dailyFieldSaveTasks.values.forEach { $0.cancel() }
     }
 
@@ -128,7 +130,8 @@ final class AppModel: ObservableObject {
     }
 
     var cycleSummaryText: String {
-        "\(activeSegment.title) · \(plannedCycles) planned · \(requiredCycleMinimum) required now"
+        if requiredCycleMinimum == 0 { return "\(activeSegment.title) · no work cycles available" }
+        return "\(activeSegment.title) · \(plannedCycles) planned · \(requiredCycleMinimum) required now"
     }
 
     var planIsCurrent: Bool { planMessage == "Today is planned." || !tasks.isEmpty }
@@ -175,6 +178,9 @@ final class AppModel: ObservableObject {
 
     var planGateMessage: String {
         if isPlanCommitted { return "Today is ready." }
+        if requiredCycleMinimum == 0 {
+            return "No work cycles remain in the \(activeSegment.title.lowercased()). Work stays locked until the next planning block."
+        }
         if isPlanReady { return "Save Today to unlock focused work." }
         return "Plan the \(activeSegment.title.lowercased()) before focused work begins: \(requiredCycleMinimum) available work cycles."
     }
@@ -594,13 +600,14 @@ final class AppModel: ObservableObject {
         // SwiftUI row changes also fire when a plan is reloaded from disk.
         // Compare against the loaded baseline so programmatic refreshes never
         // turn a saved plan back into a blocking, dirty plan.
+        let planningChanged = refreshPlanningState(at: now)
         tasks.sort { lhs, rhs in
             lhs.startMinute == rhs.startMinute ? lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending : lhs.startMinute < rhs.startMinute
         }
         let isActuallyDirty = tasks != baselineTasks
         if isActuallyDirty != planIsDirty { planIsDirty = isActuallyDirty }
         let issues = currentValidation(tasks)
-        if issues != validationIssues { validationIssues = issues }
+        if planningChanged || issues != validationIssues { validationIssues = issues }
         if isPlanCommitted {
             isArmed = true
         } else if isActuallyDirty || !issues.isEmpty {
@@ -732,9 +739,11 @@ final class AppModel: ObservableObject {
 
         if targetIsToday {
             tasks.append(movedTask)
+            UserDefaults.standard.set(true, forKey: "todayFilterShowUser")
             markPlanDirty()
         } else if targetIsTomorrow {
             tomorrowTasks.append(movedTask)
+            UserDefaults.standard.set(true, forKey: "tomorrowFilterShowUser")
             markTomorrowDirty()
         } else {
             agendaTasks.append(AgendaTask(date: date, task: movedTask))
@@ -743,7 +752,10 @@ final class AppModel: ObservableObject {
         collapseNewTasks()
         let remainingSourceTasks = tasks
         let destinationTasks = tasks
-        Task { [weak self] in
+        let previousReschedule = rescheduleTaskQueue
+        rescheduleTaskQueue = Task { [weak self] in
+            await previousReschedule?.value
+            guard !Task.isCancelled else { return }
             guard let self else { return }
             do {
                 if sourceWasToday {
@@ -1008,15 +1020,20 @@ final class AppModel: ObservableObject {
     }
 
     func tick(at date: Date = Date()) {
+        let calendar = WallClock.dhakaCalendar()
+        let previousDay = calendar.startOfDay(for: now)
+        let currentDay = calendar.startOfDay(for: date)
         now = date
         clockDisplay.snapshot = clock.snapshot(at: date)
-        let resolvedProfile = resolver.profile(for: date)
-        if resolvedProfile != dayProfile { dayProfile = resolvedProfile }
-        let resolvedSegment = validator.segment(at: date)
-        let resolvedMinimum = validator.requiredCycles(in: resolvedSegment, at: date, profile: resolvedProfile)
-        if resolvedSegment != activeSegment || resolvedMinimum != requiredCycleMinimum {
-            activeSegment = resolvedSegment
-            requiredCycleMinimum = resolvedMinimum
+
+        // The dashboard is long-lived. If it stays open across midnight, the
+        // ticker must load the new day's plan instead of continuing to show
+        // yesterday's tasks (and yesterday's reschedule context).
+        if previousDay != currentDay, worker != nil {
+            reloadVault(force: true)
+        }
+
+        if refreshPlanningState(at: date) {
             validationIssues = currentValidation(tasks)
         }
 
@@ -1117,14 +1134,27 @@ final class AppModel: ObservableObject {
         issues.filter(isBlocking)
     }
 
+    @discardableResult
+    private func refreshPlanningState(at date: Date) -> Bool {
+        let resolvedProfile = resolver.profile(for: date)
+        let resolvedSegment = validator.segment(at: date)
+        let resolvedMinimum = validator.requiredCycles(in: resolvedSegment, at: date, profile: resolvedProfile)
+        let changed = resolvedProfile != dayProfile
+            || resolvedSegment != activeSegment
+            || resolvedMinimum != requiredCycleMinimum
+        if resolvedProfile != dayProfile { dayProfile = resolvedProfile }
+        if resolvedSegment != activeSegment { activeSegment = resolvedSegment }
+        if resolvedMinimum != requiredCycleMinimum { requiredCycleMinimum = resolvedMinimum }
+        return changed
+    }
+
     func isBlocking(_ issue: PlanValidationIssue) -> Bool {
         if issue.severity == .warning { return false }
-        if hasInitialPlan, case .insufficientCycles = issue { return false }
         return true
     }
 
     private func currentValidation(_ candidate: [PlanTask]) -> [PlanValidationIssue] {
-        validator.validate(
+        var issues = validator.validate(
             tasks: candidate,
             profile: dayProfile,
             minimumCycles: requiredCycleMinimum,
@@ -1132,6 +1162,14 @@ final class AppModel: ObservableObject {
             requireTaskDetails: true,
             countedSegment: activeSegment
         )
+        let minute = clock.minuteOfDay(for: now)
+        if minute >= 330, minute < 1290,
+           let availabilityIssue = validator.availabilityIssue(
+               in: activeSegment, at: now, profile: dayProfile
+           ) {
+            issues.append(availabilityIssue)
+        }
+        return issues
     }
 
     private func tomorrowRequiredCycles(_ segment: PlanningSegment) -> Int {

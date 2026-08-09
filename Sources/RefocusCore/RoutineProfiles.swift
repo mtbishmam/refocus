@@ -158,10 +158,14 @@ public enum PredefinedRoutineBlocks {
     private static func university(
         date: Date, key: String, title: String, detail: String, start: Int, end: Int, calendar: Calendar
     ) -> PlanTask {
-        block(
+        var task = block(
             date: date, key: key, title: title, start: start, end: end, mvp: detail,
             displayColor: .red, predefinedKind: .university, calendar: calendar
         )
+        // Version 3 repairs university rows created before red became the
+        // canonical class color.
+        task.predefinedVersion = 3
+        return task
     }
 
     private static func mashup(date: Date, key: String, start: Int, end: Int, calendar: Calendar) -> PlanTask {
@@ -240,6 +244,11 @@ public enum PredefinedRoutineBlocks {
             task.mvp = definition.mvp
             task.coreTasks = definition.coreTasks
             task.displayColor = definition.displayColor
+        } else if definition.predefinedKind == .university {
+            // University color is semantic, not decorative: every class and
+            // lab must remain visibly red across native/web synchronization.
+            task.displayColor = .red
+            if task.mvp.isEmpty { task.mvp = definition.mvp }
         } else {
             if task.mvp.isEmpty { task.mvp = definition.mvp }
             if task.displayColor == nil { task.displayColor = definition.displayColor }
@@ -351,6 +360,17 @@ public struct PlanValidator: Sendable {
             cursor += 30
         }
         return min(segment.maximumCycles, available)
+    }
+
+    public func availabilityIssue(
+        in segment: PlanningSegment,
+        at date: Date,
+        profile: DayProfile,
+        calendar: Calendar = WallClock.dhakaCalendar()
+    ) -> PlanValidationIssue? {
+        requiredCycles(in: segment, at: date, profile: profile, calendar: calendar) == 0
+            ? .noAvailableCycles(segment: segment)
+            : nil
     }
 
     public func validate(

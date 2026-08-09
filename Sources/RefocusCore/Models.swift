@@ -99,6 +99,58 @@ public enum StreakStatus: String, Codable, CaseIterable, Sendable {
     }
 }
 
+public enum HabitGroup: String, Codable, Sendable {
+    case bad
+    case good
+}
+
+public struct HabitCatalogEntry: Identifiable, Equatable, Sendable {
+    public var id: String
+    public var name: String
+    public var group: HabitGroup
+    public var level: String
+
+    public init(id: String, name: String, group: HabitGroup, level: String) {
+        self.id = id
+        self.name = name
+        self.group = group
+        self.level = level
+    }
+}
+
+public enum HabitCatalog {
+    public static let aliases: [String: String] = [
+        "solve-5-harder-problems": "five-harder-problems",
+        "solve-five-harder-problems": "five-harder-problems",
+        "all-nighters": "no-all-nighter",
+        "good-food-entertainment": "no-food-with-media",
+        "unplanned-insta-s": "no-unplanned-insta-s-11-5-return-home-wake-up",
+        "unplanned-entertainment": "no-unplanned-entertainment",
+    ]
+
+    public static let entries: [HabitCatalogEntry] = [
+        HabitCatalogEntry(id: "no-all-nighter", name: "no all-nighter", group: .bad, level: "Level 1 · Non-Negotiables"),
+        HabitCatalogEntry(id: "no-unplanned-insta-s-11-5-return-home-wake-up", name: "no unplanned insta s", group: .bad, level: "Level 1 · Non-Negotiables"),
+        HabitCatalogEntry(id: "no-unplanned-entertainment", name: "no unplanned entertainment", group: .bad, level: "Level 1 · Non-Negotiables"),
+        HabitCatalogEntry(id: "no-food-after-8", name: "no food after 8", group: .bad, level: "Level 1 · Non-Negotiables"),
+        HabitCatalogEntry(id: "no-food-with-media", name: "no food with media", group: .bad, level: "Level 1 · Non-Negotiables"),
+        HabitCatalogEntry(id: "wake-up-5-5", name: "Wake up @5.5", group: .good, level: "Level 1 · Good Habits"),
+        HabitCatalogEntry(id: "five-harder-problems", name: "Solve 5 harder problems", group: .good, level: "Level 1 · Good Habits"),
+        HabitCatalogEntry(id: "keto-only-diet", name: "Keto only diet", group: .good, level: "Level 2 · Obsession"),
+        HabitCatalogEntry(id: "no-soft-drinks", name: "No soft drinks", group: .good, level: "Level 2 · Obsession"),
+    ]
+
+    public static func entry(for definition: StreakDefinition) -> HabitCatalogEntry {
+        if let known = entries.first(where: { $0.id == definition.id }) { return known }
+        let lower = definition.name.lowercased()
+        let group: HabitGroup = lower.hasPrefix("no ") || lower.contains("all nighter") ? .bad : .good
+        return HabitCatalogEntry(
+            id: definition.id, name: definition.name, group: group,
+            level: group == .bad ? "Imported Bad Habits" : "Imported Good Habits"
+        )
+    }
+}
+
 public struct CoreTask: Identifiable, Codable, Equatable, Sendable {
     public var id: UUID
     public var title: String
@@ -408,6 +460,7 @@ public enum ValidationSeverity: String, Sendable {
 public enum PlanValidationIssue: Equatable, Sendable, CustomStringConvertible {
     case insufficientCycles(actual: Int, required: Int)
     case insufficientSegment(segment: PlanningSegment, actual: Int, required: Int)
+    case noAvailableCycles(segment: PlanningSegment)
     case missingTaskTitle
     case invalidCycleCount(task: String)
     case invalidContest(task: String)
@@ -435,6 +488,8 @@ public enum PlanValidationIssue: Equatable, Sendable, CustomStringConvertible {
         case .insufficientCycles(let actual, let required): return "Plan has \(actual)/\(required) required cycles."
         case .insufficientSegment(let segment, let actual, let required):
             return "\(segment.title) has \(actual)/\(required) required cycles."
+        case .noAvailableCycles(let segment):
+            return "No work cycles remain in the \(segment.title.lowercased()). Work stays locked until the next planning block."
         case .missingTaskTitle: return "Every task needs a real name."
         case .invalidCycleCount(let task): return "\(task) must use one to four cycles."
         case .invalidContest(let task): return "\(task) must use one to ten contest cycles."

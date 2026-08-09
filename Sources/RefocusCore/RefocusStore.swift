@@ -51,6 +51,7 @@ public final class RefocusStore: @unchecked Sendable {
             deviceID = created
         }
         try migrateRenamedDefinitions()
+        try migrateDailyFieldCatalog()
         try repairMissingDayPlans()
     }
 
@@ -102,7 +103,6 @@ public final class RefocusStore: @unchecked Sendable {
                 DailyFieldDefinition(id: "weight", name: "Weight", kind: .number, unit: "kg", position: existingDefinitions.count),
                 DailyFieldDefinition(id: "calories", name: "Calories", kind: .number, unit: "kcal", position: existingDefinitions.count + 1),
                 DailyFieldDefinition(id: "solved-problems", name: "Solved problems", kind: .number, position: existingDefinitions.count + 2),
-                DailyFieldDefinition(id: "daily-summary", name: "Daily summary", kind: .text, position: existingDefinitions.count + 3),
             ]
             for definition in existingDefinitions + builtIns {
                 try upsertDefinition(definition)
@@ -251,6 +251,11 @@ public final class RefocusStore: @unchecked Sendable {
     public func saveAgendaEdits(date: Date, tasks: [PlanTask], profile: DayProfileKind) throws {
         try transaction {
             try ensureDayPlan(date: date)
+            let existingIDs = Set(try taskIDs(on: date))
+            let incomingIDs = Set(tasks.map { $0.id.uuidString.lowercased() })
+            for staleID in existingIDs.subtracting(incomingIDs) {
+                try tombstoneTask(id: staleID)
+            }
             for task in tasks { try upsertTask(task, date: date) }
             try refreshPlanMetadata(date: date, tasks: tasks, profile: profile, segment: .morning)
         }
@@ -521,7 +526,17 @@ public final class RefocusStore: @unchecked Sendable {
                 let pendingClocks = try pendingFieldClocks(kind: entity.kind, id: entity.id)
                 if entity.fields["_deleted"]?.boolValue == true {
                     if let pending = pendingClocks["_deleted"], pending.hlc > remoteHLC { continue }
-                    try execute("UPDATE tasks SET deleted = 1, updated_hlc = ? WHERE id = ?", [.text(remoteHLC), .text(entity.id.lowercased())])
+                    switch entity.kind {
+                    case "task":
+                        try execute("UPDATE tasks SET deleted = 1, updated_hlc = ? WHERE id = ?", [.text(remoteHLC), .text(entity.id.lowercased())])
+                    case "field_definition":
+                        // Retire the definition without cascading into its
+                        // historical values; archived habit/metric data stays
+                        // available for migration and analysis.
+                        try execute("UPDATE field_definitions SET archived = 1 WHERE id = ?", [.text(entity.id)])
+                    default:
+                        break
+                    }
                     continue
                 }
                 switch entity.kind {
@@ -586,6 +601,7 @@ public final class RefocusStore: @unchecked Sendable {
                         [.text(definition), .text(day), .text(value), .text(remoteHLC)]
                     )
                 case "field_definition":
+                    guard HabitCatalog.aliases[entity.id] == nil else { continue }
                     guard let name = entity.fields["name"]?.stringValue else { continue }
                     try upsertDefinition(DailyFieldDefinition(
                         id: entity.id, name: name,
@@ -647,6 +663,75 @@ public final class RefocusStore: @unchecked Sendable {
                 kind: "field_definition", id: id, operation: "upsert",
                 payload: try encoder.encode(definition)
             )
+        }
+    }
+
+    private func migrateDailyFieldCatalog() throws {
+        let canonical = HabitCatalog.entries.enumerated().map { offset, habit in
+            DailyFieldDefinition(id: habit.id, name: habit.name, kind: .triState, position: offset)
+        } + [
+            DailyFieldDefinition(id: "weight", name: "Weight", kind: .number, unit: "kg", position: 100),
+            DailyFieldDefinition(id: "calories", name: "Calories", kind: .number, unit: "kcal", position: 101),
+            DailyFieldDefinition(id: "solved-problems", name: "Solved problems", kind: .number, position: 102),
+        ]
+
+        try transaction {
+            for definition in canonical {
+                let existing = try firstRow(
+                    "SELECT name, kind, unit, position, success_rule, archived FROM field_definitions WHERE id = ?",
+                    [.text(definition.id)]
+                )
+                let needsUpdate = existing == nil
+                    || existing?[0] != definition.name
+                    || existing?[1] != definition.kind.rawValue
+                    || existing?[2] != definition.unit
+                    || Int(existing?[3] ?? "") != definition.position
+                    || existing?[4] != definition.successRule
+                    || existing?[5] == "1"
+                guard needsUpdate else { continue }
+                try upsertDefinition(definition)
+                try enqueue(
+                    kind: "field_definition", id: definition.id, operation: "upsert",
+                    payload: try encoder.encode(definition)
+                )
+            }
+
+            for (alias, canonicalID) in HabitCatalog.aliases {
+                var aliasValues: [(String, String)] = []
+                try query(
+                    "SELECT day, value FROM field_values WHERE definition_id = ? ORDER BY day",
+                    [.text(alias)]
+                ) { row in
+                    if let day = row.text(0), let value = row.text(1) { aliasValues.append((day, value)) }
+                }
+                for (day, value) in aliasValues where try scalar(
+                    "SELECT value FROM field_values WHERE definition_id = ? AND day = ?",
+                    [.text(canonicalID), .text(day)]
+                ) == nil {
+                    let hlc = nextHLC()
+                    try execute(
+                        "INSERT INTO field_values(definition_id, day, value, updated_hlc) VALUES(?, ?, ?, ?)",
+                        [.text(canonicalID), .text(day), .text(value), .text(hlc)]
+                    )
+                    try enqueue(
+                        kind: "field_value", id: "\(canonicalID):\(day)", operation: "upsert",
+                        payload: try encoder.encode(DailyFieldValue(definitionID: canonicalID, date: day, value: value)),
+                        hlc: hlc
+                    )
+                }
+                if try scalar("SELECT archived FROM field_definitions WHERE id = ?", [.text(alias)]) == "0" {
+                    try execute("UPDATE field_definitions SET archived = 1 WHERE id = ?", [.text(alias)])
+                    try enqueue(kind: "field_definition", id: alias, operation: "delete", payload: Data())
+                }
+            }
+
+            // Daily summaries belong to the human/AI journal. Keep every old
+            // value in SQLite, but retire the input definition from the app
+            // and cloud UI so no historical data is destroyed.
+            if try scalar("SELECT archived FROM field_definitions WHERE id = 'daily-summary'") == "0" {
+                try execute("UPDATE field_definitions SET archived = 1 WHERE id = 'daily-summary'")
+                try enqueue(kind: "field_definition", id: "daily-summary", operation: "delete", payload: Data())
+            }
         }
     }
 

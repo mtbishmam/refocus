@@ -17,7 +17,7 @@ The inventory is written to
 The source Markdown is not deleted. `tasks.md`, old `journal/mon-D.md` files,
 `task-templates.md`, and `ego/non-negotiables.md` become preserved legacy input.
 After cutover, ReFocus writes only the clean output projection `tasks.md` and
-new machine-only `log/YYYY-MM-DD.md` files. Human journal writing and approved day analysis remain in `journal/mon-D.md`. Quick notes are stored internally and synchronized
+new machine-only `log/YYYY-MM-DD.md` files. Human journal writing, Daily summary, and approved day analysis remain in `journal/mon-D.md`. Quick notes are stored internally and synchronized
 instead of appending to `dump.md`.
 
 If import fails, the completion marker is not committed and the next launch can

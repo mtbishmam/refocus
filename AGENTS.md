@@ -41,6 +41,7 @@
   HTML comments, or machine metadata.
 - `log/YYYY-MM-DD.md` is a one-way clean machine activity projection without internal IDs or end-of-day analysis.
 - `journal/mon-D.md` is the human-authored daily journal. Preserve unrelated writing exactly; approved `analyze_day` output belongs in its managed analysis block.
+- Daily summary is written by the user or AI in the Summary section of `journal/mon-D.md`; it must not be collected as a Daily app field.
 - `agenda.md`, `task-templates.md`, `dump.md`, legacy `journal/mon-D.md`, and
   `ego/non-negotiables.md` are preserved migration sources, not runtime stores.
 - Cloud-paired projection writes require the D1 export lease. A denied or failed

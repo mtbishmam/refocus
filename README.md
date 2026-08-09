@@ -69,10 +69,11 @@ hostname, D1 owner, or native pairing target. See
 
 ## Daily context and AI
 
-Daily fields are extensible instead of hard-coded streak columns. The initial
-set includes all migrated non-negotiables plus Weight (kg), Calories (kcal),
-Solved problems, and Daily summary. New number, text, and tri-state fields fit
-the same storage and trend model.
+Daily fields are extensible instead of hard-coded streak columns. The Daily
+view separates Bad Habits and Good Habits into date-by-habit tables while
+preserving all migrated values. Weight (kg), Calories (kcal), and Solved
+problems remain structured metrics. Daily summary is not an app field: the user
+or AI writes it in the Summary section of `journal/mon-D.md`.
 
 The read-only MCP endpoint is `/api/mcp`. AI clients should call
 `get_optimization_context` first; narrower day, agenda, and metric tools are for

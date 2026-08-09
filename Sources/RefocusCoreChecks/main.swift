@@ -259,6 +259,14 @@ do {
             try expect(!duplicateIssues.contains { if case .insufficientCycles = $0 { return true }; return false }, "Spanning mashup reported 0/6 Afternoon cycles")
         }
         try expect(sundayBlocks.contains { $0.title == "CSE220L Class" && $0.mvp == "CSE220L-15-TBA-09B-09L" && $0.startMinute == 840 && $0.endMinute == 1020 }, "Sunday university lab missing")
+        try expect(sundayBlocks.filter { $0.predefinedKind == .university }.allSatisfy { $0.displayColor == .red && $0.predefinedVersion == 3 }, "Sunday university classes are not canonical red blocks")
+        if let university = sundayBlocks.first(where: { $0.title == "CSE220L Class" }) {
+            var staleUniversity = university
+            staleUniversity.displayColor = .orange
+            staleUniversity.predefinedVersion = 2
+            let upgraded = PredefinedRoutineBlocks.upgrade(staleUniversity, to: university)
+            try expect(upgraded.displayColor == .red && upgraded.predefinedVersion == 3, "Existing orange university class was not repaired")
+        }
         try expect(sundayBlocks.contains { $0.title == "Return Home / Transition" && $0.startMinute == 1020 && $0.endMinute == 1050 }, "Sunday return-home block missing")
         try expect(sundayBlocks.first { $0.title == "Rest" }?.countsTowardPlanning == false, "Rest counted toward the planning gate")
         try expect(Set(saturdayBlocks.map(\.id)).count == saturdayBlocks.count, "Routine IDs are not unique")
@@ -316,6 +324,24 @@ do {
             countedSegment: .morning
         )
         try expect(issues.contains(.insufficientCycles(actual: 0, required: 4)), "Fixed evening cycles leaked into the morning gate")
+    }
+    try check("Live Sunday planning state uses the current morning window") {
+        let sundayEarly = try date("2026-08-09 04:35:00")
+        let profile = RoutineProfileResolver(calendar: calendar).profile(for: sundayEarly)
+        let validator = PlanValidator()
+        try expect(validator.segment(at: sundayEarly, calendar: calendar) == .morning, "04:35 was treated as the wrong planning block")
+        try expect(validator.requiredCycles(at: sundayEarly, profile: profile, calendar: calendar) == 10, "Sunday morning required cycles did not refresh")
+    }
+    try check("Zero available cycles remain a hard planning lock") {
+        let sundayAfternoon = try date("2026-08-09 14:40:00")
+        let profile = RoutineProfileResolver(calendar: calendar).profile(for: sundayAfternoon)
+        let validator = PlanValidator()
+        try expect(validator.requiredCycles(at: sundayAfternoon, profile: profile, calendar: calendar) == 0, "Sunday protected afternoon unexpectedly exposed work cycles")
+        try expect(
+            validator.availabilityIssue(in: .afternoon, at: sundayAfternoon, profile: profile, calendar: calendar)
+                == .noAvailableCycles(segment: .afternoon),
+            "A zero-availability planning block did not produce a hard lock issue"
+        )
     }
     try check("Task templates round-trip through Markdown") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-template-check-\(UUID().uuidString)")
@@ -638,6 +664,32 @@ do {
         try expect(plan?.tasks.map(\.title) == ["Already today", "Promoted"], "Promoted task is missing from Today")
         try expect(plan?.initialSegments == [.evening], "Promotion changed the initialized planning gates")
     }
+    try check("Two agenda tasks can be promoted into Today without either disappearing") {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-double-promote-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let store = try RefocusStore(databaseURL: temporary.appendingPathComponent("refocus.sqlite3"), calendar: calendar)
+        try store.importLegacy(today: nil, tomorrow: nil, agenda: [], templates: [], streaks: [])
+        let yesterday = try date("2026-08-08", format: "yyyy-MM-dd")
+        let today = try date("2026-08-09", format: "yyyy-MM-dd")
+        let first = PlanTask(title: "CP Plan", startMinute: 1080, cycles: 1, mvp: "Plan")
+        let second = PlanTask(title: "Remake Routine", startMinute: 1140, cycles: 1, mvp: "Remake")
+        try store.saveScheduledEntries([
+            AgendaTask(date: yesterday, task: first), AgendaTask(date: yesterday, task: second),
+        ])
+        try store.rescheduleTaskIntoPlan(
+            id: first.id, to: today, destinationTasks: [first],
+            profile: .universityLate, segment: .evening
+        )
+        try store.rescheduleTaskIntoPlan(
+            id: second.id, to: today, destinationTasks: [first, second],
+            profile: .universityLate, segment: .evening
+        )
+        let promoted = try store.tasks(on: today)
+        let remainingYesterday = try store.tasks(on: yesterday)
+        try expect(Set(promoted.map(\.id)) == Set([first.id, second.id]), "One of two rapid Agenda promotions disappeared from Today")
+        try expect(remainingYesterday.isEmpty, "Promoted tasks remained on yesterday")
+    }
     try check("Existing scheduled tasks repair missing destination day records") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-repair-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
@@ -690,6 +742,44 @@ do {
         )
         try expect(FileManager.default.fileExists(atPath: projectionDirectory.appendingPathComponent("tasks.md").path), "tasks.md projection was not written")
         try expect(!FileManager.default.fileExists(atPath: projectionDirectory.appendingPathComponent("agenda.md").path), "agenda.md was recreated")
+    }
+    try check("Habit catalog merges sources and retires Daily summary without data loss") {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-habits-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let databaseURL = temporary.appendingPathComponent("refocus.sqlite3")
+        do {
+            _ = try RefocusStore(databaseURL: databaseURL, calendar: calendar)
+        }
+        let sqlite = Process()
+        sqlite.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        sqlite.arguments = [databaseURL.path, """
+            INSERT OR REPLACE INTO field_definitions(id,name,kind,unit,position,success_rule,archived)
+            VALUES('daily-summary','Daily summary','text',NULL,999,NULL,0);
+            INSERT OR REPLACE INTO field_values(definition_id,day,value,updated_hlc)
+            VALUES('daily-summary','2026-08-08','Historical summary must survive','legacy');
+            INSERT OR REPLACE INTO field_definitions(id,name,kind,unit,position,success_rule,archived)
+            VALUES('solve-5-harder-problems','solve 5 harder problems','triState',NULL,2,NULL,0);
+            INSERT OR REPLACE INTO field_values(definition_id,day,value,updated_hlc)
+            VALUES('solve-5-harder-problems','2026-08-08','win','legacy');
+            """]
+        try sqlite.run()
+        sqlite.waitUntilExit()
+        try expect(sqlite.terminationStatus == 0, "Could not construct the legacy Daily summary state")
+
+        let reopened = try RefocusStore(databaseURL: databaseURL, calendar: calendar)
+        let definitions = try reopened.fieldDefinitions()
+        let values = try reopened.fieldValues(
+            from: try date("2026-08-08", format: "yyyy-MM-dd"),
+            through: try date("2026-08-08", format: "yyyy-MM-dd")
+        )
+        let habitIDs = Set(definitions.filter { $0.kind == .triState }.map(\.id))
+        try expect(Set(HabitCatalog.entries.map(\.id)).isSubset(of: habitIDs), "Merged Good/Bad habit definitions are incomplete")
+        try expect(!definitions.contains { $0.id == "solve-5-harder-problems" }, "Legacy duplicate habit remains visible")
+        try expect(values.contains { $0.definitionID == "five-harder-problems" && $0.value == "win" }, "Legacy habit value was not merged into its canonical column")
+        try expect(values.contains { $0.definitionID == "solve-5-harder-problems" && $0.value == "win" }, "Legacy habit value was destructively removed")
+        try expect(!definitions.contains { $0.id == "daily-summary" }, "Daily summary still appears as an app field")
+        try expect(values.contains { $0.definitionID == "daily-summary" && $0.value == "Historical summary must survive" }, "Retiring Daily summary deleted its historical value")
     }
     try check("Agenda contains only user tasks and supports tasks without a time") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-agenda-user-only-\(UUID().uuidString)")
@@ -775,6 +865,14 @@ do {
                   let fields = mutation["fields"] as? [String: Any] else { return false }
             return fields["hasScheduledTime"] as? Bool == false
         }, "Incomplete Agenda edit was not queued for cloud sync")
+        try store.saveAgendaEdits(date: day, tasks: [], profile: .universityEarly)
+        let remainingAfterDelete = try store.tasks(on: day)
+        try expect(remainingAfterDelete.isEmpty, "Deleting an Agenda task did not remove it from SQLite")
+        let deletionPending = try store.pendingMutations(limit: 500)
+        try expect(deletionPending.contains { payload in
+            guard let mutation = try? JSONSerialization.jsonObject(with: payload) as? [String: Any] else { return false }
+            return mutation["entityKind"] as? String == "task" && mutation["deleted"] as? Bool == true
+        }, "Deleting an Agenda task did not queue a cloud tombstone")
     }
     try check("Day analysis updates Journal without entering the machine log") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-journal-\(UUID().uuidString)")
