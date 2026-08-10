@@ -31,6 +31,7 @@ final class AppModel: ObservableObject {
     @Published var streakSummaries: [StreakSummary] = []
     @Published var dailyFieldDefinitions: [DailyFieldDefinition] = []
     @Published var dailyFieldValues: [String: String] = [:]
+    @Published var dailyDashboardAnalytics = DailyDashboardAnalytics()
     @Published var errorMessage: String?
     @Published var vaultURL: URL?
     @Published var launchAtLogin = false
@@ -172,7 +173,7 @@ final class AppModel: ObservableObject {
 
     var tomorrowCycleSummary: String {
         PlanningSegment.allCases.map { segment in
-            "\(segment.title.replacingOccurrences(of: " Block", with: "")) \(tomorrowTasks.reduce(0) { $0 + $1.planningCycles(in: segment) })/\(tomorrowRequiredCycles(segment))"
+            "\(segment.title.replacingOccurrences(of: " Block", with: "")) \(tomorrowTasks.reduce(0) { $0 + $1.planningCycles(in: segment) })/\(tomorrowRequiredCycles(segment, tasks: tomorrowTasks))"
         }.joined(separator: " · ")
     }
 
@@ -258,9 +259,6 @@ final class AppModel: ObservableObject {
 
             self.dayProfile = self.resolver.profile(for: date)
             self.activeSegment = self.validator.segment(at: date)
-            self.requiredCycleMinimum = self.validator.requiredCycles(
-                in: self.activeSegment, at: date, profile: self.dayProfile
-            )
             switch planResult {
             case .success(let plan):
                 self.hasPersistedToday = true
@@ -270,6 +268,7 @@ final class AppModel: ObservableObject {
                 self.tasks = preservingLocalEdits && hadTodayEdits
                     ? self.mergeRemoteTasks(current: localToday, baseline: localTodayBaseline, remote: normalized)
                     : normalized
+                self.refreshPlanningState(at: date)
                 // Fixed routine tasks are deterministic parts of the saved
                 // plan even when an older/local sync record omitted their task
                 // rows. Validate execution against the same normalized plan
@@ -288,6 +287,7 @@ final class AppModel: ObservableObject {
                 self.initialSegments = []
                 self.tasks = FixedPlanTasks.daily()
                 self.baselineTasks = []
+                self.refreshPlanningState(at: date)
                 self.validationIssues = self.currentValidation(self.tasks)
                 self.planMessage = "Today has not been planned."
                 self.isArmed = false
@@ -317,6 +317,7 @@ final class AppModel: ObservableObject {
             self.dailyFieldDefinitions = fieldDefinitions
             self.dailyFieldValues = Dictionary(uniqueKeysWithValues: fieldValues.map { ($0.definitionID, $0.value) })
             self.reloadStreakSummaries()
+            self.reloadDailyDashboardAnalytics()
         }
     }
 
@@ -393,7 +394,8 @@ final class AppModel: ObservableObject {
 
     func addTomorrowTask() {
         let segment = PlanningSegment.allCases.first { candidate in
-            tomorrowTasks.filter(candidate.contains).reduce(0) { $0 + $1.cycles } < tomorrowRequiredCycles(candidate)
+            tomorrowTasks.filter(candidate.contains).reduce(0) { $0 + $1.cycles }
+                < tomorrowRequiredCycles(candidate, tasks: tomorrowTasks)
         } ?? .evening
         let nextStart = max(
             segment.startMinute,
@@ -936,7 +938,10 @@ final class AppModel: ObservableObject {
         dailyFieldSaveTasks[definition.id] = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 350_000_000)
             guard !Task.isCancelled else { return }
-            do { try await worker.setDailyFieldValue(definition, value: value, date: date) }
+            do {
+                try await worker.setDailyFieldValue(definition, value: value, date: date)
+                self?.reloadDailyDashboardAnalytics()
+            }
             catch { self?.errorMessage = "Could not save \(definition.name): \(error.localizedDescription)" }
         }
     }
@@ -947,6 +952,7 @@ final class AppModel: ObservableObject {
             do {
                 try await worker.setStreakValue(definition, status: status, date: date)
                 self?.reloadStreakSummaries()
+                self?.reloadDailyDashboardAnalytics()
             } catch {
                 self?.errorMessage = error.localizedDescription
             }
@@ -1138,7 +1144,9 @@ final class AppModel: ObservableObject {
     private func refreshPlanningState(at date: Date) -> Bool {
         let resolvedProfile = resolver.profile(for: date)
         let resolvedSegment = validator.segment(at: date)
-        let resolvedMinimum = validator.requiredCycles(in: resolvedSegment, at: date, profile: resolvedProfile)
+        let resolvedMinimum = validator.requiredCycles(
+            in: resolvedSegment, at: date, profile: resolvedProfile, tasks: tasks
+        )
         let changed = resolvedProfile != dayProfile
             || resolvedSegment != activeSegment
             || resolvedMinimum != requiredCycleMinimum
@@ -1154,10 +1162,13 @@ final class AppModel: ObservableObject {
     }
 
     private func currentValidation(_ candidate: [PlanTask]) -> [PlanValidationIssue] {
+        let minimumCycles = validator.requiredCycles(
+            in: activeSegment, at: now, profile: dayProfile, tasks: candidate
+        )
         var issues = validator.validate(
             tasks: candidate,
             profile: dayProfile,
-            minimumCycles: requiredCycleMinimum,
+            minimumCycles: minimumCycles,
             requireFixedTasks: true,
             requireTaskDetails: true,
             countedSegment: activeSegment
@@ -1165,14 +1176,14 @@ final class AppModel: ObservableObject {
         let minute = clock.minuteOfDay(for: now)
         if minute >= 330, minute < 1290,
            let availabilityIssue = validator.availabilityIssue(
-               in: activeSegment, at: now, profile: dayProfile
+               in: activeSegment, at: now, profile: dayProfile, tasks: candidate
            ) {
             issues.append(availabilityIssue)
         }
         return issues
     }
 
-    private func tomorrowRequiredCycles(_ segment: PlanningSegment) -> Int {
+    private func tomorrowRequiredCycles(_ segment: PlanningSegment, tasks: [PlanTask]) -> Int {
         var parts = WallClock.dhakaCalendar().dateComponents([.year, .month, .day], from: tomorrowDate)
         parts.hour = segment.startMinute / 60
         parts.minute = segment.startMinute % 60
@@ -1180,7 +1191,8 @@ final class AppModel: ObservableObject {
         return validator.requiredCycles(
             in: segment,
             at: start,
-            profile: resolver.profile(for: tomorrowDate)
+            profile: resolver.profile(for: tomorrowDate),
+            tasks: tasks
         )
     }
 
@@ -1194,7 +1206,7 @@ final class AppModel: ObservableObject {
         )
         for segment in PlanningSegment.allCases {
             let actual = candidate.reduce(0) { $0 + $1.planningCycles(in: segment) }
-            let required = tomorrowRequiredCycles(segment)
+            let required = tomorrowRequiredCycles(segment, tasks: candidate)
             if actual < required {
                 issues.append(.insufficientSegment(segment: segment, actual: actual, required: required))
             }
@@ -1336,6 +1348,17 @@ final class AppModel: ObservableObject {
         Task { [weak self] in
             let summaries = (try? await worker.streakSummaries(for: Date(), definitions: definitions)) ?? []
             self?.streakSummaries = summaries
+        }
+    }
+
+    private func reloadDailyDashboardAnalytics() {
+        guard let worker else { return }
+        let definitions = streakDefinitions
+        let date = now
+        Task { [weak self] in
+            let analytics = (try? await worker.loadDailyDashboardAnalytics(for: date, definitions: definitions))
+                ?? DailyDashboardAnalytics()
+            self?.dailyDashboardAnalytics = analytics
         }
     }
 

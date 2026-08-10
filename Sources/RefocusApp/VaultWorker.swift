@@ -93,6 +93,17 @@ actor VaultWorker {
         try store.fieldValues(from: date, through: date)
     }
 
+    func loadDailyDashboardAnalytics(
+        for date: Date, definitions: [StreakDefinition]
+    ) throws -> DailyDashboardAnalytics {
+        DailyAnalytics.dashboard(
+            definitions: definitions,
+            values: try store.allFieldValues(),
+            asOf: date,
+            calendar: calendar
+        )
+    }
+
     func setDailyFieldValue(_ definition: DailyFieldDefinition, value: String, date: Date) throws {
         try store.setFieldValue(definitionID: definition.id, value: value, date: date)
         scheduleBackgroundWork(days: [date])

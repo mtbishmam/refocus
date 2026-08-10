@@ -37,6 +37,14 @@ The full design is in [docs/architecture.md](docs/architecture.md), migration
 details are in [docs/migration.md](docs/migration.md), and AI access is described
 in [docs/mcp.md](docs/mcp.md).
 
+## Planning capacity
+
+Morning (06:00–12:00) and Afternoon (12:00–18:00) each contain 12 physical
+half-hour cycles. A scheduled one-hour Rest task occupies two of those slots,
+so the normal gate requires 10 work cycles. Rest remains editable for each
+date: deleting it releases its slots and immediately raises that block's
+required plan to 12. Evening remains 18:00–21:30 with up to seven cycles.
+
 ## Build and verify
 
 ```sh
@@ -70,10 +78,20 @@ hostname, D1 owner, or native pairing target. See
 ## Daily context and AI
 
 Daily fields are extensible instead of hard-coded streak columns. The Daily
-view separates Bad Habits and Good Habits into date-by-habit tables while
-preserving all migrated values. Weight (kg), Calories (kcal), and Solved
-problems remain structured metrics. Daily summary is not an app field: the user
-or AI writes it in the Summary section of `journal/mon-D.md`.
+dashboard preserves the rapid date-by-habit entry workflow and adds compact
+weight and habit analytics above it. Non-Negotiables contain the five Level 1
+rules; the visible Good Habits are only `Wake up @5:5` and
+`Solve 5 harder problems`. Historical values for retired/hidden fields remain
+stored.
+
+Checked is always a Win, an explicit failure is a Loss, and blank is neutral.
+Calendar-month Delta and lifetime Delta are derived from the daily records;
+Stage is derived only from lifetime Delta and can move up or down. Weight ETA
+uses a recent measured downward trend, is always shown in days, and remains
+`Not enough data` when the history or trend is not meaningful. Weight (kg),
+Calories (kcal), and Solved problems remain structured immediate-save metrics.
+Daily summary is not an app field: the user or AI writes it in the Summary
+section of `journal/mon-D.md`.
 
 The read-only MCP endpoint is `/api/mcp`. AI clients should call
 `get_optimization_context` first; narrower day, agenda, and metric tools are for

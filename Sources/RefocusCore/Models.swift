@@ -54,15 +54,15 @@ public enum PlanningSegment: String, Codable, CaseIterable, Sendable {
 
     public var endMinute: Int {
         switch self {
-        case .morning: 660
-        case .afternoon: 1020
+        case .morning: 720
+        case .afternoon: 1080
         case .evening: 1290
         }
     }
 
     public var maximumCycles: Int {
         switch self {
-        case .morning, .afternoon: 10
+        case .morning, .afternoon: 12
         case .evening: 7
         }
     }
@@ -119,6 +119,16 @@ public struct HabitCatalogEntry: Identifiable, Equatable, Sendable {
 }
 
 public enum HabitCatalog {
+    public static let dashboardHabitIDs: Set<String> = [
+        "no-all-nighter",
+        "no-unplanned-insta-s-11-5-return-home-wake-up",
+        "no-unplanned-entertainment",
+        "no-food-after-8",
+        "no-food-with-media",
+        "wake-up-5-5",
+        "five-harder-problems",
+    ]
+
     public static let aliases: [String: String] = [
         "solve-5-harder-problems": "five-harder-problems",
         "solve-five-harder-problems": "five-harder-problems",
@@ -134,7 +144,7 @@ public enum HabitCatalog {
         HabitCatalogEntry(id: "no-unplanned-entertainment", name: "no unplanned entertainment", group: .bad, level: "Level 1 · Non-Negotiables"),
         HabitCatalogEntry(id: "no-food-after-8", name: "no food after 8", group: .bad, level: "Level 1 · Non-Negotiables"),
         HabitCatalogEntry(id: "no-food-with-media", name: "no food with media", group: .bad, level: "Level 1 · Non-Negotiables"),
-        HabitCatalogEntry(id: "wake-up-5-5", name: "Wake up @5.5", group: .good, level: "Level 1 · Good Habits"),
+        HabitCatalogEntry(id: "wake-up-5-5", name: "Wake up @5:5", group: .good, level: "Level 1 · Good Habits"),
         HabitCatalogEntry(id: "five-harder-problems", name: "Solve 5 harder problems", group: .good, level: "Level 1 · Good Habits"),
         HabitCatalogEntry(id: "keto-only-diet", name: "Keto only diet", group: .good, level: "Level 2 · Obsession"),
         HabitCatalogEntry(id: "no-soft-drinks", name: "No soft drinks", group: .good, level: "Level 2 · Obsession"),
@@ -148,6 +158,255 @@ public enum HabitCatalog {
             id: definition.id, name: definition.name, group: group,
             level: group == .bad ? "Imported Bad Habits" : "Imported Good Habits"
         )
+    }
+}
+
+public enum HabitStage: String, Codable, CaseIterable, Sendable {
+    case started
+    case awakening
+    case breakthrough
+    case ascension
+    case mastery
+    case perfection
+    case transcendence
+
+    public init(totalDelta: Int) {
+        switch totalDelta {
+        case ...0: self = .started
+        case 1...6: self = .awakening
+        case 7...20: self = .breakthrough
+        case 21...89: self = .ascension
+        case 90...179: self = .mastery
+        case 180...364: self = .perfection
+        default: self = .transcendence
+        }
+    }
+
+    public var title: String {
+        switch self {
+        case .started: "Started"
+        case .awakening: "Awakening"
+        case .breakthrough: "Breakthrough"
+        case .ascension: "Ascension"
+        case .mastery: "Mastery"
+        case .perfection: "Perfection"
+        case .transcendence: "Transcendence"
+        }
+    }
+
+    public var symbol: String {
+        switch self {
+        case .started: "⚪"
+        case .awakening: "🟣"
+        case .breakthrough: "🔴"
+        case .ascension: "🔵"
+        case .mastery: "🟨"
+        case .perfection: "🟧"
+        case .transcendence: "🟥"
+        }
+    }
+}
+
+public struct HabitMonthlyDelta: Identifiable, Equatable, Sendable {
+    public var id: String { monthKey }
+    public var monthKey: String
+    public var label: String
+    public var delta: Int
+
+    public init(monthKey: String, label: String, delta: Int) {
+        self.monthKey = monthKey
+        self.label = label
+        self.delta = delta
+    }
+}
+
+public struct HabitPerformance: Identifiable, Equatable, Sendable {
+    public var id: String { definition.id }
+    public var definition: StreakDefinition
+    public var totalDelta: Int
+    public var currentMonthDelta: Int
+    public var stage: HabitStage
+    public var monthlyHistory: [HabitMonthlyDelta]
+
+    public init(
+        definition: StreakDefinition,
+        totalDelta: Int,
+        currentMonthDelta: Int,
+        monthlyHistory: [HabitMonthlyDelta]
+    ) {
+        self.definition = definition
+        self.totalDelta = totalDelta
+        self.currentMonthDelta = currentMonthDelta
+        self.stage = HabitStage(totalDelta: totalDelta)
+        self.monthlyHistory = monthlyHistory
+    }
+}
+
+public struct WeightProgress: Equatable, Sendable {
+    public static let goal = 75.0
+
+    public var currentWeight: Double?
+    public var startingWeight: Double?
+    public var remaining: Double?
+    public var etaDays: Int?
+    public var progress: Double
+    public var trendKgPerDay: Double?
+
+    public init(
+        currentWeight: Double? = nil,
+        startingWeight: Double? = nil,
+        remaining: Double? = nil,
+        etaDays: Int? = nil,
+        progress: Double = 0,
+        trendKgPerDay: Double? = nil
+    ) {
+        self.currentWeight = currentWeight
+        self.startingWeight = startingWeight
+        self.remaining = remaining
+        self.etaDays = etaDays
+        self.progress = progress
+        self.trendKgPerDay = trendKgPerDay
+    }
+}
+
+public struct DailyDashboardAnalytics: Equatable, Sendable {
+    public var habits: [HabitPerformance]
+    public var weight: WeightProgress
+
+    public init(habits: [HabitPerformance] = [], weight: WeightProgress = WeightProgress()) {
+        self.habits = habits
+        self.weight = weight
+    }
+}
+
+public enum DailyAnalytics {
+    public static func dashboard(
+        definitions: [StreakDefinition],
+        values: [DailyFieldValue],
+        asOf now: Date,
+        calendar: Calendar = WallClock.dhakaCalendar()
+    ) -> DailyDashboardAnalytics {
+        DailyDashboardAnalytics(
+            habits: habitPerformance(definitions: definitions, values: values, asOf: now, calendar: calendar),
+            weight: weightProgress(values: values, asOf: now, calendar: calendar)
+        )
+    }
+
+    public static func habitPerformance(
+        definitions: [StreakDefinition],
+        values: [DailyFieldValue],
+        asOf now: Date,
+        calendar: Calendar = WallClock.dhakaCalendar()
+    ) -> [HabitPerformance] {
+        let today = calendar.startOfDay(for: now)
+        let currentMonthKey = monthKey(today, calendar: calendar)
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "MMM"
+
+        return definitions
+            .filter { HabitCatalog.dashboardHabitIDs.contains($0.id) }
+            .map { definition in
+                var monthDeltas: [String: Int] = [:]
+                for value in values where value.definitionID == definition.id {
+                    guard let date = parseDay(value.date, calendar: calendar), date <= today,
+                          let status = StreakStatus(rawValue: value.value) else { continue }
+                    let delta = status == .win ? 1 : status == .fail ? -1 : 0
+                    monthDeltas[monthKey(date, calendar: calendar), default: 0] += delta
+                }
+                monthDeltas[currentMonthKey, default: 0] += 0
+                let history = monthDeltas.keys.sorted(by: >).map { key in
+                    let date = parseMonth(key, calendar: calendar) ?? today
+                    return HabitMonthlyDelta(monthKey: key, label: formatter.string(from: date), delta: monthDeltas[key, default: 0])
+                }
+                return HabitPerformance(
+                    definition: definition,
+                    totalDelta: monthDeltas.values.reduce(0, +),
+                    currentMonthDelta: monthDeltas[currentMonthKey, default: 0],
+                    monthlyHistory: history
+                )
+            }
+    }
+
+    public static func weightProgress(
+        values: [DailyFieldValue],
+        asOf now: Date,
+        calendar: Calendar = WallClock.dhakaCalendar()
+    ) -> WeightProgress {
+        let today = calendar.startOfDay(for: now)
+        let measurements = values.compactMap { value -> (Date, Double)? in
+            guard value.definitionID == "weight",
+                  let date = parseDay(value.date, calendar: calendar), date <= today,
+                  let weight = Double(value.value.trimmingCharacters(in: .whitespacesAndNewlines)),
+                  weight > 0 else { return nil }
+            return (date, weight)
+        }.sorted { $0.0 < $1.0 }
+
+        guard let first = measurements.first, let latest = measurements.last else { return WeightProgress() }
+        let remaining = max(0, latest.1 - WeightProgress.goal)
+        let denominator = first.1 - WeightProgress.goal
+        let progress = denominator > 0
+            ? min(1, max(0, (first.1 - latest.1) / denominator))
+            : (latest.1 <= WeightProgress.goal ? 1 : 0)
+        if remaining == 0 {
+            return WeightProgress(
+                currentWeight: latest.1, startingWeight: first.1, remaining: 0,
+                etaDays: 0, progress: 1, trendKgPerDay: nil
+            )
+        }
+
+        let cutoff = calendar.date(byAdding: .day, value: -60, to: today) ?? today
+        let recent = measurements.filter { $0.0 >= cutoff }
+        guard recent.count >= 3,
+              let recentFirst = recent.first,
+              let recentLast = recent.last,
+              recentLast.0.timeIntervalSince(recentFirst.0) >= 7 * 86_400 else {
+            return WeightProgress(
+                currentWeight: latest.1, startingWeight: first.1, remaining: remaining, progress: progress
+            )
+        }
+
+        let origin = recentFirst.0
+        let points = recent.map { ($0.0.timeIntervalSince(origin) / 86_400, $0.1) }
+        let meanX = points.map(\.0).reduce(0, +) / Double(points.count)
+        let meanY = points.map(\.1).reduce(0, +) / Double(points.count)
+        let numerator = points.reduce(0) { $0 + ($1.0 - meanX) * ($1.1 - meanY) }
+        let divisor = points.reduce(0) { $0 + pow($1.0 - meanX, 2) }
+        guard divisor > 0 else {
+            return WeightProgress(
+                currentWeight: latest.1, startingWeight: first.1, remaining: remaining, progress: progress
+            )
+        }
+        let slope = numerator / divisor
+        guard slope <= -0.005 else {
+            return WeightProgress(
+                currentWeight: latest.1, startingWeight: first.1, remaining: remaining,
+                progress: progress, trendKgPerDay: slope
+            )
+        }
+        return WeightProgress(
+            currentWeight: latest.1, startingWeight: first.1, remaining: remaining,
+            etaDays: Int(ceil(remaining / -slope)), progress: progress, trendKgPerDay: slope
+        )
+    }
+
+    private static func parseDay(_ value: String, calendar: Calendar) -> Date? {
+        let parts = value.split(separator: "-").compactMap { Int($0) }
+        guard parts.count == 3 else { return nil }
+        return calendar.date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2]))
+    }
+
+    private static func monthKey(_ date: Date, calendar: Calendar) -> String {
+        let parts = calendar.dateComponents([.year, .month], from: date)
+        return String(format: "%04d-%02d", parts.year ?? 0, parts.month ?? 0)
+    }
+
+    private static func parseMonth(_ value: String, calendar: Calendar) -> Date? {
+        let parts = value.split(separator: "-").compactMap { Int($0) }
+        guard parts.count == 2 else { return nil }
+        return calendar.date(from: DateComponents(year: parts[0], month: parts[1], day: 1))
     }
 }
 

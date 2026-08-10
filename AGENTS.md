@@ -53,9 +53,14 @@ The day is independently planned and snapshotted in three super-blocks:
 
 | Block | Window | Required cycles |
 |---|---:|---:|
-| Morning | 06:00–11:00 | `min(10, usable half-hour cycles remaining in this block)` |
-| Afternoon | 12:00–17:00 | `min(10, usable half-hour cycles remaining in this block)` |
+| Morning | 06:00–12:00 | `min(12, usable half-hour cycles remaining in this block)` |
+| Afternoon | 12:00–18:00 | `min(12, usable half-hour cycles remaining in this block)` |
 | Evening | 18:00–21:30 | `min(7, usable half-hour cycles remaining in this block)` |
+
+- The normal 11:00–12:00 and 17:00–18:00 Rest tasks consume two physical
+  cycles each, leaving the usual Morning/Afternoon requirement at 10. Because
+  Rest is editable per date, deleting one immediately releases those two slots
+  and raises that block's required plan to 12 cycles.
 
 - Floor the current time to its active wall-clock cycle. At 07:13 the current
   cycle begins at 07:00.
@@ -157,8 +162,17 @@ Markdown promotion is involved.
 
 - Import every bullet in the legacy `ego/non-negotiables.md`, then manage fields
   in the extensible daily-field table.
-- Each date cycles blank → green win → red fail → blank.
-- Display current streak, maximum streak, total wins, and total fails.
+- The dashboard categories are `Non-Negotiables` (the five Level 1 rules) and
+  `Good Habits` (`Wake up @5:5` and `Solve 5 harder problems` only). Preserve
+  stored values for other imported habits even when they are hidden.
+- Each date cycles blank → green Win → red Loss → blank. Checked always means
+  success, including rules whose names begin with `No`.
+- Current Month Delta is Wins minus Losses in the current calendar month. Total
+  Delta is Wins minus Losses across all time and never resets. Derive Stage
+  exclusively from Total Delta using the dashboard thresholds; stages may fall.
+- Weight progress has a permanent 75 kg goal. Derive ETA in days from a recent
+  measured downward trend; show `Not enough data` for sparse or non-downward
+  histories and never fabricate a rate.
 
 ## ChatGPT Account, Site, and Codex Context
 

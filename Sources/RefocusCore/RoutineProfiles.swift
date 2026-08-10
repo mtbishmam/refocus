@@ -326,16 +326,20 @@ public struct PlanValidator: Sendable {
     public func requiredCycles(
         at date: Date,
         profile: DayProfile,
+        tasks: [PlanTask]? = nil,
         calendar: Calendar = WallClock.dhakaCalendar()
     ) -> Int {
-        requiredCycles(in: segment(at: date, calendar: calendar), at: date, profile: profile, calendar: calendar)
+        requiredCycles(
+            in: segment(at: date, calendar: calendar), at: date,
+            profile: profile, tasks: tasks, calendar: calendar
+        )
     }
 
     public func segment(at date: Date, calendar: Calendar = WallClock.dhakaCalendar()) -> PlanningSegment {
         let components = calendar.dateComponents([.hour, .minute], from: date)
         let minute = (components.hour ?? 0) * 60 + (components.minute ?? 0)
-        if minute < 660 { return .morning }
-        if minute < 1020 { return .afternoon }
+        if minute < 720 { return .morning }
+        if minute < 1080 { return .afternoon }
         return .evening
     }
 
@@ -343,6 +347,7 @@ public struct PlanValidator: Sendable {
         in segment: PlanningSegment,
         at date: Date,
         profile: DayProfile,
+        tasks: [PlanTask]? = nil,
         calendar: Calendar = WallClock.dhakaCalendar()
     ) -> Int {
         let components = calendar.dateComponents([.hour, .minute], from: date)
@@ -351,10 +356,26 @@ public struct PlanValidator: Sendable {
         let firstAvailableSlot = max(segment.startMinute, currentCycleStart)
         guard firstAvailableSlot < segment.endMinute else { return 0 }
 
+        // Rest only consumes planning capacity while its editable predefined
+        // task exists for this date. Deleting a one-hour Rest therefore
+        // releases its two physical half-hour slots and raises the gate from
+        // 10 to 12. Calls without loaded tasks retain the routine defaults.
+        let restWindows: [RoutineWindow]
+        if let tasks {
+            restWindows = tasks.compactMap { task in
+                guard task.hasScheduledTime,
+                      task.isRoutineBlock,
+                      task.predefinedKind == .rest else { return nil }
+                return RoutineWindow(task.startMinute, task.endMinute, .protected, task.title)
+            }
+        } else {
+            restWindows = FixedPlanTasks.defaultRestWindows
+        }
+
         var available = 0
         var cursor = firstAvailableSlot
         while cursor + 30 <= segment.endMinute {
-            let blocked = (profile.protectedWindows + FixedPlanTasks.defaultRestWindows)
+            let blocked = (profile.protectedWindows + restWindows)
                 .contains { $0.overlaps(start: cursor, end: cursor + 30) }
             if !blocked { available += 1 }
             cursor += 30
@@ -366,9 +387,10 @@ public struct PlanValidator: Sendable {
         in segment: PlanningSegment,
         at date: Date,
         profile: DayProfile,
+        tasks: [PlanTask]? = nil,
         calendar: Calendar = WallClock.dhakaCalendar()
     ) -> PlanValidationIssue? {
-        requiredCycles(in: segment, at: date, profile: profile, calendar: calendar) == 0
+        requiredCycles(in: segment, at: date, profile: profile, tasks: tasks, calendar: calendar) == 0
             ? .noAvailableCycles(segment: segment)
             : nil
     }

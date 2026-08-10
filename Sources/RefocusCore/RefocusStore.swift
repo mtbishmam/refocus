@@ -400,6 +400,15 @@ public final class RefocusStore: @unchecked Sendable {
         return result
     }
 
+    public func allFieldValues() throws -> [DailyFieldValue] {
+        var result: [DailyFieldValue] = []
+        try query("SELECT definition_id, day, value FROM field_values ORDER BY day, definition_id") { row in
+            guard let definitionID = row.text(0), let day = row.text(1), let value = row.text(2) else { return }
+            result.append(DailyFieldValue(definitionID: definitionID, date: day, value: value))
+        }
+        return result
+    }
+
     public func saveAnalysis(_ analysis: DayAnalysis, date: Date) throws {
         let data = try encoder.encode(analysis)
         try transaction {

@@ -617,7 +617,8 @@ private struct SavedTaskCard: View {
               }
             }
         }
-        .padding(16)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             isCurrent ? Color.orange.opacity(0.20) : (task.displayColor ?? .none).swiftUIColor.opacity(task.displayColor == nil ? 0.055 : 0.13),
@@ -1225,23 +1226,58 @@ private extension TaskDisplayColor {
 struct StreaksView: View {
     @EnvironmentObject private var model: AppModel
 
-    private var badHabits: [StreakSummary] {
-        model.streakSummaries.filter { HabitCatalog.entry(for: $0.definition).group == .bad }
+    private var nonNegotiables: [StreakSummary] {
+        model.streakSummaries.filter {
+            HabitCatalog.dashboardHabitIDs.contains($0.id)
+                && HabitCatalog.entry(for: $0.definition).group == .bad
+        }
     }
 
     private var goodHabits: [StreakSummary] {
-        model.streakSummaries.filter { HabitCatalog.entry(for: $0.definition).group == .good }
+        model.streakSummaries.filter {
+            HabitCatalog.dashboardHabitIDs.contains($0.id)
+                && HabitCatalog.entry(for: $0.definition).group == .good
+        }
+    }
+
+    private var nonNegotiablePerformance: [HabitPerformance] {
+        model.dailyDashboardAnalytics.habits.filter {
+            HabitCatalog.entry(for: $0.definition).group == .bad
+        }
+    }
+
+    private var goodHabitPerformance: [HabitPerformance] {
+        model.dailyDashboardAnalytics.habits.filter {
+            HabitCatalog.entry(for: $0.definition).group == .good
+        }
     }
 
     var body: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 20) {
-                Text("Daily Context").font(.largeTitle.bold())
-                Text("Fast structured inputs for your logs and AI context. Changes save immediately.")
-                    .foregroundStyle(.secondary)
+            LazyVStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Daily Dashboard").font(.title.bold())
+                    Text("Weight progress, habit performance, and fast daily tracking.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+
+                WeightProgressDashboard(progress: model.dailyDashboardAnalytics.weight)
+
+                HabitPerformanceDashboard(
+                    nonNegotiables: nonNegotiablePerformance,
+                    goodHabits: goodHabitPerformance,
+                    now: model.now
+                )
+
+                VStack(alignment: .leading, spacing: 10) {
+                    SectionTitle(
+                        title: "Daily Context",
+                        subtitle: "Changes save immediately and feed your logs and analytics."
+                    )
                 let inputs = model.dailyFieldDefinitions.filter { $0.kind != .triState && $0.id != "daily-summary" }
                 if !inputs.isEmpty {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 12)], spacing: 12) {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 210), spacing: 10)], spacing: 10) {
                         ForEach(inputs) { definition in
                             VStack(alignment: .leading, spacing: 6) {
                                 HStack(spacing: 4) {
@@ -1257,16 +1293,243 @@ struct StreaksView: View {
                                 )
                                 .textFieldStyle(.roundedBorder)
                             }
-                            .padding(12)
-                            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+                                .padding(11)
+                                .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 10))
+                                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.07)))
+                            }
                         }
                     }
                 }
-                HabitDatabaseTable(title: "Bad Habits", summaries: badHabits, now: model.now)
+                .dashboardSurface()
+
+                SectionTitle(
+                    title: "Detailed Tracking",
+                    subtitle: "Checked means Win. A marked × means Loss; blank days are neutral."
+                )
+                HabitDatabaseTable(title: "Non-Negotiables", summaries: nonNegotiables, now: model.now)
                 HabitDatabaseTable(title: "Good Habits", summaries: goodHabits, now: model.now)
             }
-            .padding()
+            .padding(.horizontal, 22)
+            .padding(.vertical, 14)
         }
+    }
+}
+
+private struct SectionTitle: View {
+    let title: String
+    let subtitle: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title).font(.title3.bold())
+            Text(subtitle).font(.caption).foregroundStyle(.secondary)
+            Spacer()
+        }
+    }
+}
+
+private struct WeightProgressDashboard: View {
+    let progress: WeightProgress
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionTitle(
+                title: "Weight Progress",
+                subtitle: "Recent measurements determine the ETA; the goal is fixed at 75 kg."
+            )
+            HStack(spacing: 0) {
+                metric("Current", value: weightText(progress.currentWeight), emphasis: true)
+                Divider().frame(height: 42)
+                metric("Goal", value: "75.0 kg")
+                Divider().frame(height: 42)
+                metric("Remaining", value: weightText(progress.remaining))
+                Divider().frame(height: 42)
+                metric("ETA", value: progress.etaDays.map { "\($0) days" } ?? "Not enough data")
+            }
+            ProgressView(value: progress.progress)
+                .tint(Color.accentColor)
+            HStack {
+                Text(progress.startingWeight.map { "Started at \(weightText($0))" } ?? "Add weight measurements to begin")
+                Spacer()
+                Text("Goal 75 kg")
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+        }
+        .dashboardSurface()
+    }
+
+    private func metric(_ label: String, value: String, emphasis: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label.uppercased())
+                .font(.caption2.bold())
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(emphasis ? .title3.bold() : .headline)
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 13)
+    }
+
+    private func weightText(_ value: Double?) -> String {
+        value.map { String(format: "%.1f kg", $0) } ?? "—"
+    }
+}
+
+private struct HabitPerformanceDashboard: View {
+    let nonNegotiables: [HabitPerformance]
+    let goodHabits: [HabitPerformance]
+    let now: Date
+    @State private var expandedHistory: Set<String> = []
+
+    private var monthLabel: String {
+        let formatter = DateFormatter()
+        formatter.calendar = WallClock.dhakaCalendar()
+        formatter.timeZone = WallClock.dhakaCalendar().timeZone
+        formatter.dateFormat = "MMM"
+        return formatter.string(from: now)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionTitle(
+                title: "Habit Performance",
+                subtitle: "Daily Result → Month Δ → Total Δ → Stage"
+            )
+            HabitSummarySection(
+                title: "Non-Negotiables", habits: nonNegotiables,
+                monthLabel: monthLabel, expandedHistory: $expandedHistory
+            )
+            Divider()
+            HabitSummarySection(
+                title: "Good Habits", habits: goodHabits,
+                monthLabel: monthLabel, expandedHistory: $expandedHistory
+            )
+        }
+        .dashboardSurface()
+    }
+}
+
+private struct HabitSummarySection: View {
+    let title: String
+    let habits: [HabitPerformance]
+    let monthLabel: String
+    @Binding var expandedHistory: Set<String>
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(title).font(.headline).padding(.bottom, 8)
+            HStack(spacing: 12) {
+                Text("HABIT").frame(maxWidth: .infinity, alignment: .leading)
+                Text("STAGE").frame(width: 150, alignment: .leading)
+                Text("TOTAL Δ").frame(width: 72, alignment: .trailing)
+                Text(monthLabel.uppercased()).frame(width: 58, alignment: .trailing)
+                Color.clear.frame(width: 24)
+            }
+            .font(.caption2.bold())
+            .foregroundStyle(.secondary)
+            .padding(.vertical, 5)
+
+            ForEach(habits) { habit in
+                VStack(spacing: 0) {
+                    Divider()
+                    Button {
+                        if expandedHistory.contains(habit.id) { expandedHistory.remove(habit.id) }
+                        else { expandedHistory.insert(habit.id) }
+                    } label: {
+                        HStack(spacing: 12) {
+                            Text(displayName(habit.definition))
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            StageBadge(stage: habit.stage).frame(width: 150, alignment: .leading)
+                            DeltaText(value: habit.totalDelta).frame(width: 72, alignment: .trailing)
+                            DeltaText(value: habit.currentMonthDelta).frame(width: 58, alignment: .trailing)
+                            Image(systemName: expandedHistory.contains(habit.id) ? "chevron.up" : "chevron.down")
+                                .font(.caption.bold())
+                                .foregroundStyle(.secondary)
+                                .frame(width: 24)
+                        }
+                        .padding(.vertical, 8)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    if expandedHistory.contains(habit.id) {
+                        HStack(spacing: 7) {
+                            Text("Monthly history").font(.caption).foregroundStyle(.secondary)
+                            ForEach(habit.monthlyHistory) { month in
+                                HStack(spacing: 4) {
+                                    Text(month.label)
+                                    DeltaText(value: month.delta, compact: true)
+                                }
+                                .font(.caption2)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 4)
+                                .background(Color.primary.opacity(0.05), in: Capsule())
+                            }
+                            Spacer()
+                        }
+                        .padding(.bottom, 8)
+                    }
+                }
+            }
+        }
+    }
+
+    private func displayName(_ definition: StreakDefinition) -> String {
+        let name = HabitCatalog.entry(for: definition).name
+        guard let first = name.first else { return name }
+        return first.uppercased() + name.dropFirst()
+    }
+}
+
+private struct StageBadge: View {
+    let stage: HabitStage
+
+    var body: some View {
+        Text("\(stage.symbol) \(stage.title)")
+            .font(.caption.bold())
+            .foregroundStyle(stageColor)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(stageColor.opacity(0.12), in: Capsule())
+    }
+
+    private var stageColor: Color {
+        switch stage {
+        case .started: .secondary
+        case .awakening: .purple
+        case .breakthrough: .pink
+        case .ascension: .blue
+        case .mastery: Color(red: 0.66, green: 0.49, blue: 0.08)
+        case .perfection: .orange
+        case .transcendence: .red
+        }
+    }
+}
+
+private struct DeltaText: View {
+    let value: Int
+    var compact = false
+
+    var body: some View {
+        Text(value > 0 ? "+\(value)" : "\(value)")
+            .font(compact ? .caption2.bold() : .subheadline.bold())
+            .monospacedDigit()
+            .foregroundStyle(value > 0 ? Color.green : value < 0 ? Color.red : Color.secondary)
+    }
+}
+
+private extension View {
+    func dashboardSurface() -> some View {
+        self
+            .padding(14)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.72), in: RoundedRectangle(cornerRadius: 13))
+            .overlay(RoundedRectangle(cornerRadius: 13).stroke(Color.primary.opacity(0.08)))
+            .shadow(color: Color.black.opacity(0.035), radius: 10, y: 4)
     }
 }
 
@@ -1286,7 +1549,7 @@ private struct HabitDatabaseTable: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(title).font(.title2.bold())
                 Spacer()
-                Text("blank → win → fail")
+                Text("blank → win → loss")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -1303,10 +1566,9 @@ private struct HabitDatabaseTable: View {
                                     Text(displayName(summary.definition))
                                         .font(.caption.bold())
                                         .lineLimit(2)
-                                    Text(habitLevel(summary.definition))
+                                    Text("Checked = Win")
                                         .font(.system(size: 9))
                                         .foregroundStyle(.secondary)
-                                        .lineLimit(1)
                                 }
                                 .frame(width: 150, height: 48)
                                 .padding(.horizontal, 6)
@@ -1325,27 +1587,12 @@ private struct HabitDatabaseTable: View {
                                 }
                             }
                         }
-                        GridRow {
-                            Text("Stats")
-                                .font(.caption.bold())
-                                .frame(width: 110, height: 38, alignment: .leading)
-                                .padding(.horizontal, 8)
-                                .background(Color.secondary.opacity(0.08))
-                            ForEach(summaries) { summary in
-                                Text("Current \(summary.current) · Max \(summary.longest)")
-                                    .font(.caption2)
-                                    .frame(width: 150, height: 38)
-                                    .background(Color.secondary.opacity(0.08))
-                                    .help("Wins \(summary.totalWins) · Fails \(summary.totalFails)")
-                            }
-                        }
                     }
                     .overlay(Rectangle().stroke(Color.primary.opacity(0.10)))
                 }
             }
         }
-        .padding(14)
-        .background(.quaternary.opacity(0.38), in: RoundedRectangle(cornerRadius: 12))
+        .dashboardSurface()
     }
 
     private func tableHeader(_ text: String, width: CGFloat, alignment: Alignment) -> some View {
@@ -1362,13 +1609,13 @@ private struct HabitDatabaseTable: View {
         } label: {
             Image(systemName: statusSymbol(status))
                 .font(.system(size: 15, weight: .bold))
-                .foregroundStyle(status == .blank ? Color.secondary : Color.white)
+                .foregroundStyle(streakColor(status))
                 .frame(width: 150, height: 38)
-                .background(streakColor(status).opacity(status == .blank ? 0.6 : 1))
+                .background(Color.primary.opacity(status == .blank ? 0.025 : 0.045))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("\(displayName(summary.definition)) · \(dayLabel(day)): blank → win → fail → blank")
+        .help("\(displayName(summary.definition)) · \(dayLabel(day)): blank → Win → Loss → blank")
     }
 
     private func dayLabel(_ day: Int) -> String {
@@ -1400,9 +1647,6 @@ private struct HabitDatabaseTable: View {
         return first.uppercased() + name.dropFirst()
     }
 
-    private func habitLevel(_ definition: StreakDefinition) -> String {
-        HabitCatalog.entry(for: definition).level
-    }
 }
 
 struct SettingsView: View {

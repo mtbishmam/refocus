@@ -31,6 +31,11 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
     if !condition() { throw CheckFailure.failed(message) }
 }
 
+func require<T>(_ value: T?, _ message: String) throws -> T {
+    guard let value else { throw CheckFailure.failed(message) }
+    return value
+}
+
 func expectIndex(_ needle: String, in text: String) throws -> String.Index {
     guard let range = text.range(of: needle) else {
         throw CheckFailure.failed("Missing expected text: \(needle)")
@@ -246,17 +251,17 @@ do {
         try expect(saturdayMashup?.coreTasks.last?.title == "6 - 7 -> if 4 unsolved, then retry; else 5th", "Saturday mashup subtasks did not end at 7")
         try expect(sundayMashup?.coreTasks.first?.title == "6 - 6.5 -> Skim & Write approaches, tags", "Morning mashup subtasks did not start at 6")
         try expect(sundayMashup?.coreTasks.last?.title == "10 - 11 -> if 4 unsolved, then retry; else 5th", "Morning mashup subtasks did not end at 11")
-        try expect(saturdayMashup?.planningCycles(in: .afternoon) == 6, "Afternoon gate did not count the 14:00–17:00 mashup cycles")
+        try expect(saturdayMashup?.planningCycles(in: .afternoon) == 8, "Afternoon gate did not count the 14:00–18:00 mashup cycles")
         try expect(saturdayMashup?.planningCycles(in: .evening) == 2, "Evening gate did not count the 18:00–19:00 mashup cycles")
         if let saturdayMashup {
             let duplicateIssues = PlanValidator().validate(
                 tasks: [saturdayMashup, saturdayMashup],
                 profile: RoutineProfileResolver(calendar: calendar).profile(for: saturday),
-                minimumCycles: 6, requireFixedTasks: false, requireTaskDetails: true,
+                minimumCycles: 8, requireFixedTasks: false, requireTaskDetails: true,
                 countedSegment: .afternoon
             )
             try expect(!duplicateIssues.contains { if case .overlap = $0 { return true }; return false }, "Duplicate task identity created a self-overlap")
-            try expect(!duplicateIssues.contains { if case .insufficientCycles = $0 { return true }; return false }, "Spanning mashup reported 0/6 Afternoon cycles")
+            try expect(!duplicateIssues.contains { if case .insufficientCycles = $0 { return true }; return false }, "Spanning mashup reported 0/8 Afternoon cycles")
         }
         try expect(sundayBlocks.contains { $0.title == "CSE220L Class" && $0.mvp == "CSE220L-15-TBA-09B-09L" && $0.startMinute == 840 && $0.endMinute == 1020 }, "Sunday university lab missing")
         try expect(sundayBlocks.filter { $0.predefinedKind == .university }.allSatisfy { $0.displayColor == .red && $0.predefinedVersion == 3 }, "Sunday university classes are not canonical red blocks")
@@ -324,6 +329,38 @@ do {
             countedSegment: .morning
         )
         try expect(issues.contains(.insufficientCycles(actual: 0, required: 4)), "Fixed evening cycles leaked into the morning gate")
+    }
+    try check("Deleting Rest releases two required planning cycles") {
+        let validator = PlanValidator()
+        let planDate = try date("2026-08-05", format: "yyyy-MM-dd")
+        let morningStart = try date("2026-08-05 06:00:00")
+        let afternoonStart = try date("2026-08-05 12:00:00")
+        let profile = RoutineProfileResolver(calendar: calendar).profile(for: planDate)
+        let routine = PredefinedRoutineBlocks.daily(for: planDate, calendar: calendar) + FixedPlanTasks.daily()
+
+        try expect(
+            validator.requiredCycles(at: morningStart, profile: profile, tasks: routine, calendar: calendar) == 10,
+            "Morning Rest did not consume its two physical slots"
+        )
+        let withoutMorningRest = routine.filter {
+            !($0.predefinedKind == .rest && $0.startMinute == 660 && $0.endMinute == 720)
+        }
+        try expect(
+            validator.requiredCycles(at: morningStart, profile: profile, tasks: withoutMorningRest, calendar: calendar) == 12,
+            "Deleting 11:00–12:00 Rest did not raise Morning to 12 cycles"
+        )
+
+        try expect(
+            validator.requiredCycles(at: afternoonStart, profile: profile, tasks: routine, calendar: calendar) == 10,
+            "Afternoon Rest did not consume its two physical slots"
+        )
+        let withoutAfternoonRest = routine.filter {
+            !($0.predefinedKind == .rest && $0.startMinute == 1020 && $0.endMinute == 1080)
+        }
+        try expect(
+            validator.requiredCycles(at: afternoonStart, profile: profile, tasks: withoutAfternoonRest, calendar: calendar) == 12,
+            "Deleting 17:00–18:00 Rest did not raise Afternoon to 12 cycles"
+        )
     }
     try check("Live Sunday planning state uses the current morning window") {
         let sundayEarly = try date("2026-08-09 04:35:00")
@@ -780,6 +817,60 @@ do {
         try expect(values.contains { $0.definitionID == "solve-5-harder-problems" && $0.value == "win" }, "Legacy habit value was destructively removed")
         try expect(!definitions.contains { $0.id == "daily-summary" }, "Daily summary still appears as an app field")
         try expect(values.contains { $0.definitionID == "daily-summary" && $0.value == "Historical summary must survive" }, "Retiring Daily summary deleted its historical value")
+    }
+    try check("Habit Delta, monthly history, stages, and weight ETA derive from preserved daily values") {
+        let definitions = [
+            StreakDefinition(id: "no-all-nighter", name: "No all-nighter", mode: .manual),
+            StreakDefinition(id: "wake-up-5-5", name: "Wake up @5:5", mode: .manual),
+            StreakDefinition(id: "keto-only-diet", name: "Keto only diet", mode: .manual),
+        ]
+        let values = [
+            DailyFieldValue(definitionID: "no-all-nighter", date: "2026-07-31", value: "win"),
+            DailyFieldValue(definitionID: "no-all-nighter", date: "2026-08-01", value: "win"),
+            DailyFieldValue(definitionID: "no-all-nighter", date: "2026-08-02", value: "fail"),
+            DailyFieldValue(definitionID: "no-all-nighter", date: "2026-08-03", value: "win"),
+            DailyFieldValue(definitionID: "wake-up-5-5", date: "2026-08-01", value: "fail"),
+            DailyFieldValue(definitionID: "keto-only-diet", date: "2026-08-01", value: "win"),
+            DailyFieldValue(definitionID: "weight", date: "2026-06-15", value: "82.0"),
+            DailyFieldValue(definitionID: "weight", date: "2026-07-15", value: "80.5"),
+            DailyFieldValue(definitionID: "weight", date: "2026-08-08", value: "79.0"),
+        ]
+        let analytics = DailyAnalytics.dashboard(
+            definitions: definitions,
+            values: values,
+            asOf: try date("2026-08-09", format: "yyyy-MM-dd"),
+            calendar: calendar
+        )
+        try expect(analytics.habits.map(\.definition.id) == ["no-all-nighter", "wake-up-5-5"], "Excluded Good Habits appeared in the dashboard")
+        let nonNegotiable = try require(analytics.habits.first(where: { $0.id == "no-all-nighter" }), "Missing Non-Negotiable analytics")
+        try expect(nonNegotiable.currentMonthDelta == 1, "Current calendar month Delta is incorrect")
+        try expect(nonNegotiable.totalDelta == 2, "Total Delta did not include historical and live current-month results")
+        try expect(nonNegotiable.stage == .awakening, "Stage was not derived from Total Delta")
+        try expect(nonNegotiable.monthlyHistory.map(\.monthKey) == ["2026-08", "2026-07"], "Monthly history was not preserved in descending order")
+        try expect(analytics.weight.currentWeight == 79.0, "Latest weight did not become Current Weight")
+        try expect(analytics.weight.remaining == 4.0, "Weight Remaining was not calculated against 75 kg")
+        try expect((analytics.weight.etaDays ?? 0) > 0, "A meaningful downward trend did not produce an ETA in days")
+        try expect(HabitStage(totalDelta: 89) == .ascension && HabitStage(totalDelta: 90) == .mastery, "Stage boundary 89 to 90 is incorrect")
+        try expect(HabitStage(totalDelta: 0) == .started && HabitStage(totalDelta: -4) == .started, "Non-positive Delta must remain Started")
+    }
+    try check("Weight ETA refuses sparse or non-downward data") {
+        let now = try date("2026-08-09", format: "yyyy-MM-dd")
+        let sparse = DailyAnalytics.weightProgress(
+            values: [DailyFieldValue(definitionID: "weight", date: "2026-08-08", value: "79.1")],
+            asOf: now,
+            calendar: calendar
+        )
+        try expect(sparse.etaDays == nil, "Sparse weight history fabricated an ETA")
+        let rising = DailyAnalytics.weightProgress(
+            values: [
+                DailyFieldValue(definitionID: "weight", date: "2026-07-01", value: "78.0"),
+                DailyFieldValue(definitionID: "weight", date: "2026-07-20", value: "79.0"),
+                DailyFieldValue(definitionID: "weight", date: "2026-08-08", value: "80.0"),
+            ],
+            asOf: now,
+            calendar: calendar
+        )
+        try expect(rising.etaDays == nil, "A non-downward trend fabricated an ETA")
     }
     try check("Agenda contains only user tasks and supports tasks without a time") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-agenda-user-only-\(UUID().uuidString)")
