@@ -93,10 +93,13 @@ Calories (kcal), and Solved problems remain structured immediate-save metrics.
 Daily summary is not an app field: the user or AI writes it in the Summary
 section of `journal/mon-D.md`.
 
-The read-only MCP endpoint is `/api/mcp`. AI clients should call
-`get_optimization_context` first; narrower day, agenda, and metric tools are for
-follow-up detail. Responses omit internal IDs and empty fields. A clean Markdown
-projection remains available as the zero-setup fallback.
+The MCP endpoint is `/api/mcp`. AI clients should call
+`get_optimization_context` first and `get_daily_dashboard` during day analysis;
+narrower day, agenda, and metric tools are available for follow-up detail.
+Explicit Daily edits use the write-scoped `update_daily_values` tool, while
+Delta, Stage, progress, and ETA remain derived. Read responses omit internal
+IDs and empty fields. A clean Markdown projection remains available as the
+zero-setup fallback.
 
 ## Safety boundary
 

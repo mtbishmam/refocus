@@ -362,6 +362,28 @@ do {
             "Deleting 17:00–18:00 Rest did not raise Afternoon to 12 cycles"
         )
     }
+    try check("Add Task placement chooses the first unused slot") {
+        let validator = PlanValidator()
+        let tasks = [
+            PlanTask(title: "Plan Routes", startMinute: 360, cycles: 1),
+            PlanTask(
+                title: "Rest", startMinute: 660, cycles: 2,
+                routineBlock: true, predefinedKind: .rest
+            ),
+            PlanTask(
+                title: "University", startMinute: 750, cycles: 3,
+                routineBlock: true, predefinedKind: .university
+            ),
+        ]
+        try expect(
+            validator.firstUnusedSlot(in: tasks, startingAt: 360, before: 720) == 390,
+            "Add Task skipped the 06:30 gap and jumped behind later routine blocks"
+        )
+        try expect(
+            validator.firstUnusedSlot(in: tasks, startingAt: 660, before: 720) == nil,
+            "Add Task placed work inside Rest"
+        )
+    }
     try check("Live Sunday planning state uses the current morning window") {
         let sundayEarly = try date("2026-08-09 04:35:00")
         let profile = RoutineProfileResolver(calendar: calendar).profile(for: sundayEarly)
@@ -983,6 +1005,30 @@ do {
         try expect(journal.contains("Keep this exactly."), "Journal writing was overwritten")
         try expect(journal.contains("Final summary"), "Approved analysis was not written to Journal")
         try expect(!machineLog.contains("Final summary"), "Analysis leaked into the machine log")
+    }
+    try check("Clean daily log preserves Initial and Modified plan evidence without IDs") {
+        let planDate = try date("2026-08-11", format: "yyyy-MM-dd")
+        let id = UUID()
+        let initial = PlanTask(
+            id: id, title: "CP Plan", startMinute: 420, cycles: 2,
+            mvp: "Create the sprint", coreTasks: [CoreTask(title: "Draft"), CoreTask(title: "Check"), CoreTask(title: "Commit")]
+        )
+        var modified = initial
+        modified.startMinute = 510
+        let snapshots = PlanSnapshots(
+            profile: .universityLate,
+            initial: [.morning: [initial]],
+            modified: [.morning: [modified]]
+        )
+        let log = CleanMarkdownExporter(calendar: calendar).renderDailyLog(
+            date: planDate, tasks: [modified], snapshots: snapshots,
+            checkIns: [], definitions: [], values: [], analysis: nil
+        )
+        try expect(log.contains("## Morning Block - Initial plan"), "Initial snapshot heading missing from clean log")
+        try expect(log.contains("07:00–08:00 · CP Plan"), "Initial snapshot time missing from clean log")
+        try expect(log.contains("## Morning Block - Modified plan"), "Modified snapshot heading missing from clean log")
+        try expect(log.contains("08:30–09:30 · CP Plan"), "Modified snapshot time missing from clean log")
+        try expect(!log.localizedCaseInsensitiveContains(id.uuidString), "Internal task ID leaked into clean log")
     }
     try check("Local store stays inside the speed budget") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-speed-\(UUID().uuidString)")

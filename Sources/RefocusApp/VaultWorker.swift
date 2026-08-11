@@ -262,6 +262,7 @@ actor VaultWorker {
         try projection.exportDailyLog(
             date: date,
             tasks: try store.tasks(on: date),
+            snapshots: try store.planSnapshots(on: date),
             checkIns: try store.checkIns(on: date),
             definitions: definitions,
             values: try store.fieldValues(from: date, through: date),

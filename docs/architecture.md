@@ -19,7 +19,7 @@ under two seconds for online convergence under ordinary network conditions.
 | Universal PWA | iPhone/Ubuntu/browser editing, IndexedDB cache and outbox |
 | Cloudflare D1 | Durable cross-device entities, field clocks, mutations, leases |
 | Markdown projector | One-way `tasks.md` and clean daily logs for Obsidian |
-| Read-only MCP | Compact optimization, agenda, day, and metric context |
+| MCP | Compact optimization context plus explicit, write-scoped Daily edits |
 
 SQLite tables hold tasks, day plans and immutable/modified snapshots, check-ins,
 daily-field definitions and values, analyses, captures, tombstones, migration
@@ -45,4 +45,7 @@ the iCloud write. Without cloud pairing, the only local Mac is allowed to export
 
 `tasks.md` contains unfinished overdue tasks, all of Today, and all future
 tasks. Completed historical tasks stay in their daily logs instead of cluttering
-Agenda. Projection files never feed back into live state.
+Agenda. Each `log/YYYY-MM-DD.md` includes a clean, ID-free Initial and latest
+Modified plan for every initialized planning block, so `analyze_day` can compare
+intent with later rescheduling and edits. Projection files never feed back into
+live state.

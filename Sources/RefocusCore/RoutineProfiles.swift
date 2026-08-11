@@ -323,6 +323,25 @@ public struct RoutineProfileResolver: Sendable {
 public struct PlanValidator: Sendable {
     public init() {}
 
+    /// Returns the earliest free physical half-hour slot in a planning window.
+    /// Scheduled routine and fixed blocks participate exactly like user tasks.
+    public func firstUnusedSlot(
+        in tasks: [PlanTask],
+        startingAt minute: Int,
+        before endMinute: Int
+    ) -> Int? {
+        var cursor = max(0, (minute / 30) * 30)
+        let scheduled = tasks.filter(\.hasScheduledTime)
+        while cursor + 30 <= endMinute {
+            let occupied = scheduled.contains { task in
+                task.startMinute < cursor + 30 && task.endMinute > cursor
+            }
+            if !occupied { return cursor }
+            cursor += 30
+        }
+        return nil
+    }
+
     public func requiredCycles(
         at date: Date,
         profile: DayProfile,

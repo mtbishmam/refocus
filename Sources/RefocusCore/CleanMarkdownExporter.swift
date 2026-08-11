@@ -41,6 +41,7 @@ public struct CleanMarkdownExporter: Sendable {
     public func renderDailyLog(
         date: Date,
         tasks: [PlanTask],
+        snapshots: PlanSnapshots? = nil,
         checkIns: [CheckIn],
         definitions: [DailyFieldDefinition],
         values: [DailyFieldValue],
@@ -50,6 +51,15 @@ public struct CleanMarkdownExporter: Sendable {
         if !tasks.isEmpty {
             lines.append(contentsOf: ["", "## Plan"])
             for task in tasks.sorted(by: { $0.startMinute < $1.startMinute }) { lines.append(contentsOf: render(task)) }
+        }
+        if let snapshots {
+            for segment in PlanningSegment.allCases {
+                guard let initial = snapshots.initial[segment] else { continue }
+                lines.append(contentsOf: ["", "## \(segment.title) - Initial plan"])
+                appendSnapshot(initial, to: &lines)
+                lines.append(contentsOf: ["", "## \(segment.title) - Modified plan"])
+                appendSnapshot(snapshots.modified[segment] ?? initial, to: &lines)
+            }
         }
         let valueMap = Dictionary(uniqueKeysWithValues: values.map { ($0.definitionID, $0.value) })
         let populated = definitions.compactMap { definition -> String? in
@@ -90,6 +100,19 @@ public struct CleanMarkdownExporter: Sendable {
             lines.append("  - [\(subtask.isComplete ? "x" : " ")] \(subtask.title)")
         }
         return lines
+    }
+
+    private func appendSnapshot(_ tasks: [PlanTask], to lines: inout [String]) {
+        let ordered = tasks.sorted {
+            $0.startMinute == $1.startMinute
+                ? $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
+                : $0.startMinute < $1.startMinute
+        }
+        if ordered.isEmpty {
+            lines.append("- No tasks")
+        } else {
+            for task in ordered { lines.append(contentsOf: render(task)) }
+        }
     }
 
     private func appendAnalysis(_ title: String, _ value: String, to lines: inout [String]) {
@@ -143,6 +166,7 @@ public final class ProjectionWriter: @unchecked Sendable {
     public func exportDailyLog(
         date: Date,
         tasks: [PlanTask],
+        snapshots: PlanSnapshots? = nil,
         checkIns: [CheckIn],
         definitions: [DailyFieldDefinition],
         values: [DailyFieldValue],
@@ -151,7 +175,10 @@ public final class ProjectionWriter: @unchecked Sendable {
         let filename = "\(MarkdownPlanCodec.isoDate(date, calendar: renderer.calendar)).md"
         let url = vaultURL.appendingPathComponent("log", isDirectory: true).appendingPathComponent(filename)
         try access.write(
-            renderer.renderDailyLog(date: date, tasks: tasks, checkIns: checkIns, definitions: definitions, values: values, analysis: analysis),
+            renderer.renderDailyLog(
+                date: date, tasks: tasks, snapshots: snapshots, checkIns: checkIns,
+                definitions: definitions, values: values, analysis: analysis
+            ),
             to: url
         )
     }

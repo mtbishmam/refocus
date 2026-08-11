@@ -533,6 +533,25 @@ public struct TodayPlan: Equatable, Sendable {
     }
 }
 
+/// The immutable first save and latest saved state for each initialized
+/// planning block. These snapshots are runtime data; projections render only
+/// their human-readable task fields.
+public struct PlanSnapshots: Equatable, Sendable {
+    public var profile: DayProfileKind
+    public var initial: [PlanningSegment: [PlanTask]]
+    public var modified: [PlanningSegment: [PlanTask]]
+
+    public init(
+        profile: DayProfileKind,
+        initial: [PlanningSegment: [PlanTask]],
+        modified: [PlanningSegment: [PlanTask]]
+    ) {
+        self.profile = profile
+        self.initial = initial
+        self.modified = modified
+    }
+}
+
 public struct AgendaTask: Identifiable, Equatable, Sendable {
     public var id: UUID { task.id }
     public var date: Date

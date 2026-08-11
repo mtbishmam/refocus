@@ -128,20 +128,29 @@ protection remains a named yellow warning that can be accepted for the date.
 ## Codex commands
 
 `sort_tasks` is an alias for the complete `plan_tasks` workflow. Read the live
-Ikigai and obtain current application context through the read-only MCP (prefer
+Ikigai and obtain current application context through MCP read tools (prefer
 `get_optimization_context`) or the clean projections. Resolve conflicts, show
 the complete proposed Today/Tomorrow/Agenda changes, and obtain explicit user
 approval before the user applies writes in ReFocus.
 
 `analyze_day`:
 
-1. Read the day's context plus all three Initial and Modified snapshots,
-   completion states, metrics, and screen-break answers through MCP or clean log.
+1. Read the live Ikigai, then call MCP `get_daily_dashboard` for the target date
+   and read the day's context plus all three Initial and Modified snapshots,
+   completion states, every Daily metric/habit result, current-month and total
+   Deltas, Stages, weight progress/ETA, and screen-break answers.
 2. Compare planned versus actual work and discuss causes that the evidence
    supports. Ask when the cause is unclear.
 3. Propose Summary, Progress, Mistakes, and Gains and obtain explicit approval.
 4. Store the approved analysis transactionally and update only the managed analysis block in `journal/mon-D.md`, preserving all user writing.
 5. Keep `log/YYYY-MM-DD.md` machine-generated; never put the end-of-day Summary, Progress, Mistakes, or Gains there.
+
+Daily/MCP compatibility rule: whenever any Daily field, habit, metric,
+calculation, or dashboard behavior changes, update the `analyze_day` contract,
+the MCP read/write tools, token-efficient context shape, documentation, and MCP
+contract tests in the same change. AI may edit raw Daily metrics and habit
+results through `update_daily_values` only when the user explicitly requests
+the write; Delta, Stage, weight progress, and ETA remain derived values.
 
 `clean_dump`:
 

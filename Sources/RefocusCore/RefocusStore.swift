@@ -134,6 +134,21 @@ public final class RefocusStore: @unchecked Sendable {
         return TodayPlan(date: date, profile: profile, tasks: tasks, initialSegments: segments)
     }
 
+    public func planSnapshots(on date: Date) throws -> PlanSnapshots? {
+        guard let plan = try loadPlan(date: date) else { return nil }
+        let initialByName = try snapshotMap(date: date, column: "initial_snapshots")
+        let modifiedByName = try snapshotMap(date: date, column: "modified_snapshots")
+        return PlanSnapshots(
+            profile: plan.profile,
+            initial: Dictionary(uniqueKeysWithValues: initialByName.compactMap { key, value in
+                PlanningSegment(rawValue: key).map { ($0, value) }
+            }),
+            modified: Dictionary(uniqueKeysWithValues: modifiedByName.compactMap { key, value in
+                PlanningSegment(rawValue: key).map { ($0, value) }
+            })
+        )
+    }
+
     @discardableResult
     public func ensurePredefinedRoutineBlocks(on date: Date) throws -> Bool {
         var changed = false

@@ -413,15 +413,20 @@ private struct TaskEditorRow: View {
               HStack(alignment: .bottom, spacing: 14) {
                 editorField("Start") {
                     if task.fixedRole != nil || task.isRoutineBlock {
-                        TimeEditorField(minute: $task.startMinute).disabled(task.fixedRole != nil)
+                        TimeEditorField(minute: $task.startMinute)
+                            .disabled(task.fixedRole != nil)
+                            .frame(width: 114, alignment: .leading)
                     } else {
-                        HStack {
+                        HStack(alignment: .center, spacing: 8) {
                             Toggle("Scheduled", isOn: Binding(
                                 get: { task.hasScheduledTime },
                                 set: { task.timeAssigned = $0 ? nil : false }
-                            )).toggleStyle(.checkbox)
+                            ))
+                            .labelsHidden()
+                            .toggleStyle(.checkbox)
                             if task.hasScheduledTime { TimeEditorField(minute: $task.startMinute) }
                         }
+                        .frame(width: 114, height: 24, alignment: .leading)
                     }
                 }
                 editorField("Priority") {

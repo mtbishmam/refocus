@@ -281,7 +281,9 @@ final class AppModel: ObservableObject {
                 self.planMessage = committed ? "Today is planned." : "Today plan is incomplete."
                 self.isArmed = committed
                 self.planIsDirty = self.tasks != self.baselineTasks
-                self.isEditingPlan = self.planIsDirty || (blockers.isEmpty ? self.userRequestedEditing : true)
+                // A valid predefined-only plan remains locked until this
+                // segment is explicitly saved and receives its Initial snapshot.
+                self.isEditingPlan = !committed || self.planIsDirty || self.userRequestedEditing
             case .failure:
                 self.hasPersistedToday = false
                 self.initialSegments = []
@@ -393,14 +395,18 @@ final class AppModel: ObservableObject {
     }
 
     func addTomorrowTask() {
-        let segment = PlanningSegment.allCases.first { candidate in
-            tomorrowTasks.filter(candidate.contains).reduce(0) { $0 + $1.cycles }
-                < tomorrowRequiredCycles(candidate, tasks: tomorrowTasks)
-        } ?? .evening
-        let nextStart = max(
-            segment.startMinute,
-            tomorrowTasks.filter { $0.fixedRole == nil && segment.contains($0) }.map(\.endMinute).max() ?? segment.startMinute
-        )
+        guard let placement = PlanningSegment.allCases.compactMap({ segment -> (PlanningSegment, Int)? in
+            let planned = tomorrowTasks.reduce(0) { $0 + $1.planningCycles(in: segment) }
+            guard planned < tomorrowRequiredCycles(segment, tasks: tomorrowTasks),
+                  let slot = validator.firstUnusedSlot(
+                      in: tomorrowTasks, startingAt: segment.startMinute, before: segment.endMinute
+                  ) else { return nil }
+            return (segment, slot)
+        }).first else {
+            errorMessage = "No unused required half-hour slot remains in Tomorrow."
+            return
+        }
+        let (_, nextStart) = placement
         let task = PlanTask(
             title: "New task", startMinute: nextStart, cycles: 1, mvp: "",
             coreTasks: [CoreTask(title: ""), CoreTask(title: ""), CoreTask(title: "")]
@@ -525,11 +531,13 @@ final class AppModel: ObservableObject {
         userRequestedEditing = true
         isEditingPlan = true
         let currentCycleStart = clock.minuteOfDay(for: snapshot.cycleStart)
-        let nextStart = max(
-            activeSegment.startMinute,
-            currentCycleStart,
-            tasks.filter { $0.fixedRole == nil && activeSegment.contains($0) }.map(\.endMinute).max() ?? currentCycleStart
-        )
+        let searchStart = max(activeSegment.startMinute, currentCycleStart)
+        guard let nextStart = validator.firstUnusedSlot(
+            in: tasks, startingAt: searchStart, before: activeSegment.endMinute
+        ) else {
+            errorMessage = "No unused half-hour slot remains in the \(activeSegment.title.lowercased())."
+            return
+        }
         let task = PlanTask(
             title: "New task", startMinute: nextStart, cycles: 1, mvp: "",
             coreTasks: [CoreTask(title: ""), CoreTask(title: ""), CoreTask(title: "")]
