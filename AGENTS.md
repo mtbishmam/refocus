@@ -171,9 +171,11 @@ Markdown promotion is involved.
 
 - Import every bullet in the legacy `ego/non-negotiables.md`, then manage fields
   in the extensible daily-field table.
-- The dashboard categories are `Non-Negotiables` (the five Level 1 rules) and
-  `Good Habits` (`Wake up @5:5` and `Solve 5 harder problems` only). Preserve
-  stored values for other imported habits even when they are hidden.
+- The dashboard categories are `Non-Negotiables` (the current rules from
+  `ego/non-negotiables.md`: no all-nighter, no unplanned food after 8, no
+  unplanned InstaS, and no unplanned entertainment) and `Good Habits` (`Wake up
+  @5:5` and `Solve 5 harder problems` only). Preserve stored values for removed
+  or other imported habits even when they are hidden.
 - Each date cycles blank → green Win → red Loss → blank. Checked always means
   success, including rules whose names begin with `No`.
 - Current Month Delta is Wins minus Losses in the current calendar month. Total

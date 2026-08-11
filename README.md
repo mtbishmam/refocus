@@ -79,8 +79,8 @@ hostname, D1 owner, or native pairing target. See
 
 Daily fields are extensible instead of hard-coded streak columns. The Daily
 dashboard preserves the rapid date-by-habit entry workflow and adds compact
-weight and habit analytics above it. Non-Negotiables contain the five Level 1
-rules; the visible Good Habits are only `Wake up @5:5` and
+weight and habit analytics above it. Non-Negotiables contain the four current
+rules from `ego/non-negotiables.md`; the visible Good Habits are only `Wake up @5:5` and
 `Solve 5 harder problems`. Historical values for retired/hidden fields remain
 stored.
 

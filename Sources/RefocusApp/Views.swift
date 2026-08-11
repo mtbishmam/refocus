@@ -679,35 +679,22 @@ private struct SavedTaskCard: View {
 
 private struct TimeEditorField: View {
     @Binding var minute: Int
-    @State private var text: String
-    @FocusState private var isFocused: Bool
-
-    init(minute: Binding<Int>) {
-        _minute = minute
-        _text = State(initialValue: MarkdownPlanCodec.time(minute.wrappedValue))
-    }
 
     var body: some View {
-        TextField("HH:mm", text: $text)
-            .textFieldStyle(.roundedBorder)
+        Picker("Start time", selection: $minute) {
+            ForEach(options, id: \.self) { value in
+                Text(MarkdownPlanCodec.time(value)).tag(value)
+            }
+        }
+            .labelsHidden()
+            .pickerStyle(.menu)
             .frame(width: 82)
-            .focused($isFocused)
-            .onSubmit(commit)
-            .onChange(of: isFocused) { _, focused in
-                if !focused { commit() }
-            }
-            .onChange(of: minute) { _, newValue in
-                if !isFocused { text = MarkdownPlanCodec.time(newValue) }
-            }
     }
 
-    private func commit() {
-        if let value = MarkdownPlanCodec.minute(text) {
-            minute = value
-            text = MarkdownPlanCodec.time(value)
-        } else {
-            text = MarkdownPlanCodec.time(minute)
-        }
+    private var options: [Int] {
+        var values = Array(stride(from: 0, through: 23 * 60 + 30, by: 30))
+        if !values.contains(minute) { values.append(minute); values.sort() }
+        return values
     }
 }
 
@@ -1878,6 +1865,22 @@ private struct TodayPlanPanel: View {
                         Text(model.executionCycleSummaryText).foregroundStyle(.secondary)
                     }
                 }
+                if isEditing && !model.validationIssues.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(model.validationIssues.enumerated()), id: \.offset) { _, issue in
+                            Label(issue.description, systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption)
+                                .foregroundStyle(model.isBlocking(issue) ? .red : .yellow)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        (model.validationIssues.contains(where: model.isBlocking) ? Color.red : Color.yellow).opacity(0.08),
+                        in: RoundedRectangle(cornerRadius: 10)
+                    )
+                }
                 if model.executionTasks.isEmpty {
                     Text("Today has not been planned.").font(.headline)
                     Text("Work is locked. Complete and save a valid \(model.requiredCycleMinimum)-cycle Today plan first.")
@@ -1896,15 +1899,6 @@ private struct TodayPlanPanel: View {
                         .onChange(of: task) { model.markPlanDirty() }
                         .padding(.horizontal, 14)
                         .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 12))
-                    }
-                    if !model.validationIssues.isEmpty {
-                        VStack(alignment: .leading, spacing: 6) {
-                            ForEach(Array(model.validationIssues.enumerated()), id: \.offset) { _, issue in
-                                Label(issue.description, systemImage: "exclamationmark.triangle.fill")
-                                    .font(.caption)
-                                    .foregroundStyle(model.isBlocking(issue) ? .red : .yellow)
-                            }
-                        }
                     }
                 } else {
                     ForEach(model.executionTasks) { task in

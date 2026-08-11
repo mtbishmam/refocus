@@ -837,6 +837,11 @@ do {
         try expect(!definitions.contains { $0.id == "solve-5-harder-problems" }, "Legacy duplicate habit remains visible")
         try expect(values.contains { $0.definitionID == "five-harder-problems" && $0.value == "win" }, "Legacy habit value was not merged into its canonical column")
         try expect(values.contains { $0.definitionID == "solve-5-harder-problems" && $0.value == "win" }, "Legacy habit value was destructively removed")
+        try expect(HabitCatalog.dashboardHabitIDs.contains("no-food-after-8"), "Current unplanned-food rule is hidden")
+        try expect(!HabitCatalog.dashboardHabitIDs.contains("no-food-with-media"), "Removed non-negotiable still appears on the dashboard")
+        let foodDefinition = definitions.first { $0.id == "no-food-after-8" }
+        try expect(foodDefinition?.name == "no unplanned food (after 8)", "Current non-negotiable name was not applied to its historical streak ID")
+        try expect(definitions.contains { $0.id == "no-food-with-media" }, "Removed habit history was destructively deleted instead of hidden")
         try expect(!definitions.contains { $0.id == "daily-summary" }, "Daily summary still appears as an app field")
         try expect(values.contains { $0.definitionID == "daily-summary" && $0.value == "Historical summary must survive" }, "Retiring Daily summary deleted its historical value")
     }

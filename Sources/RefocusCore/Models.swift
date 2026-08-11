@@ -124,7 +124,6 @@ public enum HabitCatalog {
         "no-unplanned-insta-s-11-5-return-home-wake-up",
         "no-unplanned-entertainment",
         "no-food-after-8",
-        "no-food-with-media",
         "wake-up-5-5",
         "five-harder-problems",
     ]
@@ -142,7 +141,7 @@ public enum HabitCatalog {
         HabitCatalogEntry(id: "no-all-nighter", name: "no all-nighter", group: .bad, level: "Level 1 · Non-Negotiables"),
         HabitCatalogEntry(id: "no-unplanned-insta-s-11-5-return-home-wake-up", name: "no unplanned insta s", group: .bad, level: "Level 1 · Non-Negotiables"),
         HabitCatalogEntry(id: "no-unplanned-entertainment", name: "no unplanned entertainment", group: .bad, level: "Level 1 · Non-Negotiables"),
-        HabitCatalogEntry(id: "no-food-after-8", name: "no food after 8", group: .bad, level: "Level 1 · Non-Negotiables"),
+        HabitCatalogEntry(id: "no-food-after-8", name: "no unplanned food (after 8)", group: .bad, level: "Level 1 · Non-Negotiables"),
         HabitCatalogEntry(id: "no-food-with-media", name: "no food with media", group: .bad, level: "Level 1 · Non-Negotiables"),
         HabitCatalogEntry(id: "wake-up-5-5", name: "Wake up @5:5", group: .good, level: "Level 1 · Good Habits"),
         HabitCatalogEntry(id: "five-harder-problems", name: "Solve 5 harder problems", group: .good, level: "Level 1 · Good Habits"),
