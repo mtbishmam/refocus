@@ -94,12 +94,13 @@ Daily summary is not an app field: the user or AI writes it in the Summary
 section of `journal/mon-D.md`.
 
 The MCP endpoint is `/api/mcp`. AI clients should call
-`get_optimization_context` first and `get_daily_dashboard` during day analysis;
-narrower day, agenda, and metric tools are available for follow-up detail.
-Explicit Daily edits use the write-scoped `update_daily_values` tool, while
-Delta, Stage, progress, and ETA remain derived. Read responses omit internal
-IDs and empty fields. A clean Markdown projection remains available as the
-zero-setup fallback.
+`get_optimization_context` first and `get_daily_dashboard` during day analysis.
+The Daily response includes every editable field, weight, calories, solved
+problems, every habit's current/maximum streak, wins/losses, Deltas, Stage,
+weight progress, and prompts for the analysis conversation. Explicit Daily
+edits use the write-scoped `update_daily_values` tool; it covers every field
+advertised by `writeAccess.editableFields`, while streaks, Deltas, Stage,
+progress, and ETA remain derived.
 
 ## Safety boundary
 
