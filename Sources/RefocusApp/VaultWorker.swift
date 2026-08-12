@@ -93,8 +93,14 @@ actor VaultWorker {
         try store.fieldValues(from: date, through: date)
     }
 
+    func loadDailyMetricHistory() throws -> [DailyFieldValue] {
+        try store.allFieldValues().filter {
+            ["weight", "calories", "solved-problems"].contains($0.definitionID) && !$0.value.isEmpty
+        }
+    }
+
     func loadDiff(on date: Date, now: Date) throws -> (PlanSnapshots?, FinalSnapshotAvailability) {
-        (try store.planSnapshots(on: date), try store.finalSnapshot(on: date, now: now))
+        (try store.planSnapshotsForDiff(on: date), try store.finalSnapshot(on: date, now: now))
     }
 
     func captureFinalSnapshot(on date: Date, at cutoff: Date) throws -> Bool {
@@ -177,15 +183,12 @@ actor VaultWorker {
         scheduleBackgroundWork(days: [])
     }
 
-    func appendQuickNote(_ line: String, submissionID: UUID) async throws {
-        guard try await cloud.acquireExportLease(deviceID: projectionDeviceID()) else {
-            throw NSError(
-                domain: "ReFocusCapture", code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "Another paired device currently owns the iCloud export lease. Try again shortly."]
-            )
-        }
+    func appendQuickNote(_ line: String, submissionID: UUID) throws {
+        // Commit to SQLite immediately so the global shortcut never waits on
+        // network or the cross-device export lease. Projection and cloud work
+        // remain lease-protected and flush in the background.
         try store.appendCapture(line, id: submissionID.uuidString.lowercased())
-        try projection.appendCapture(line)
+        pendingCaptureLines.append(line)
         scheduleBackgroundWork(days: [])
     }
 

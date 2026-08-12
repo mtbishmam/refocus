@@ -31,6 +31,7 @@ final class AppModel: ObservableObject {
     @Published var streakSummaries: [StreakSummary] = []
     @Published var dailyFieldDefinitions: [DailyFieldDefinition] = []
     @Published var dailyFieldValues: [String: String] = [:]
+    @Published var dailyMetricHistory: [DailyFieldValue] = []
     @Published var dailyDashboardAnalytics = DailyDashboardAnalytics()
     @Published var diffDate = WallClock.dhakaCalendar().startOfDay(for: Date())
     @Published var diffInitialSnapshots: PlanSnapshots?
@@ -478,7 +479,9 @@ final class AppModel: ObservableObject {
     }
 
     func removeTomorrowSubtask(taskID: UUID, subtaskID: UUID) {
-        guard let index = tomorrowTasks.firstIndex(where: { $0.id == taskID }), tomorrowTasks[index].coreTasks.count > 3 else { return }
+        guard let index = tomorrowTasks.firstIndex(where: { $0.id == taskID }) else { return }
+        let minimum = tomorrowTasks[index].quickCapture == true ? 0 : 3
+        guard tomorrowTasks[index].coreTasks.count > minimum else { return }
         tomorrowTasks[index].coreTasks.removeAll { $0.id == subtaskID }
         markTomorrowDirty()
     }
@@ -636,7 +639,9 @@ final class AppModel: ObservableObject {
     }
 
     func removeSubtask(taskID: UUID, subtaskID: UUID) {
-        guard let index = tasks.firstIndex(where: { $0.id == taskID }), tasks[index].coreTasks.count > 3 else { return }
+        guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { return }
+        let minimum = tasks[index].quickCapture == true ? 0 : 3
+        guard tasks[index].coreTasks.count > minimum else { return }
         tasks[index].coreTasks.removeAll { $0.id == subtaskID }
         markPlanDirty()
     }
@@ -1394,6 +1399,7 @@ final class AppModel: ObservableObject {
             let analytics = (try? await worker.loadDailyDashboardAnalytics(for: date, definitions: definitions))
                 ?? DailyDashboardAnalytics()
             self?.dailyDashboardAnalytics = analytics
+            self?.dailyMetricHistory = (try? await worker.loadDailyMetricHistory()) ?? []
         }
     }
 
@@ -1495,6 +1501,7 @@ final class AppModel: ObservableObject {
         if current.predefinedKind != baseline.predefinedKind { value.predefinedKind = current.predefinedKind }
         if current.predefinedKey != baseline.predefinedKey { value.predefinedKey = current.predefinedKey }
         if current.predefinedVersion != baseline.predefinedVersion { value.predefinedVersion = current.predefinedVersion }
+        if current.quickCapture != baseline.quickCapture { value.quickCapture = current.quickCapture }
         if current.timeAssigned != baseline.timeAssigned { value.timeAssigned = current.timeAssigned }
         return value
     }

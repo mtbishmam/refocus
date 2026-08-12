@@ -186,7 +186,9 @@ private struct DiffSegmentView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack { Text(segment.title).font(.title3.bold()); Spacer(); Text(totals).font(.caption).foregroundStyle(.secondary) }
             HStack {
-                Text(initialCapturedAt.map { "Initial · \($0.formatted(date: .omitted, time: .shortened))" } ?? "Initial Plan").frame(maxWidth: .infinity)
+                Text(initialCapturedAt.map { "Initial · \($0.formatted(date: .omitted, time: .shortened))" }
+                    ?? (initial == nil ? "Initial Plan" : "Default Initial · not saved"))
+                    .frame(maxWidth: .infinity)
                 Text("Final Plan").frame(maxWidth: .infinity)
                 Color.clear.frame(width: 86)
             }
@@ -601,8 +603,8 @@ private struct TaskEditorRow: View {
                 }
               }
 
-              editorField("MVP · completion definition") {
-                TextField("Describe exactly what must be true for this task to count as complete", text: $task.mvp, axis: .vertical)
+              editorField(task.quickCapture == true ? "Optional MVP · MCP quick task" : "MVP · completion definition") {
+                TextField(task.quickCapture == true ? "Optional" : "Describe exactly what must be true for this task to count as complete", text: $task.mvp, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(2...4)
               }
@@ -610,7 +612,7 @@ private struct TaskEditorRow: View {
               if !task.isRoutineBlock {
               VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                    Text("SUBTASKS · at least three")
+                    Text(task.quickCapture == true ? "SUBTASKS · optional" : "SUBTASKS · at least three")
                         .font(.caption.bold())
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -630,7 +632,7 @@ private struct TaskEditorRow: View {
                                 removeSubtask(task.coreTasks[index].id)
                             } label: { Image(systemName: "minus.circle") }
                             .buttonStyle(.borderless)
-                            .disabled(task.coreTasks.count <= 3)
+                            .disabled(task.coreTasks.count <= (task.quickCapture == true ? 0 : 3))
                           }
                         }
                     }
@@ -1419,6 +1421,8 @@ struct StreaksView: View {
                 }
                 .dashboardSurface()
 
+                DailyMetricHistoryTable(values: model.dailyMetricHistory)
+
                 SectionTitle(
                     title: "Detailed Tracking",
                     subtitle: "Checked means Win. A marked × means Loss; blank days are neutral."
@@ -1429,6 +1433,67 @@ struct StreaksView: View {
             .padding(.horizontal, 22)
             .padding(.vertical, 14)
         }
+    }
+}
+
+private struct DailyMetricHistoryTable: View {
+    let values: [DailyFieldValue]
+
+    private struct Row: Identifiable {
+        let date: String
+        let weight: String
+        let calories: String
+        let solved: String
+        var id: String { date }
+    }
+
+    private var rows: [Row] {
+        let grouped = Dictionary(grouping: values, by: \.date)
+        return grouped.keys.sorted(by: >).prefix(90).map { date in
+            let day = grouped[date, default: []]
+            return Row(
+                date: date,
+                weight: day.first(where: { $0.definitionID == "weight" })?.value ?? "—",
+                calories: day.first(where: { $0.definitionID == "calories" })?.value ?? "—",
+                solved: day.first(where: { $0.definitionID == "solved-problems" })?.value ?? "—"
+            )
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionTitle(
+                title: "Daily History",
+                subtitle: "Previous weight, calorie, and solved-problem entries."
+            )
+            if rows.isEmpty {
+                Text("No metric history yet.").font(.caption).foregroundStyle(.secondary)
+            } else {
+                Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 7) {
+                    GridRow {
+                        header("Date")
+                        header("Weight")
+                        header("Calories")
+                        header("Solved")
+                    }
+                    Divider().gridCellColumns(4)
+                    ForEach(rows) { row in
+                        GridRow {
+                            Text(row.date).monospacedDigit()
+                            Text(row.weight)
+                            Text(row.calories)
+                            Text(row.solved)
+                        }
+                        .font(.caption)
+                    }
+                }
+            }
+        }
+        .dashboardSurface()
+    }
+
+    private func header(_ title: String) -> some View {
+        Text(title).font(.caption2.bold()).foregroundStyle(.secondary)
     }
 }
 

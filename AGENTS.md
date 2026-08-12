@@ -42,6 +42,8 @@
 - `log/YYYY-MM-DD.md` is a one-way clean machine activity projection without internal IDs or end-of-day analysis.
 - `journal/mon-D.md` is the human-authored daily journal. Preserve unrelated writing exactly; approved `analyze_day` output belongs in its managed analysis block.
 - Daily summary is written by the user or AI in the Summary section of `journal/mon-D.md`; it must not be collected as a Daily app field.
+- Daily exposes preserved dated history for weight, calories, and solved
+  problems in addition to habit history; current values remain immediate-save.
 - `agenda.md`, `task-templates.md`, `dump.md`, legacy `journal/mon-D.md`, and
   `ego/non-negotiables.md` are preserved migration sources, not runtime stores.
 - Cloud-paired projection writes require the D1 export lease. A denied or failed
@@ -79,6 +81,12 @@ The day is independently planned and snapshotted in three super-blocks:
 - During a screen break, the user may switch Today into the same structured
   task editor, save a modification, and thereby refresh the active Modified
   snapshot without rewriting its Initial snapshot.
+- Morning and Afternoon still require an explicit save even when their
+  predefined defaults are accepted unchanged. Diff may show an unsaved block's
+  predefined routine as a labelled default Initial baseline, but that fallback
+  has no capture timestamp, does not initialize the planning gate, and does not
+  unlock work. If the user edits before the first save, that edited plan becomes
+  the immutable Initial snapshot.
 
 ## Task rules
 
@@ -88,6 +96,13 @@ The day is independently planned and snapshotted in three super-blocks:
   definition and at least three named subtasks; more are allowed.
 - Scheduled Agenda tasks may omit MVP and subtasks. They must satisfy the full
   task rules when promoted into Tomorrow or Today.
+- Explicit write-scoped MCP `create_task` calls create quick tasks that may
+  omit MVP and subtasks even in Today/Tomorrow. They may be unscheduled dated
+  Agenda tasks, which appear automatically in that date's Today view, or
+  scheduled tasks. Scheduled tasks retain all timing,
+  duration, collision, and cutoff rules. An MCP quick task durably replaces
+  overlapping predefined routine blocks for that date, but never silently
+  deletes fixed evening tasks or existing user tasks.
 - Ikigai-derived University, Rest, Morning Routine, and Return Home blocks are
   predefined synchronized routine blocks. They are deliberately editable and
   removable for a date; a deletion is durable and must not silently reappear.

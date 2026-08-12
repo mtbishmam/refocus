@@ -154,6 +154,28 @@ public final class RefocusStore: @unchecked Sendable {
         )
     }
 
+    /// Diff-only baseline. An unsaved Morning or Afternoon block compares
+    /// against that date's deterministic predefined routine, but remains
+    /// uninitialized for the planning gate. A nil capture timestamp marks the
+    /// baseline as a default fallback rather than a successful user save.
+    public func planSnapshotsForDiff(on date: Date) throws -> PlanSnapshots {
+        let stored = try planSnapshots(on: date)
+        let profile = stored?.profile ?? RoutineProfileResolver(calendar: calendar).profile(for: date).kind
+        var initial = stored?.initial ?? [:]
+        let defaults = PredefinedRoutineBlocks.daily(for: date, calendar: calendar)
+        for segment in [PlanningSegment.morning, .afternoon] where initial[segment] == nil {
+            initial[segment] = defaults.filter {
+                segment.contains($0) || $0.planningCycles(in: segment) > 0
+            }
+        }
+        return PlanSnapshots(
+            profile: profile,
+            initial: initial,
+            modified: stored?.modified ?? [:],
+            initialCapturedAt: stored?.initialCapturedAt ?? [:]
+        )
+    }
+
     @discardableResult
     public func captureFinalSnapshot(on date: Date, at cutoff: Date) throws -> Bool {
         guard calendar.isDate(date, inSameDayAs: cutoff),
@@ -658,6 +680,7 @@ public final class RefocusStore: @unchecked Sendable {
                         predefinedKind: fields["predefinedKind"]?.stringValue.flatMap(PredefinedBlockKind.init(rawValue:)),
                         predefinedKey: fields["predefinedKey"]?.stringValue,
                         predefinedVersion: fields["predefinedVersion"]?.intValue,
+                        quickCapture: fields["quickCapture"]?.boolValue ?? false,
                         timeAssigned: fields["hasScheduledTime"]?.boolValue ?? (fields["time"]?.stringValue != nil)
                     )
                     try upsertTask(task, date: scheduled, recordOutbox: false)
@@ -1227,6 +1250,7 @@ public final class RefocusStore: @unchecked Sendable {
             "predefinedKind": task.predefinedKind?.rawValue ?? NSNull(),
             "predefinedKey": task.predefinedKey ?? NSNull(),
             "predefinedVersion": task.predefinedVersion ?? NSNull(),
+            "quickCapture": task.quickCapture == true,
         ]
         return fields
     }

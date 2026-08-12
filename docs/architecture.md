@@ -19,7 +19,7 @@ under two seconds for online convergence under ordinary network conditions.
 | Universal PWA | iPhone/Ubuntu/browser editing, IndexedDB cache and outbox |
 | Cloudflare D1 | Durable cross-device entities, field clocks, mutations, leases |
 | Markdown projector | One-way `tasks.md` and clean daily logs for Obsidian |
-| MCP | Compact optimization context plus explicit, write-scoped Daily edits |
+| MCP | Compact optimization context plus explicit, write-scoped Daily edits and quick scheduled-task creation |
 
 The canonical Site is private at the Sites dispatch layer. Native sync and the
 local Codex MCP proxy therefore authenticate twice: `OAI-Sites-Authorization`

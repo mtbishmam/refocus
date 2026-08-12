@@ -159,7 +159,11 @@ public final class ProjectionWriter: @unchecked Sendable {
         guard !clean.isEmpty else { return }
         let url = vaultURL.appendingPathComponent("dump.md")
         let existing = FileManager.default.fileExists(atPath: url.path) ? try access.read(url) : ""
-        let separator = existing.isEmpty || existing.hasSuffix("\n") ? "" : "\n"
+        let separator: String
+        if existing.isEmpty { separator = "" }
+        else if existing.hasSuffix("\n\n") { separator = "" }
+        else if existing.hasSuffix("\n") { separator = "\n" }
+        else { separator = "\n\n" }
         try access.write(existing + separator + clean + "\n", to: url)
     }
 

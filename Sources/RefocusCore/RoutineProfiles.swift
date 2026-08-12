@@ -458,7 +458,7 @@ public struct PlanValidator: Sendable {
                 }
             }
 
-            if requireTaskDetails && !task.isRoutineBlock {
+            if requireTaskDetails && !task.isRoutineBlock && task.quickCapture != true {
                 if task.mvp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     issues.append(.missingMVP(task: displayTitle))
                 }

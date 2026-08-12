@@ -417,6 +417,47 @@ do {
         try expect(loaded.count == 1 && loaded[0].title == template.title, "Saved template could not be loaded")
         try expect(loaded[0].cycles == 10 && loaded[0].kind == .contest, "Template fields changed")
     }
+    try check("MCP quick tasks may omit MVP and subtasks without relaxing normal tasks") {
+        let profile = RoutineProfileResolver(calendar: calendar).profile(for: try date("2026-08-12", format: "yyyy-MM-dd"))
+        let quick = PlanTask(title: "Prompt-created task", startMinute: 1080, cycles: 1, quickCapture: true)
+        let normal = PlanTask(title: "Normal task", startMinute: 1110, cycles: 1)
+        let quickIssues = PlanValidator().validate(
+            tasks: [quick], profile: profile, minimumCycles: 0,
+            requireFixedTasks: false, requireTaskDetails: true
+        )
+        let normalIssues = PlanValidator().validate(
+            tasks: [normal], profile: profile, minimumCycles: 0,
+            requireFixedTasks: false, requireTaskDetails: true
+        )
+        try expect(!quickIssues.contains(.missingMVP(task: quick.title)), "Quick task still required an MVP")
+        try expect(!quickIssues.contains(.tooFewSubtasks(task: quick.title)), "Quick task still required three subtasks")
+        try expect(normalIssues.contains(.missingMVP(task: normal.title)), "Normal task MVP rule was accidentally relaxed")
+        try expect(normalIssues.contains(.tooFewSubtasks(task: normal.title)), "Normal task subtask rule was accidentally relaxed")
+    }
+    try check("Diff defaults do not initialize a block; explicit save captures the displayed plan") {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-default-diff-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let store = try RefocusStore(databaseURL: temporary.appendingPathComponent("refocus.sqlite3"), calendar: calendar)
+        try store.importLegacy(today: nil, tomorrow: nil, agenda: [], templates: [], streaks: [])
+        let day = try date("2026-08-12", format: "yyyy-MM-dd")
+        _ = try store.ensurePredefinedRoutineBlocks(on: day)
+        let fallback = try store.planSnapshotsForDiff(on: day)
+        try expect(fallback.initial[.morning]?.isEmpty == false, "Morning default Diff baseline missing")
+        try expect(fallback.initial[.afternoon]?.isEmpty == false, "Afternoon default Diff baseline missing")
+        try expect(fallback.initialCapturedAt[.morning] == nil && fallback.initialCapturedAt[.afternoon] == nil, "Default baseline pretended to be saved")
+        let unsavedPlan = try require(store.loadPlan(date: day), "Day plan missing")
+        try expect(unsavedPlan.initialSegments.isEmpty, "Diff fallback unlocked planning")
+
+        var displayed = try store.tasks(on: day)
+        let morningIndex = try require(displayed.firstIndex(where: { $0.predefinedKind == .mashup }), "Default morning task missing")
+        displayed[morningIndex].title = "Edited before first save"
+        try store.savePlan(date: day, tasks: displayed, profile: .standard, segment: .morning)
+        let stored = try require(store.planSnapshots(on: day), "Saved Initial missing")
+        try expect(stored.initial[.morning]?.contains(where: { $0.title == "Edited before first save" }) == true, "First save did not capture the edited displayed plan")
+        try expect(stored.initialCapturedAt[.morning] != nil, "Explicit save timestamp missing")
+        try expect(stored.initial[.afternoon] == nil, "Saving Morning incorrectly initialized Afternoon")
+    }
     try check("Later saves preserve Initial and refresh Modified snapshots") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-snapshot-check-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
@@ -574,7 +615,7 @@ do {
         let afterDelete = try repository.loadAgenda(asOf: newDate)
         try expect(afterDelete.isEmpty, "Deleted migrated task was resurrected")
     }
-    try check("Quick notes append one line at the end of dump.md") {
+    try check("Quick notes append blank-line-separated entries to dump.md") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-quick-note-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temporary) }
@@ -583,7 +624,7 @@ do {
         try repository.appendQuickNote("first quick note")
         try repository.appendQuickNote("second quick note")
         let dump = try String(contentsOf: repository.dumpURL, encoding: .utf8)
-        try expect(dump == "existing capture\nfirst quick note\nsecond quick note\n", "Quick notes were not appended cleanly")
+        try expect(dump == "existing capture\n\nfirst quick note\n\nsecond quick note\n", "Quick notes were not separated by blank lines")
     }
     try check("Quick capture retries are idempotent without suppressing intentional repeats") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-capture-retry-\(UUID().uuidString)")
@@ -602,7 +643,7 @@ do {
         try writer.appendCapture("same text")
         try writer.appendCapture("same text")
         let dump = try String(contentsOf: temporary.appendingPathComponent("dump.md"), encoding: .utf8)
-        try expect(dump == "same text\nsame text\n", "Two intentional identical captures were collapsed")
+        try expect(dump == "same text\n\nsame text\n", "Two intentional identical captures were collapsed")
     }
     try check("Archived daily logs do not repopulate Agenda") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-agenda-archive-\(UUID().uuidString)")

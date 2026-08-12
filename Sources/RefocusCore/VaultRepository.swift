@@ -217,7 +217,13 @@ public final class VaultRepository: @unchecked Sendable {
     public func appendQuickNote(_ line: String) throws {
         let clean = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
-        try fileAccess.appendLine(clean, to: dumpURL)
+        let existing = FileManager.default.fileExists(atPath: dumpURL.path) ? try fileAccess.read(dumpURL) : ""
+        let separator: String
+        if existing.isEmpty { separator = "" }
+        else if existing.hasSuffix("\n\n") { separator = "" }
+        else if existing.hasSuffix("\n") { separator = "\n" }
+        else { separator = "\n\n" }
+        try fileAccess.write(existing + separator + clean + "\n", to: dumpURL)
     }
 
     public func loadTemplates() throws -> [PlanTask] {

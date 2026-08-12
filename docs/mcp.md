@@ -51,6 +51,33 @@ Tools:
   `win`, or `fail`; current/max streaks, wins/losses, Delta, Stage, weight
   progress, and ETA are derived and recalculate automatically. The server
   advertises the complete editable field list in `writeAccess.editableFields`.
+- `create_task` — create a dated Agenda task directly from an explicit prompt.
+  Supply an ISO date and concrete title. A half-hour start plus either an end
+  or cycle count is optional: without a start, the task remains unscheduled in
+  Agenda and appears automatically in that date's Today view. MCP quick tasks
+  do not require an MVP or three subtasks. Any
+  overlapping predefined routine blocks are durably replaced for that date;
+  fixed evening tasks and existing user tasks are never silently deleted.
+
+Scheduled task creation still enforces half-hour scheduling, normal/contest
+duration limits, and the 21:30 cutoff. It requires a write-scoped token and an explicit
+user instruction. The new task synchronizes through D1 to native and web.
+
+Diff keeps the planning gate explicit. The first successful Save Plan in each
+block captures that exact displayed plan as immutable Initial. Morning and
+Afternoon therefore each need their own save even when the defaults are left
+unchanged; editing first and then saving captures the edited plan. If either
+block was never saved, Diff uses that date's predefined routine as a clearly
+labelled `default-not-saved` baseline. That fallback does not initialize the
+block or unlock work.
+
+`analyze_day` must call `get_daily_dashboard` before asking cause questions. Its
+preflight always shows or asks for Weight, Calories, and Solved problems, then
+reviews every returned habit—including hidden imported habits—with its result,
+streaks, Deltas, Stage, Wins, and Losses. If a task's MCP inventory does not
+expose the full dashboard or write tool, the local Keychain-backed proxy above
+is the supported fallback; do not treat a compact `get_day` response as proof
+that Daily fields are empty.
 
 Read tools strip storage IDs, field clocks, and tombstones. Daily writes use the
 same synchronized field-value entities as native and web edits, so they flow

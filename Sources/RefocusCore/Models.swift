@@ -440,6 +440,10 @@ public struct PlanTask: Identifiable, Codable, Equatable, Sendable {
     public var predefinedKind: PredefinedBlockKind?
     public var predefinedKey: String?
     public var predefinedVersion: Int?
+    /// Tasks created through an explicitly authorized MCP write can be
+    /// captured quickly without an MVP or three subtasks. All scheduling,
+    /// collision, duration, and cutoff rules still apply.
+    public var quickCapture: Bool?
     /// Agenda tasks can be captured for a date before a start time is chosen.
     /// A missing value keeps older records compatible because they always had a time.
     public var timeAssigned: Bool?
@@ -463,6 +467,7 @@ public struct PlanTask: Identifiable, Codable, Equatable, Sendable {
         predefinedKind: PredefinedBlockKind? = nil,
         predefinedKey: String? = nil,
         predefinedVersion: Int? = nil,
+        quickCapture: Bool = false,
         timeAssigned: Bool = true
     ) {
         self.id = id
@@ -483,6 +488,7 @@ public struct PlanTask: Identifiable, Codable, Equatable, Sendable {
         self.predefinedKind = predefinedKind
         self.predefinedKey = predefinedKey
         self.predefinedVersion = predefinedVersion
+        self.quickCapture = quickCapture ? true : nil
         self.timeAssigned = timeAssigned ? nil : false
     }
 

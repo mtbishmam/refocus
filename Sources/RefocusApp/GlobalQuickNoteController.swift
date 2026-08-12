@@ -80,22 +80,9 @@ final class GlobalQuickNoteController {
     private func show() {
         let panel = panel ?? makePanel()
         self.panel = panel
-        panel.contentView = NSHostingView(
-            rootView: GlobalQuickNoteView { [weak panel] in
-                panel?.orderOut(nil)
-            }
-            .environmentObject(model)
-            .preferredColorScheme(.dark)
-        )
         position(panel)
         panel.orderFrontRegardless()
         panel.makeKey()
-        // A non-activating panel accepts typing without bringing ReFocus or its
-        // dashboard forward. Focus once more after the hot-key event finishes.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak panel] in
-            guard let panel, panel.isVisible else { return }
-            panel.makeKey()
-        }
     }
 
     private func makePanel() -> QuickNotePanel {
@@ -113,6 +100,13 @@ final class GlobalQuickNoteController {
         panel.hidesOnDeactivate = false
         panel.becomesKeyOnlyIfNeeded = true
         panel.isReleasedWhenClosed = false
+        panel.contentView = NSHostingView(
+            rootView: GlobalQuickNoteView { [weak panel] in
+                panel?.orderOut(nil)
+            }
+            .environmentObject(model)
+            .preferredColorScheme(.dark)
+        )
         return panel
     }
 
@@ -150,7 +144,8 @@ private struct GlobalQuickNoteView: View {
                     .onSubmit {
                         let hasText = !model.quickNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         guard hasText else { return }
-                        model.submitQuickNote(onSaved: dismiss)
+                        dismiss()
+                        model.submitQuickNote()
                     }
                     .disabled(model.isSavingQuickNote)
                 Text(model.isSavingQuickNote ? "Saving…" : "↩ Save")
