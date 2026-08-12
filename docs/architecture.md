@@ -21,6 +21,14 @@ under two seconds for online convergence under ordinary network conditions.
 | Markdown projector | One-way `tasks.md` and clean daily logs for Obsidian |
 | MCP | Compact optimization context plus explicit, write-scoped Daily edits |
 
+The canonical Site is private at the Sites dispatch layer. Native sync and the
+local Codex MCP proxy therefore authenticate twice: `OAI-Sites-Authorization`
+crosses the Site gate, then the scoped ReFocus bearer token selects and
+authorizes the D1 owner. A browser session is never treated as an MCP
+connection. Hosted clients that cannot send both headers require a separate
+public MCP ingress (or a public Site with all data APIs still protected by the
+ReFocus bearer-token layer).
+
 SQLite tables hold tasks, day plans and immutable/modified snapshots, check-ins,
 daily-field definitions and values, analyses, captures, tombstones, migration
 history, and the sync outbox. The main thread only updates observable state after

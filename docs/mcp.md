@@ -6,9 +6,29 @@ Production endpoint:
 https://refocus.mtbishmam.chatgpt.site/api/mcp
 ```
 
-Create an AI read/write token in the web app's **Connections** section and send it as
-`Authorization: Bearer <token>`. The token is shown once; D1 stores only its
-SHA-256 hash.
+ReFocus is deployed as a private ChatGPT Site, so direct clients must pass two
+independent credentials: the Sites dispatch bypass in
+`OAI-Sites-Authorization` and a ReFocus token in `Authorization`. The native Mac
+app stores both in Keychain after pairing.
+
+Local Codex clients should use the checked-in stdio proxy. It reads the paired
+credentials from Keychain and never prints or stores them in Codex config:
+
+```sh
+codex mcp add refocus -- \
+  /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node \
+  /Users/mtbishmam/code/refocus/web/scripts/refocus-mcp-proxy.mjs
+```
+
+Restart or open a new Codex task after adding the server; MCP inventories are
+fixed when a task starts. A browser login cookie is not a substitute for MCP
+configuration, and an `rf_...` token by itself cannot cross a private Site's
+dispatch gate.
+
+For a hosted ChatGPT connector that cannot set both headers, publish a dedicated
+public MCP ingress or change the canonical Site to public access while retaining
+the ReFocus token checks on every data API. Never expose D1 data without the
+application-level bearer-token check.
 
 Tools:
 
