@@ -628,6 +628,94 @@ do {
         let agenda = try repository.loadAgenda()
         try expect(agenda.isEmpty, "Archived task leaked back into Agenda")
     }
+    try check("Initial snapshots are immutable and Final is captured only at 20:00 Dhaka") {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-final-snapshot-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let store = try RefocusStore(databaseURL: temporary.appendingPathComponent("refocus.sqlite3"), calendar: calendar)
+        try store.importLegacy(today: nil, tomorrow: nil, agenda: [], templates: [], streaks: [])
+        let day = try date("2026-08-11", format: "yyyy-MM-dd")
+        let morning = PlanTask(title: "Morning Routine", startMinute: 330, cycles: 1, mvp: "Start", routineBlock: true, predefinedKind: .morningRoutine)
+        let rest = PlanTask(title: "Rest", startMinute: 660, cycles: 2, mvp: "Recover", routineBlock: true, predefinedKind: .rest)
+        let university = PlanTask(title: "CSE111 Class", startMinute: 750, cycles: 3, mvp: "Attend", routineBlock: true, predefinedKind: .university)
+        let user = PlanTask(title: "CP Plan", startMinute: 1080, cycles: 2, mvp: "Plan", coreTasks: [CoreTask(title: "Routes"), CoreTask(title: "Targets"), CoreTask(title: "Review")])
+        let fixed = PlanTask(title: "ReVision", startMinute: 1260, cycles: 1, mvp: "Review", fixedRole: .revision)
+        try store.saveCompletePlan(date: day, tasks: [morning, rest, university, user, fixed], profile: .universityLate)
+        let first = try require(store.planSnapshots(on: day), "Initial snapshots missing")
+        try expect(Set(first.initial.keys) == Set(PlanningSegment.allCases), "All three planning blocks were not initialized")
+        try expect(first.initialCapturedAt.count == 3, "Initial snapshot timestamps were not persisted")
+        var changedUser = user
+        changedUser.title = "Changed later"
+        try store.saveCompletePlan(date: day, tasks: [morning, rest, university, changedUser, fixed], profile: .universityLate)
+        let second = try require(store.planSnapshots(on: day), "Snapshots disappeared")
+        try expect(second.initial[.evening]?.contains(where: { $0.title == "CP Plan" }) == true, "Initial snapshot was rewritten")
+        try expect(second.initialCapturedAt == first.initialCapturedAt, "Initial snapshot timestamp was rewritten")
+        let beforeCutoff = try date("2026-08-11 19:59:59")
+        let pending = try store.finalSnapshot(on: day, now: beforeCutoff)
+        let earlyCapture = try store.captureFinalSnapshot(on: day, at: beforeCutoff)
+        let cutoff = try date("2026-08-11 20:00:30")
+        let didCapture = try store.captureFinalSnapshot(on: day, at: cutoff)
+        try expect(pending == .pending, "Final was not pending before cutoff")
+        try expect(!earlyCapture, "Final captured before 20:00")
+        try expect(didCapture, "Final did not capture during exact 20:00 minute")
+        let captured: FinalPlanSnapshot
+        if case .available(let value) = try store.finalSnapshot(on: day, now: try date("2026-08-11 20:00:31")) { captured = value }
+        else { throw CheckFailure.failed("Captured Final was unavailable") }
+        try expect(captured.tasks.contains(where: { $0.task.predefinedKind == .rest }), "Final omitted Rest")
+        try expect(captured.tasks.contains(where: { $0.task.predefinedKind == .university }), "Final omitted University")
+        try expect(captured.tasks.contains(where: { $0.task.predefinedKind == .morningRoutine }), "Final omitted routine")
+        try expect(captured.tasks.contains(where: { $0.task.fixedRole == .revision }), "Final omitted fixed evening task")
+        var postCutoff = changedUser
+        postCutoff.title = "Post-cutoff mutation"
+        try store.saveAgendaEdits(date: day, tasks: [morning, rest, university, postCutoff, fixed], profile: .universityLate)
+        let capturedTwice = try store.captureFinalSnapshot(on: day, at: try date("2026-08-11 20:00:50"))
+        try expect(!capturedTwice, "Final captured twice")
+        if case .available(let value) = try store.finalSnapshot(on: day, now: try date("2026-08-11 21:00:00")) {
+            try expect(value == captured, "Post-20:00 state leaked into immutable Final")
+        } else { throw CheckFailure.failed("Final disappeared") }
+        let missedDay = try date("2026-08-10", format: "yyyy-MM-dd")
+        let missed = try store.finalSnapshot(on: missedDay, now: try date("2026-08-11 20:01:00"))
+        try expect(missed == .unavailable, "Missed Final was fabricated")
+    }
+    try check("Diff aligns by stable task ID and classifies task changes") {
+        let moved = PlanTask(title: "Moved", startMinute: 360, cycles: 1, mvp: "Same", coreTasks: [CoreTask(title: "One")])
+        var movedFinal = moved
+        movedFinal.startMinute = 420
+        movedFinal.isComplete = true
+        movedFinal.coreTasks[0].isComplete = true
+        let removed = PlanTask(title: "Removed", startMinute: 450, cycles: 1, mvp: "Old")
+        let metadata = PlanTask(title: "Metadata", startMinute: 480, cycles: 1, mvp: "Old MVP")
+        var metadataFinal = metadata
+        metadataFinal.mvp = "New MVP"
+        let added = PlanTask(title: "Added", startMinute: 510, cycles: 1, mvp: "New")
+        let rows = PlanDiffEngine.rows(initial: [moved, removed, metadata], final: [
+            FinalTaskSnapshot(task: movedFinal, scheduledDate: "2026-08-11"),
+            FinalTaskSnapshot(task: removed, scheduledDate: "2026-08-11", deleted: true),
+            FinalTaskSnapshot(task: metadataFinal, scheduledDate: "2026-08-11"),
+            FinalTaskSnapshot(task: added, scheduledDate: "2026-08-11"),
+        ], date: "2026-08-11")
+        let movedRow = try require(rows.first(where: { $0.id == moved.id }), "Moved row missing")
+        try expect(movedRow.initial?.id == movedRow.final?.id, "Moved task did not align by ID")
+        try expect(movedRow.changes.contains(.moved) && movedRow.changes.contains(.completion) && movedRow.changes.contains(.subtaskCompletion), "Moved/completion/subtask changes were missed")
+        try expect(rows.first(where: { $0.id == removed.id })?.changes.contains(.removed) == true, "Removed task was missed")
+        try expect(rows.first(where: { $0.id == metadata.id })?.changes.contains(.metadata) == true, "Metadata change was missed")
+        try expect(rows.first(where: { $0.id == added.id })?.changes.contains(.added) == true, "Added task was missed")
+    }
+    try check("Diff tolerates one stable task appearing in multiple planning blocks") {
+        let mashup = PlanTask(
+            title: "5H Mashup", startMinute: 540, cycles: 10, kind: .contest,
+            priority: "High", difficulty: "Hard", mvp: "Compete",
+            coreTasks: [CoreTask(title: "Start"), CoreTask(title: "Solve"), CoreTask(title: "Review")],
+            routineBlock: true, predefinedKind: .mashup
+        )
+        let rows = PlanDiffEngine.rows(
+            initial: [mashup, mashup],
+            final: [FinalTaskSnapshot(task: mashup, scheduledDate: "2026-08-11")],
+            date: "2026-08-11"
+        )
+        try expect(rows.count == 1, "Cross-block task produced duplicate Diff rows")
+        try expect(rows[0].id == mashup.id && rows[0].changes == [.unchanged], "Cross-block task was not compared safely")
+    }
     try check("SQLite reschedule is immediate, atomic, and durable") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-store-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)

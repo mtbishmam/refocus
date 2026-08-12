@@ -47,5 +47,10 @@ the iCloud write. Without cloud pairing, the only local Mac is allowed to export
 tasks. Completed historical tasks stay in their daily logs instead of cluttering
 Agenda. Each `log/YYYY-MM-DD.md` includes a clean, ID-free Initial and latest
 Modified plan for every initialized planning block, so `analyze_day` can compare
-intent with later rescheduling and edits. Projection files never feed back into
+intent with later rescheduling and edits. SQLite also stores immutable first-save
+timestamps and a separate immutable Final snapshot captured during the exact
+20:00 Asia/Dhaka minute. The Final includes task dates and tombstones so moved,
+removed, completed, and edited tasks remain comparable by UUID; it is synced as
+the write-once `day_plan_final` D1 entity. A missed cutoff is reported as
+unavailable and is never reconstructed. Projection files never feed back into
 live state.

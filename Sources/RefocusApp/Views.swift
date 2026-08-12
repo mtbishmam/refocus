@@ -63,11 +63,12 @@ struct DashboardView: View {
                 Text("Today").tag(DashboardTab.today)
                 Text("Tomorrow").tag(DashboardTab.tomorrow)
                 Text("Daily").tag(DashboardTab.streaks)
+                Text("Diff").tag(DashboardTab.diff)
                 Text("Settings").tag(DashboardTab.settings)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 480)
+            .frame(width: 590)
             .padding(.top, 16)
             .padding(.bottom, 12)
 
@@ -77,6 +78,7 @@ struct DashboardView: View {
                 case .today: PlanEditorView()
                 case .tomorrow: TomorrowPlanView()
                 case .streaks: StreaksView()
+                case .diff: DiffView()
                 case .settings: SettingsView()
                 }
             }
@@ -107,8 +109,131 @@ private enum DashboardTab: Hashable {
     case today
     case tomorrow
     case streaks
+    case diff
     case settings
 }
+
+private struct DiffView: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Diff").font(.largeTitle.bold())
+                        Text("First saved plan vs immutable 20:00 final").foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    DatePicker("Date", selection: Binding(get: { model.diffDate }, set: { model.loadDiff(on: $0) }), displayedComponents: .date)
+                        .labelsHidden().frame(width: 150)
+                }
+                HStack(spacing: 8) {
+                    Text(profileLabel).diffBadge(.blue)
+                    Text(finalLabel).diffBadge(finalColor)
+                    Text(summaryLabel).diffBadge(.secondary)
+                }
+                HStack(spacing: 12) {
+                    ForEach(PlanDiffChange.allCases, id: \.self) { change in Text(change.rawValue.capitalized).diffBadge(color(change)) }
+                }.font(.caption)
+                ForEach(PlanningSegment.allCases, id: \.self) { segment in
+                    DiffSegmentView(
+                        segment: segment,
+                        date: MarkdownPlanCodec.isoDate(model.diffDate),
+                        initial: model.diffInitialSnapshots?.initial[segment],
+                        initialCapturedAt: model.diffInitialSnapshots?.initialCapturedAt[segment],
+                        final: finalTasks(for: segment),
+                        finalStatus: finalLabel
+                    )
+                }
+            }.padding(18)
+        }
+        .task { model.loadDiff(on: model.diffDate) }
+    }
+
+    private var finalSnapshot: FinalPlanSnapshot? { if case .available(let value) = model.diffFinalSnapshot { value } else { nil } }
+    private var profileLabel: String { (model.diffInitialSnapshots?.profile ?? finalSnapshot?.profile).map { "Profile: \($0.rawValue)" } ?? "Profile unavailable" }
+    private var finalLabel: String {
+        switch model.diffFinalSnapshot {
+        case .pending: "Final snapshot pending"
+        case .unavailable: "Final snapshot unavailable"
+        case .available(let value): "Final: \(value.capturedAt.formatted(date: .omitted, time: .shortened))"
+        }
+    }
+    private var finalColor: Color { if case .available = model.diffFinalSnapshot { return .green }; if case .pending = model.diffFinalSnapshot { return .orange }; return .red }
+    private var allRows: [PlanDiffRow] { PlanDiffEngine.rows(initial: model.diffInitialSnapshots?.initial.values.flatMap { $0 } ?? [], final: finalSnapshot?.tasks ?? [], date: MarkdownPlanCodec.isoDate(model.diffDate)) }
+    private var summaryLabel: String { PlanDiffChange.allCases.filter { $0 != .unchanged }.map { change in "\(allRows.filter { $0.changes.contains(change) }.count) \(change.rawValue)" }.filter { !$0.hasPrefix("0 ") }.joined(separator: " · ").ifEmpty("No changes") }
+    private func finalTasks(for segment: PlanningSegment) -> [FinalTaskSnapshot]? {
+        guard let snapshot = finalSnapshot else { return nil }
+        let initialIDs = Set(model.diffInitialSnapshots?.initial[segment]?.map(\.id) ?? [])
+        let allInitialIDs = Set(model.diffInitialSnapshots?.initial.values.flatMap { $0.map(\.id) } ?? [])
+        return snapshot.tasks.filter {
+            initialIDs.contains($0.id) ||
+                (!allInitialIDs.contains($0.id) && $0.scheduledDate == MarkdownPlanCodec.isoDate(model.diffDate) && segment.contains($0.task))
+        }
+    }
+    private func color(_ change: PlanDiffChange) -> Color { switch change { case .added: .green; case .removed: .red; case .moved: .orange; case .unchanged: .secondary; default: .blue } }
+}
+
+private struct DiffSegmentView: View {
+    let segment: PlanningSegment
+    let date: String
+    let initial: [PlanTask]?
+    let initialCapturedAt: Date?
+    let final: [FinalTaskSnapshot]?
+    let finalStatus: String
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack { Text(segment.title).font(.title3.bold()); Spacer(); Text(totals).font(.caption).foregroundStyle(.secondary) }
+            HStack {
+                Text(initialCapturedAt.map { "Initial · \($0.formatted(date: .omitted, time: .shortened))" } ?? "Initial Plan").frame(maxWidth: .infinity)
+                Text("Final Plan").frame(maxWidth: .infinity)
+                Color.clear.frame(width: 86)
+            }
+                .font(.caption.bold()).foregroundStyle(.secondary)
+            if initial == nil {
+                Text("Not initialized").font(.caption).foregroundStyle(.secondary).padding(8)
+            }
+            if final == nil {
+                Text(finalStatus).font(.caption).foregroundStyle(.secondary).padding(8)
+            } else {
+                ForEach(rows) { row in
+                    HStack(alignment: .top, spacing: 8) {
+                        Group { if let task = row.initial { DiffTaskRow(task: task) } else { Text("—").foregroundStyle(.secondary) } }.frame(maxWidth: .infinity)
+                        Group { if let state = row.final, !state.deleted { DiffTaskRow(task: state.task, scheduledDate: state.scheduledDate) } else { Text("—").foregroundStyle(.secondary) } }.frame(maxWidth: .infinity)
+                        VStack(alignment: .leading, spacing: 3) { ForEach(Array(row.changes).sorted { $0.rawValue < $1.rawValue }, id: \.self) { Text($0.rawValue.capitalized).font(.caption2.bold()) } }.frame(width: 86, alignment: .leading)
+                    }
+                }
+            }
+        }.padding(12).background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
+    }
+    private var rows: [PlanDiffRow] { PlanDiffEngine.rows(initial: initial ?? [], final: final ?? [], date: date) }
+    private var totals: String {
+        let rows = PlanDiffEngine.rows(initial: initial ?? [], final: final ?? [], date: date)
+        return "\(initial?.count ?? 0) initial · \(final?.filter { !$0.deleted }.count ?? 0) final · \(rows.filter { !$0.changes.contains(.unchanged) }.count) changed"
+    }
+}
+
+private struct DiffTaskRow: View {
+    let task: PlanTask
+    var scheduledDate: String? = nil
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Image(systemName: task.isComplete ? "checkmark.circle.fill" : "circle").foregroundStyle(task.isComplete ? .green : .secondary)
+                Text("\(MarkdownPlanCodec.time(task.startMinute))–\(MarkdownPlanCodec.time(task.endMinute))").monospacedDigit().foregroundStyle(.secondary)
+                Text(task.title).bold().lineLimit(1); Spacer(); Text("\(task.cycles)×").foregroundStyle(.secondary)
+            }.font(.caption)
+            Text("\(task.kind.rawValue) · \(task.priority) · \(task.difficulty)").font(.caption2).foregroundStyle(.secondary)
+            if let scheduledDate { Text("Scheduled: \(scheduledDate)").font(.caption2).foregroundStyle(.secondary) }
+            if !task.mvp.isEmpty { Text("MVP: \(task.mvp)").font(.caption2).lineLimit(2) }
+            ForEach(task.coreTasks) { sub in Text("\(sub.isComplete ? "☑" : "☐") \(sub.title)").font(.caption2).lineLimit(1) }
+        }.padding(7).background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private extension View { func diffBadge(_ color: Color) -> some View { self.font(.caption.bold()).foregroundStyle(color).padding(.horizontal, 8).padding(.vertical, 4).background(color.opacity(0.14), in: Capsule()) } }
+private extension String { func ifEmpty(_ fallback: String) -> String { isEmpty ? fallback : self } }
 
 private func taskVisible(
     _ task: PlanTask, showUser: Bool, showPredefined: Bool, showFixed: Bool

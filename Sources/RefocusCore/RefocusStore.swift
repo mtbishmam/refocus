@@ -43,6 +43,7 @@ public final class RefocusStore: @unchecked Sendable {
         try execute("PRAGMA synchronous=NORMAL")
         try execute("PRAGMA foreign_keys=ON")
         try migrate()
+        try migrateFinalSnapshots()
         if let existing = try scalar("SELECT value FROM meta WHERE key = 'device_id'") {
             deviceID = existing
         } else {
@@ -138,6 +139,7 @@ public final class RefocusStore: @unchecked Sendable {
         guard let plan = try loadPlan(date: date) else { return nil }
         let initialByName = try snapshotMap(date: date, column: "initial_snapshots")
         let modifiedByName = try snapshotMap(date: date, column: "modified_snapshots")
+        let initialTimes = try initialSnapshotTimes(date: date)
         return PlanSnapshots(
             profile: plan.profile,
             initial: Dictionary(uniqueKeysWithValues: initialByName.compactMap { key, value in
@@ -145,8 +147,49 @@ public final class RefocusStore: @unchecked Sendable {
             }),
             modified: Dictionary(uniqueKeysWithValues: modifiedByName.compactMap { key, value in
                 PlanningSegment(rawValue: key).map { ($0, value) }
+            }),
+            initialCapturedAt: Dictionary(uniqueKeysWithValues: initialTimes.compactMap { key, value in
+                PlanningSegment(rawValue: key).map { ($0, value) }
             })
         )
+    }
+
+    @discardableResult
+    public func captureFinalSnapshot(on date: Date, at cutoff: Date) throws -> Bool {
+        guard calendar.isDate(date, inSameDayAs: cutoff),
+              calendar.component(.hour, from: cutoff) == 20,
+              calendar.component(.minute, from: cutoff) == 0 else { return false }
+        var captured = false
+        try transaction {
+            try ensureDayPlan(date: date)
+            guard try scalarBlob("SELECT final_snapshot FROM day_plans WHERE date = ?", [.text(dayKey(date))]) == nil else { return }
+            let initial = try snapshotMap(date: date, column: "initial_snapshots")
+            let initialIDs = Set(initial.values.flatMap { $0 }.map { $0.id.uuidString.lowercased() })
+            var states: [FinalTaskSnapshot] = []
+            try query("SELECT id, scheduled_date, payload, deleted FROM tasks", []) { row in
+                guard let id = row.text(0), let scheduled = row.text(1), let payload = row.blob(2),
+                      (scheduled == dayKey(date) || initialIDs.contains(id)),
+                      let task = try? decoder.decode(PlanTask.self, from: payload) else { return }
+                states.append(FinalTaskSnapshot(task: task, scheduledDate: scheduled, deleted: row.int(3) != 0))
+            }
+            let profile = (try loadPlan(date: date))?.profile ?? RoutineProfileResolver(calendar: calendar).profile(for: date).kind
+            let snapshot = FinalPlanSnapshot(capturedAt: cutoff, profile: profile, tasks: states)
+            let hlc = nextHLC()
+            try execute("UPDATE day_plans SET final_snapshot = ?, final_captured_at = ?, updated_hlc = ? WHERE date = ? AND final_snapshot IS NULL",
+                        [.blob(try encoder.encode(snapshot)), .double(cutoff.timeIntervalSince1970), .text(hlc), .text(dayKey(date))])
+            let cloud = FinalPlanCloudRecord(snapshot: try encoder.encode(snapshot).base64EncodedString())
+            try enqueue(kind: "day_plan_final", id: dayKey(date), operation: "upsert", payload: try encoder.encode(cloud), hlc: hlc)
+            captured = true
+        }
+        return captured
+    }
+
+    public func finalSnapshot(on date: Date, now: Date) throws -> FinalSnapshotAvailability {
+        if let data = try scalarBlob("SELECT final_snapshot FROM day_plans WHERE date = ?", [.text(dayKey(date))]),
+           let snapshot = try? decoder.decode(FinalPlanSnapshot.self, from: data) { return .available(snapshot) }
+        let day = calendar.startOfDay(for: date), today = calendar.startOfDay(for: now)
+        if day > today || (day == today && (calendar.component(.hour, from: now) < 20)) { return .pending }
+        return .unavailable
     }
 
     @discardableResult
@@ -227,27 +270,32 @@ public final class RefocusStore: @unchecked Sendable {
             for staleID in existingIDs.subtracting(incomingIDs) { try tombstoneTask(id: staleID) }
             for task in tasks { try upsertTask(task, date: date) }
             var initial = try snapshotMap(date: date, column: "initial_snapshots")
+            var initialTimes = try initialSnapshotTimes(date: date)
+            let savedAt = Date()
             for segment in PlanningSegment.allCases where initial[segment.rawValue] == nil {
                 initial[segment.rawValue] = tasks.filter {
                     segment.contains($0) || $0.planningCycles(in: segment) > 0
                 }
+                initialTimes[segment.rawValue] = savedAt
             }
             let modified = Dictionary(uniqueKeysWithValues: PlanningSegment.allCases.map {
                 ($0.rawValue, tasks.filter($0.contains))
             })
             try execute(
                 """
-                INSERT INTO day_plans(date, profile, initial_segments, initial_snapshots, modified_snapshots, updated_hlc)
-                VALUES(?, ?, ?, ?, ?, ?)
+                INSERT INTO day_plans(date, profile, initial_segments, initial_snapshots, modified_snapshots, initial_snapshot_times, updated_hlc)
+                VALUES(?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(date) DO UPDATE SET profile=excluded.profile,
                   initial_segments=excluded.initial_segments, initial_snapshots=excluded.initial_snapshots,
-                  modified_snapshots=excluded.modified_snapshots, updated_hlc=excluded.updated_hlc
+                  modified_snapshots=excluded.modified_snapshots, initial_snapshot_times=excluded.initial_snapshot_times,
+                  updated_hlc=excluded.updated_hlc
                 """,
                 [.text(dayKey(date)), .text(profile.rawValue),
                  .text(PlanningSegment.allCases.map(\.rawValue).joined(separator: ",")),
-                 .blob(try encoder.encode(initial)), .blob(try encoder.encode(modified)), .text(nextHLC())]
+                 .blob(try encoder.encode(initial)), .blob(try encoder.encode(modified)),
+                 .blob(try encoder.encode(initialTimes)), .text(nextHLC())]
             )
-            try enqueue(kind: "day_plan", id: dayKey(date), operation: "upsert", payload: try encoder.encode(tasks))
+            try enqueueDayPlanRecord(date: date, profile: profile, initial: initial, modified: modified, initialTimes: initialTimes)
         }
     }
 
@@ -472,7 +520,7 @@ public final class RefocusStore: @unchecked Sendable {
             ))
         }
         try query(
-            "SELECT date, profile, initial_segments, initial_snapshots, modified_snapshots, updated_hlc FROM day_plans ORDER BY date"
+            "SELECT date, profile, initial_segments, initial_snapshots, modified_snapshots, updated_hlc, initial_snapshot_times, final_snapshot FROM day_plans ORDER BY date"
         ) { row in
             guard let day = row.text(0), let profile = row.text(1),
                   let initialData = row.blob(3), let modifiedData = row.blob(4) else { return }
@@ -481,12 +529,19 @@ public final class RefocusStore: @unchecked Sendable {
             let record = DayPlanCloudRecord(
                 date: day, profile: profile,
                 initialSegments: (row.text(2) ?? "").split(separator: ",").map(String.init),
-                initialSnapshots: initial, modifiedSnapshots: modified
+                initialSnapshots: initial, modifiedSnapshots: modified,
+                initialSnapshotTimes: row.blob(6).flatMap { try? decoder.decode([String: Date].self, from: $0) } ?? [:]
             )
             seed.append(SeedMutation(
                 kind: "day_plan", id: day, operation: "upsert",
                 payload: try encoder.encode(record), hlc: row.text(5)
             ))
+            if let finalData = row.blob(7) {
+                seed.append(SeedMutation(
+                    kind: "day_plan_final", id: day, operation: "upsert",
+                    payload: try encoder.encode(FinalPlanCloudRecord(snapshot: finalData.base64EncodedString())), hlc: row.text(5)
+                ))
+            }
         }
         try query("SELECT id, payload, updated_hlc FROM check_ins ORDER BY id") { row in
             guard let id = row.text(0), let payload = row.blob(1) else { return }
@@ -633,6 +688,38 @@ public final class RefocusStore: @unchecked Sendable {
                         unit: entity.fields["unit"]?.stringValue,
                         position: entity.fields["position"]?.intValue ?? 0
                     ))
+                case "day_plan_final":
+                    guard try scalarBlob("SELECT final_snapshot FROM day_plans WHERE date = ?", [.text(entity.id)]) == nil,
+                          let encoded = entity.fields["snapshot"]?.stringValue,
+                          let data = Data(base64Encoded: encoded),
+                          let snapshot = try? decoder.decode(FinalPlanSnapshot.self, from: data),
+                          parseDay(entity.id) != nil else { continue }
+                    try ensureDayPlan(date: parseDay(entity.id)!)
+                    try execute(
+                        "UPDATE day_plans SET final_snapshot = ?, final_captured_at = ?, updated_hlc = ? WHERE date = ? AND final_snapshot IS NULL",
+                        [.blob(data), .double(snapshot.capturedAt.timeIntervalSince1970), .text(remoteHLC), .text(entity.id)]
+                    )
+                case "day_plan":
+                    guard let scheduled = parseDay(entity.id),
+                          let payload = try? encoder.encode(entity.fields),
+                          let remote = try? decoder.decode(DayPlanCloudRecord.self, from: payload) else { continue }
+                    try ensureDayPlan(date: scheduled)
+                    var initial = try snapshotMap(date: scheduled, column: "initial_snapshots")
+                    var modified = try snapshotMap(date: scheduled, column: "modified_snapshots")
+                    var initialTimes = try initialSnapshotTimes(date: scheduled)
+                    for (segment, tasks) in remote.initialSnapshots where initial[segment] == nil { initial[segment] = tasks }
+                    for (segment, timestamp) in remote.initialSnapshotTimes ?? [:] where initialTimes[segment] == nil { initialTimes[segment] = timestamp }
+                    if let clock = entity.clocks["modifiedSnapshots"],
+                       pendingClocks["modifiedSnapshots"].map({ self.clock(clock, isLaterThan: $0) }) ?? true {
+                        modified = remote.modifiedSnapshots
+                    }
+                    let profile = DayProfileKind(rawValue: remote.profile) ?? RoutineProfileResolver(calendar: calendar).profile(for: scheduled).kind
+                    let initialized = PlanningSegment.allCases.filter { initial[$0.rawValue] != nil }.map(\.rawValue).joined(separator: ",")
+                    try execute(
+                        "UPDATE day_plans SET profile = ?, initial_segments = ?, initial_snapshots = ?, modified_snapshots = ?, initial_snapshot_times = ?, updated_hlc = ? WHERE date = ?",
+                        [.text(profile.rawValue), .text(initialized), .blob(try encoder.encode(initial)), .blob(try encoder.encode(modified)),
+                         .blob(try encoder.encode(initialTimes)), .text(remoteHLC), .text(entity.id)]
+                    )
                 default: continue
                 }
             }
@@ -674,6 +761,18 @@ public final class RefocusStore: @unchecked Sendable {
             );
             """
         )
+    }
+
+    private func migrateFinalSnapshots() throws {
+        if try scalar("SELECT COUNT(*) FROM pragma_table_info('day_plans') WHERE name = 'final_snapshot'") == "0" {
+            try execute("ALTER TABLE day_plans ADD COLUMN final_snapshot BLOB")
+        }
+        if try scalar("SELECT COUNT(*) FROM pragma_table_info('day_plans') WHERE name = 'final_captured_at'") == "0" {
+            try execute("ALTER TABLE day_plans ADD COLUMN final_captured_at REAL")
+        }
+        if try scalar("SELECT COUNT(*) FROM pragma_table_info('day_plans') WHERE name = 'initial_snapshot_times'") == "0" {
+            try execute("ALTER TABLE day_plans ADD COLUMN initial_snapshot_times BLOB")
+        }
     }
 
     private func migrateRenamedDefinitions() throws {
@@ -850,10 +949,12 @@ public final class RefocusStore: @unchecked Sendable {
     ) throws {
         var initial = try snapshotMap(date: date, column: "initial_snapshots")
         var modified = try snapshotMap(date: date, column: "modified_snapshots")
+        var initialTimes = try initialSnapshotTimes(date: date)
         if initial[segment.rawValue] == nil {
             initial[segment.rawValue] = tasks.filter {
                 segment.contains($0) || $0.planningCycles(in: segment) > 0
             }
+            initialTimes[segment.rawValue] = Date()
         }
         for candidate in PlanningSegment.allCases where initial[candidate.rawValue] != nil {
             modified[candidate.rawValue] = tasks.filter(candidate.contains)
@@ -861,16 +962,17 @@ public final class RefocusStore: @unchecked Sendable {
         let initialized = PlanningSegment.allCases.filter { initial[$0.rawValue] != nil }.map(\.rawValue).joined(separator: ",")
         try execute(
             """
-            INSERT INTO day_plans(date, profile, initial_segments, initial_snapshots, modified_snapshots, updated_hlc)
-            VALUES(?, ?, ?, ?, ?, ?)
+            INSERT INTO day_plans(date, profile, initial_segments, initial_snapshots, modified_snapshots, initial_snapshot_times, updated_hlc)
+            VALUES(?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(date) DO UPDATE SET profile=excluded.profile,
               initial_segments=excluded.initial_segments, initial_snapshots=excluded.initial_snapshots,
-              modified_snapshots=excluded.modified_snapshots, updated_hlc=excluded.updated_hlc
+              modified_snapshots=excluded.modified_snapshots, initial_snapshot_times=excluded.initial_snapshot_times,
+              updated_hlc=excluded.updated_hlc
             """,
             [.text(dayKey(date)), .text(profile.rawValue), .text(initialized), .blob(try encoder.encode(initial)),
-             .blob(try encoder.encode(modified)), .text(nextHLC())]
+             .blob(try encoder.encode(modified)), .blob(try encoder.encode(initialTimes)), .text(nextHLC())]
         )
-        try enqueue(kind: "day_plan", id: dayKey(date), operation: "upsert", payload: try encoder.encode(tasks))
+        try enqueueDayPlanRecord(date: date, profile: profile, initial: initial, modified: modified, initialTimes: initialTimes)
     }
 
     private func refreshPlanMetadata(
@@ -896,7 +998,10 @@ public final class RefocusStore: @unchecked Sendable {
             [.text(dayKey(date)), .text(profile.rawValue), .text(initialized), .blob(try encoder.encode(initial)),
              .blob(try encoder.encode(modified)), .text(nextHLC())]
         )
-        try enqueue(kind: "day_plan", id: dayKey(date), operation: "upsert", payload: try encoder.encode(tasks))
+        try enqueueDayPlanRecord(
+            date: date, profile: profile, initial: initial, modified: modified,
+            initialTimes: try initialSnapshotTimes(date: date)
+        )
     }
 
     private func ensureDayPlan(date: Date) throws {
@@ -930,6 +1035,26 @@ public final class RefocusStore: @unchecked Sendable {
         guard column == "initial_snapshots" || column == "modified_snapshots" else { return [:] }
         guard let data = try scalarBlob("SELECT \(column) FROM day_plans WHERE date = ?", [.text(dayKey(date))]) else { return [:] }
         return (try? decoder.decode([String: [PlanTask]].self, from: data)) ?? [:]
+    }
+
+    private func initialSnapshotTimes(date: Date) throws -> [String: Date] {
+        guard let data = try scalarBlob("SELECT initial_snapshot_times FROM day_plans WHERE date = ?", [.text(dayKey(date))]) else { return [:] }
+        return (try? decoder.decode([String: Date].self, from: data)) ?? [:]
+    }
+
+    private func enqueueDayPlanRecord(
+        date: Date,
+        profile: DayProfileKind,
+        initial: [String: [PlanTask]],
+        modified: [String: [PlanTask]],
+        initialTimes: [String: Date]
+    ) throws {
+        let record = DayPlanCloudRecord(
+            date: dayKey(date), profile: profile.rawValue,
+            initialSegments: PlanningSegment.allCases.filter { initial[$0.rawValue] != nil }.map(\.rawValue),
+            initialSnapshots: initial, modifiedSnapshots: modified, initialSnapshotTimes: initialTimes
+        )
+        try enqueue(kind: "day_plan", id: dayKey(date), operation: "upsert", payload: try encoder.encode(record))
     }
 
     private func enqueue(kind: String, id: String, operation: String, payload: Data, hlc: String? = nil) throws {
@@ -1017,7 +1142,10 @@ public final class RefocusStore: @unchecked Sendable {
         var initialSegments: [String]
         var initialSnapshots: [String: [PlanTask]]
         var modifiedSnapshots: [String: [PlanTask]]
+        var initialSnapshotTimes: [String: Date]?
     }
+
+    private struct FinalPlanCloudRecord: Codable { var snapshot: String }
 
     private func normalizedMutationPayload(_ data: Data) -> Data {
         guard var object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return data }

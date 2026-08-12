@@ -32,6 +32,9 @@ final class AppModel: ObservableObject {
     @Published var dailyFieldDefinitions: [DailyFieldDefinition] = []
     @Published var dailyFieldValues: [String: String] = [:]
     @Published var dailyDashboardAnalytics = DailyDashboardAnalytics()
+    @Published var diffDate = WallClock.dhakaCalendar().startOfDay(for: Date())
+    @Published var diffInitialSnapshots: PlanSnapshots?
+    @Published var diffFinalSnapshot: FinalSnapshotAvailability = .pending
     @Published var errorMessage: String?
     @Published var vaultURL: URL?
     @Published var launchAtLogin = false
@@ -70,6 +73,7 @@ final class AppModel: ObservableObject {
     private var rescheduleTaskQueue: Task<Void, Never>?
     private var dailyFieldSaveTasks: [String: Task<Void, Never>] = [:]
     private var activeBreakID: String?
+    private var attemptedFinalCaptureDay: Date?
     private var baselineTasks: [PlanTask] = []
     private var tomorrowBaselineTasks: [PlanTask] = []
     private var knownTaskIDs: Set<UUID> = []
@@ -1052,6 +1056,17 @@ final class AppModel: ObservableObject {
         }
 
         let minute = clock.minuteOfDay(for: date)
+        if minute == 1200, attemptedFinalCaptureDay != currentDay, let worker {
+            Task { [weak self] in
+                do {
+                    _ = try await worker.captureFinalSnapshot(on: currentDay, at: date)
+                    self?.attemptedFinalCaptureDay = currentDay
+                    self?.loadDiff(on: self?.diffDate ?? currentDay)
+                } catch {
+                    self?.errorMessage = "Final snapshot capture failed: \(error.localizedDescription)"
+                }
+            }
+        }
 
         // Screen breaks are a device-level productivity guard, not a planning
         // feature. They remain active around the clock whenever ReFocus is
@@ -1098,6 +1113,18 @@ final class AppModel: ObservableObject {
         if overlayController.mode == .planningGate {
             overlayController.hide()
             isBreakVisible = false
+        }
+    }
+
+    func loadDiff(on date: Date) {
+        diffDate = WallClock.dhakaCalendar().startOfDay(for: date)
+        guard let worker else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            if let result = try? await worker.loadDiff(on: self.diffDate, now: self.now) {
+                self.diffInitialSnapshots = result.0
+                self.diffFinalSnapshot = result.1
+            }
         }
     }
 

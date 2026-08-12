@@ -133,35 +133,29 @@ Ikigai and obtain current application context through MCP read tools (prefer
 the complete proposed Today/Tomorrow/Agenda changes, and obtain explicit user
 approval before the user applies writes in ReFocus.
 
-`analyze_day`:
+`analyze_day` is the scheduled `refocus-day-analysis` heartbeat. Read the
+canonical vault document at
+`/Users/mtbishmam/Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian/agents/scheduled/analyze_day.md`
+before running it; that document contains the complete context for its
+trigger, source order, snapshot and Daily/MCP contract, evidence rules,
+approval gate, allowed writes, forbidden mutations, storage/lease behavior,
+validation, rollback, and verification. Do not maintain a project-local copy.
 
-1. Read the live Ikigai, then call MCP `get_daily_dashboard` for the target date
-   and read the day's context plus all three Initial and Modified snapshots,
-   completion states, every Daily metric/habit result, current-month and total
-   Deltas, Stages, weight progress/ETA, and screen-break answers.
-2. Compare planned versus actual work and discuss causes that the evidence
-   supports. Ask when the cause is unclear.
-3. Propose Summary, Progress, Mistakes, and Gains and obtain explicit approval.
-4. Store the approved analysis transactionally and update only the managed analysis block in `journal/mon-D.md`, preserving all user writing.
-5. Keep `log/YYYY-MM-DD.md` machine-generated; never put the end-of-day Summary, Progress, Mistakes, or Gains there.
-
-Daily/MCP compatibility rule: whenever any Daily field, habit, metric,
-calculation, or dashboard behavior changes, update the `analyze_day` contract,
-the MCP read/write tools, token-efficient context shape, documentation, and MCP
-contract tests in the same change. AI may edit raw Daily metrics and habit
-results through `update_daily_values` only when the user explicitly requests
-the write; Delta, Stage, weight progress, and ETA remain derived values.
+Any change to `analyze_day`, Daily fields or calculations, MCP read/write
+tools, plan snapshots/final capture, projection destinations, approval rules,
+or safety behavior must update the canonical vault document in the same
+change. `log/YYYY-MM-DD.md` remains machine-generated; approved day analysis
+belongs only in the managed block of `journal/mon-D.md` (the current projector
+uses names such as `journal/aug-10.md`).
 
 `clean_dump`:
 
-1. Parse captures such as `page_name - content`, an indented block beneath a
-   page name, `task - do_x`, or `aug 27 - MAT120 exam`.
-2. Show a preflight list with every proposed destination/action and a separate
-   ambiguity list. Examples: `refocus - ...` targets `refocus.md`; `task - ...`
-   targets ReFocus planning/Agenda; a dated item targets Agenda.
-3. Obtain explicit approval before writing. Do not move any ambiguous item.
-4. Move only approved, unambiguous content, preserve meaning, and remove from
-   `dump.md` only the captures successfully committed elsewhere.
+Read `/Users/mtbishmam/Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian/agents/commands/clean_dump.md`
+before running the command. That file is the canonical, complete clean_dump
+context. It contains the parsing grammar, routing map, approval gate,
+Agenda/storage rules, ambiguity policy, commit behavior, and verification
+requirements. Any future change to clean_dump must update that file in the same
+change; do not maintain a second inline copy here.
 
 The intended evening sequence is `analyze_day` → review captures → save the plan
 in Tomorrow. Tomorrow becomes Today by scheduled date inside the database; no

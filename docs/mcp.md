@@ -22,7 +22,10 @@ Tools:
   editable field, current metric inputs (including weight, calories, and solved
   problems), every habit result, current and maximum streaks, total wins/losses,
   month/lifetime Deltas, Stage, monthly history, weight progress/ETA, and the
-  prompts used by `analyze_day`.
+  prompts used by `analyze_day`, plus the immutable Initial-vs-Final plan data.
+- `get_plan_diff` — token-efficient immutable Initial snapshots and the
+  separately persisted exact-20:00 Asia/Dhaka Final snapshot. It explicitly
+  reports pending or unavailable cutoffs and never substitutes Modified state.
 - `update_daily_values` — write any editable Daily field (metrics, text fields,
   or habit results) in one explicit write-scoped batch. Habits use `blank`,
   `win`, or `fail`; current/max streaks, wins/losses, Delta, Stage, weight

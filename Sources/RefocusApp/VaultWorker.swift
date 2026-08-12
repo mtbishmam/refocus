@@ -93,6 +93,16 @@ actor VaultWorker {
         try store.fieldValues(from: date, through: date)
     }
 
+    func loadDiff(on date: Date, now: Date) throws -> (PlanSnapshots?, FinalSnapshotAvailability) {
+        (try store.planSnapshots(on: date), try store.finalSnapshot(on: date, now: now))
+    }
+
+    func captureFinalSnapshot(on date: Date, at cutoff: Date) throws -> Bool {
+        let captured = try store.captureFinalSnapshot(on: date, at: cutoff)
+        if captured { scheduleBackgroundWork(days: [date]) }
+        return captured
+    }
+
     func loadDailyDashboardAnalytics(
         for date: Date, definitions: [StreakDefinition]
     ) throws -> DailyDashboardAnalytics {

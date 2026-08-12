@@ -97,7 +97,9 @@ The MCP endpoint is `/api/mcp`. AI clients should call
 `get_optimization_context` first and `get_daily_dashboard` during day analysis.
 The Daily response includes every editable field, weight, calories, solved
 problems, every habit's current/maximum streak, wins/losses, Deltas, Stage,
-weight progress, and prompts for the analysis conversation. Explicit Daily
+weight progress, prompts for the analysis conversation, and immutable
+Initial-vs-20:00-Final plan evidence. `get_plan_diff` returns only that plan
+evidence when a smaller response is preferable. Explicit Daily
 edits use the write-scoped `update_daily_values` tool; it covers every field
 advertised by `writeAccess.editableFields`, while streaks, Deltas, Stage,
 progress, and ETA remain derived.

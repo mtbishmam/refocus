@@ -539,15 +539,92 @@ public struct PlanSnapshots: Equatable, Sendable {
     public var profile: DayProfileKind
     public var initial: [PlanningSegment: [PlanTask]]
     public var modified: [PlanningSegment: [PlanTask]]
+    public var initialCapturedAt: [PlanningSegment: Date]
 
     public init(
         profile: DayProfileKind,
         initial: [PlanningSegment: [PlanTask]],
-        modified: [PlanningSegment: [PlanTask]]
+        modified: [PlanningSegment: [PlanTask]],
+        initialCapturedAt: [PlanningSegment: Date] = [:]
     ) {
         self.profile = profile
         self.initial = initial
         self.modified = modified
+        self.initialCapturedAt = initialCapturedAt
+    }
+}
+
+public struct FinalTaskSnapshot: Codable, Equatable, Sendable, Identifiable {
+    public var id: UUID { task.id }
+    public var task: PlanTask
+    public var scheduledDate: String
+    public var deleted: Bool
+
+    public init(task: PlanTask, scheduledDate: String, deleted: Bool = false) {
+        self.task = task
+        self.scheduledDate = scheduledDate
+        self.deleted = deleted
+    }
+}
+
+public struct FinalPlanSnapshot: Codable, Equatable, Sendable {
+    public var capturedAt: Date
+    public var profile: DayProfileKind
+    public var tasks: [FinalTaskSnapshot]
+
+    public init(capturedAt: Date, profile: DayProfileKind, tasks: [FinalTaskSnapshot]) {
+        self.capturedAt = capturedAt
+        self.profile = profile
+        self.tasks = tasks
+    }
+}
+
+public enum FinalSnapshotAvailability: Equatable, Sendable {
+    case pending, available(FinalPlanSnapshot), unavailable
+}
+
+public enum PlanDiffChange: String, CaseIterable, Sendable {
+    case added, removed, moved, completion, subtaskCompletion, metadata, unchanged
+}
+
+public struct PlanDiffRow: Identifiable, Equatable, Sendable {
+    public var id: UUID
+    public var initial: PlanTask?
+    public var final: FinalTaskSnapshot?
+    public var changes: Set<PlanDiffChange>
+}
+
+public enum PlanDiffEngine {
+    public static func rows(initial: [PlanTask], final: [FinalTaskSnapshot], date: String) -> [PlanDiffRow] {
+        // A single stable task can intentionally overlap two planning blocks
+        // (notably the predefined five-hour Mashup), so a full-day summary may
+        // receive the same UUID from multiple Initial segment snapshots. Keep
+        // the first immutable representation instead of trapping on duplicate
+        // keys. Final snapshots normally contain one row per task, but apply
+        // the same defensive rule to corrupted or legacy data.
+        let left = Dictionary(initial.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let right = Dictionary(final.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return Set(left.keys).union(right.keys).map { id in
+            let a = left[id]
+            let b = right[id]
+            var changes: Set<PlanDiffChange> = []
+            if a == nil { changes.insert(.added) }
+            else if b == nil || b?.deleted == true { changes.insert(.removed) }
+            if let a, let b, !b.deleted {
+                if a.startMinute != b.task.startMinute || b.scheduledDate != date { changes.insert(.moved) }
+                if a.isComplete != b.task.isComplete { changes.insert(.completion) }
+                let aSub = Dictionary(uniqueKeysWithValues: a.coreTasks.map { ($0.id, $0.isComplete) })
+                if b.task.coreTasks.contains(where: { aSub[$0.id] != nil && aSub[$0.id] != $0.isComplete }) { changes.insert(.subtaskCompletion) }
+                var cleanA = a; var cleanB = b.task
+                cleanA.startMinute = cleanB.startMinute; cleanA.isComplete = cleanB.isComplete
+                cleanA.coreTasks = cleanA.coreTasks.map { item in var copy = item; copy.isComplete = false; return copy }
+                cleanB.coreTasks = cleanB.coreTasks.map { item in var copy = item; copy.isComplete = false; return copy }
+                if cleanA != cleanB { changes.insert(.metadata) }
+            }
+            if changes.isEmpty { changes.insert(.unchanged) }
+            return PlanDiffRow(id: id, initial: a, final: b, changes: changes)
+        }.filter { $0.initial != nil || $0.final?.deleted != true }
+            .sorted { ($0.initial?.startMinute ?? $0.final?.task.startMinute ?? Int.max) < ($1.initial?.startMinute ?? $1.final?.task.startMinute ?? Int.max) }
     }
 }
 
