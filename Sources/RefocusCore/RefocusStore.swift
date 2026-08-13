@@ -103,7 +103,9 @@ public final class RefocusStore: @unchecked Sendable {
             let builtIns = [
                 DailyFieldDefinition(id: "weight", name: "Weight", kind: .number, unit: "kg", position: existingDefinitions.count),
                 DailyFieldDefinition(id: "calories", name: "Calories", kind: .number, unit: "kcal", position: existingDefinitions.count + 1),
-                DailyFieldDefinition(id: "solved-problems", name: "Solved problems", kind: .number, position: existingDefinitions.count + 2),
+                DailyFieldDefinition(id: "expenses", name: "Expenses", kind: .number, unit: "BDT", position: existingDefinitions.count + 2),
+                DailyFieldDefinition(id: "solved-problems", name: "Solved problems", kind: .number, position: existingDefinitions.count + 3),
+                DailyFieldDefinition(id: "cp-hours", name: "CP Hours", kind: .number, unit: "hours", position: existingDefinitions.count + 4),
             ]
             for definition in existingDefinitions + builtIns {
                 try upsertDefinition(definition)
@@ -666,7 +668,8 @@ public final class RefocusStore: @unchecked Sendable {
                         return CoreTask(title: name, isComplete: item["complete"]?.boolValue ?? false)
                     } ?? []
                     let task = PlanTask(
-                        id: id, title: title, startMinute: start, cycles: fields["cycles"]?.intValue ?? 1,
+                        id: id, title: title, description: fields["description"]?.stringValue,
+                        startMinute: start, cycles: fields["cycles"]?.intValue ?? 1,
                         kind: TaskKind(rawValue: fields["kind"]?.stringValue ?? "normal") ?? .normal,
                         priority: fields["priority"]?.stringValue ?? "Medium",
                         difficulty: fields["difficulty"]?.stringValue ?? "Moderate",
@@ -818,7 +821,9 @@ public final class RefocusStore: @unchecked Sendable {
         } + [
             DailyFieldDefinition(id: "weight", name: "Weight", kind: .number, unit: "kg", position: 100),
             DailyFieldDefinition(id: "calories", name: "Calories", kind: .number, unit: "kcal", position: 101),
-            DailyFieldDefinition(id: "solved-problems", name: "Solved problems", kind: .number, position: 102),
+            DailyFieldDefinition(id: "expenses", name: "Expenses", kind: .number, unit: "BDT", position: 102),
+            DailyFieldDefinition(id: "solved-problems", name: "Solved problems", kind: .number, position: 103),
+            DailyFieldDefinition(id: "cp-hours", name: "CP Hours", kind: .number, unit: "hours", position: 104),
         ]
 
         try transaction {
@@ -1232,6 +1237,7 @@ public final class RefocusStore: @unchecked Sendable {
         let subtasks = task.coreTasks.map { ["title": $0.title, "complete": $0.isComplete] as [String: Any] }
         let fields: [String: Any] = [
             "title": task.title,
+            "description": task.description ?? NSNull(),
             "date": dayKey(date),
             "time": task.hasScheduledTime ? String(format: "%02d:%02d", task.startMinute / 60, task.startMinute % 60) : NSNull(),
             "hasScheduledTime": task.hasScheduledTime,

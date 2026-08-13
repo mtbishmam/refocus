@@ -1,5 +1,16 @@
 # ReFocus project instructions
 
+## Shared ReApp context
+
+Whenever a task mentions any ReApp or asks about how ReFocus relates to ReSync
+or ReSolve, read the canonical AI context at
+[`agents/context/reapps.md`](<../../Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian/agents/context/reapps.md>).
+It is derived from the current code under `/Users/mtbishmam/code` and contains
+the family vocabulary, exact Site URLs, product boundaries, repository map,
+architecture, data model, and planned-versus-shipped distinctions. This file
+remains authoritative for ReFocus-specific implementation rules; the shared
+note prevents cross-app context from being lost.
+
 ## Build and architecture
 
 - Build with `swift build`, run `swift run RefocusCoreChecks`, and package with
@@ -42,8 +53,9 @@
 - `log/YYYY-MM-DD.md` is a one-way clean machine activity projection without internal IDs or end-of-day analysis.
 - `journal/mon-D.md` is the human-authored daily journal. Preserve unrelated writing exactly; approved `analyze_day` output belongs in its managed analysis block.
 - Daily summary is written by the user or AI in the Summary section of `journal/mon-D.md`; it must not be collected as a Daily app field.
-- Daily exposes preserved dated history for weight, calories, and solved
-  problems in addition to habit history; current values remain immediate-save.
+- Daily exposes editable dated history for Weight, Calories, Expenses, Solved
+  Problems, and CP Hours in addition to habit history; current and historical
+  values remain immediate-save and derived analytics recalculate from edits.
 - `agenda.md`, `task-templates.md`, `dump.md`, legacy `journal/mon-D.md`, and
   `ego/non-negotiables.md` are preserved migration sources, not runtime stores.
 - Cloud-paired projection writes require the D1 export lease. A denied or failed
@@ -94,6 +106,10 @@ The day is independently planned and snapshotted in three super-blocks:
 - Normal tasks use one to four cycles. Contest tasks use one to ten cycles.
 - Every Today/Tomorrow task has a concrete MVP as its sole completion
   definition and at least three named subtasks; more are allowed.
+- A task is historical when its scheduled date is before today in Asia/Dhaka,
+  or when it is scheduled today and its complete interval has ended. Historical
+  tasks may omit MVP and subtasks (and retain unnamed imported subtasks), while
+  timing, duration, collision, Rest, and cutoff validation remains active.
 - Scheduled Agenda tasks may omit MVP and subtasks. They must satisfy the full
   task rules when promoted into Tomorrow or Today.
 - Explicit write-scoped MCP `create_task` calls create quick tasks that may

@@ -46,6 +46,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var hasPersistedToday = false
     @Published private(set) var initialSegments: Set<PlanningSegment> = []
     @Published var collapsedTaskIDs: Set<UUID> = []
+    @Published var requestedTaskNameFocusID: UUID?
     @Published var showCompletedSubtasks = false
     @Published var quickNote = ""
     @Published var isSavingQuickNote = false
@@ -167,7 +168,9 @@ final class AppModel: ObservableObject {
                 profile: resolver.profile(for: date),
                 minimumCycles: 0,
                 requireFixedTasks: false,
-                requireTaskDetails: false
+                requireTaskDetails: false,
+                scheduledDate: date,
+                now: now
             )
         }
     }
@@ -400,18 +403,10 @@ final class AppModel: ObservableObject {
     }
 
     func addTomorrowTask() {
-        guard let placement = PlanningSegment.allCases.compactMap({ segment -> (PlanningSegment, Int)? in
-            let planned = tomorrowTasks.reduce(0) { $0 + $1.planningCycles(in: segment) }
-            guard planned < tomorrowRequiredCycles(segment, tasks: tomorrowTasks),
-                  let slot = validator.firstUnusedSlot(
-                      in: tomorrowTasks, startingAt: segment.startMinute, before: segment.endMinute
-                  ) else { return nil }
-            return (segment, slot)
-        }).first else {
-            errorMessage = "No unused required half-hour slot remains in Tomorrow."
+        guard let nextStart = validator.firstUnusedSlot(in: tomorrowTasks, startingAt: 330, before: 1290) else {
+            errorMessage = "No unused half-hour slot remains in Tomorrow before 21:30."
             return
         }
-        let (_, nextStart) = placement
         let task = PlanTask(
             title: "New task", startMinute: nextStart, cycles: 1, mvp: "",
             coreTasks: [CoreTask(title: ""), CoreTask(title: ""), CoreTask(title: "")]
@@ -537,12 +532,8 @@ final class AppModel: ObservableObject {
     func addTask() {
         userRequestedEditing = true
         isEditingPlan = true
-        let currentCycleStart = clock.minuteOfDay(for: snapshot.cycleStart)
-        let searchStart = max(activeSegment.startMinute, currentCycleStart)
-        guard let nextStart = validator.firstUnusedSlot(
-            in: tasks, startingAt: searchStart, before: activeSegment.endMinute
-        ) else {
-            errorMessage = "No unused half-hour slot remains in the \(activeSegment.title.lowercased())."
+        guard let nextStart = validator.firstUnusedSlot(in: tasks, startingAt: 330, before: 1290) else {
+            errorMessage = "No unused half-hour slot remains Today before 21:30."
             return
         }
         let task = PlanTask(
@@ -665,7 +656,8 @@ final class AppModel: ObservableObject {
 
     private func registerNewTask(_ id: UUID) {
         knownTaskIDs.insert(id)
-        collapsedTaskIDs.insert(id)
+        collapsedTaskIDs.remove(id)
+        requestedTaskNameFocusID = id
     }
 
     private func collapseNewTasks() {
@@ -742,7 +734,7 @@ final class AppModel: ObservableObject {
         }
         let issues = validator.validate(
             tasks: sameDay, profile: resolver.profile(for: date), minimumCycles: 0,
-            requireFixedTasks: false, requireTaskDetails: false
+            requireFixedTasks: false, requireTaskDetails: false, scheduledDate: date, now: now
         )
         let blockers = issues.filter { $0.severity == .error }
         guard blockers.isEmpty else {
@@ -814,7 +806,9 @@ final class AppModel: ObservableObject {
             profile: resolver.profile(for: date),
             minimumCycles: 0,
             requireFixedTasks: false,
-            requireTaskDetails: false
+            requireTaskDetails: false,
+            scheduledDate: date,
+            now: now
         )
         let blockers = issues.filter { $0.severity == .error }
         guard blockers.isEmpty else {
@@ -960,6 +954,35 @@ final class AppModel: ObservableObject {
                 self?.reloadDailyDashboardAnalytics()
             }
             catch { self?.errorMessage = "Could not save \(definition.name): \(error.localizedDescription)" }
+        }
+    }
+
+    func setHistoricalDailyField(definitionID: String, dateText: String, value: String) {
+        guard let worker,
+              let definition = dailyFieldDefinitions.first(where: { $0.id == definitionID })
+        else { return }
+        let formatter = DateFormatter()
+        formatter.calendar = WallClock.dhakaCalendar()
+        formatter.timeZone = formatter.calendar.timeZone
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        guard let date = formatter.date(from: dateText) else { return }
+        if let index = dailyMetricHistory.firstIndex(where: { $0.definitionID == definitionID && $0.date == dateText }) {
+            dailyMetricHistory[index].value = value
+        } else if !value.isEmpty {
+            dailyMetricHistory.append(DailyFieldValue(definitionID: definitionID, date: dateText, value: value))
+        }
+        let key = "history:\(definitionID):\(dateText)"
+        dailyFieldSaveTasks[key]?.cancel()
+        dailyFieldSaveTasks[key] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            do {
+                try await worker.setDailyFieldValue(definition, value: value, date: date)
+                self?.reloadDailyDashboardAnalytics()
+            } catch {
+                self?.errorMessage = "Could not update historical \(definition.name): \(error.localizedDescription)"
+            }
         }
     }
 
@@ -1211,7 +1234,9 @@ final class AppModel: ObservableObject {
             minimumCycles: minimumCycles,
             requireFixedTasks: true,
             requireTaskDetails: true,
-            countedSegment: activeSegment
+            countedSegment: activeSegment,
+            scheduledDate: now,
+            now: now
         )
         let minute = clock.minuteOfDay(for: now)
         if minute >= 330, minute < 1290,
@@ -1242,7 +1267,9 @@ final class AppModel: ObservableObject {
             profile: resolver.profile(for: tomorrowDate),
             minimumCycles: 0,
             requireFixedTasks: true,
-            requireTaskDetails: true
+            requireTaskDetails: true,
+            scheduledDate: tomorrowDate,
+            now: now
         )
         for segment in PlanningSegment.allCases {
             let actual = candidate.reduce(0) { $0 + $1.planningCycles(in: segment) }
@@ -1299,6 +1326,7 @@ final class AppModel: ObservableObject {
     private func freshCopy(of template: PlanTask) -> PlanTask {
         PlanTask(
             title: template.title,
+            description: template.description,
             startMinute: template.startMinute,
             cycles: template.cycles,
             kind: template.kind,

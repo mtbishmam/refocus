@@ -95,6 +95,9 @@ public struct CleanMarkdownExporter: Sendable {
     private func render(_ task: PlanTask) -> [String] {
         let timing = task.hasScheduledTime ? "\(time(task.startMinute))–\(time(task.endMinute)) · " : ""
         var lines = ["- [\(task.isComplete ? "x" : " ")] \(timing)\(task.title)"]
+        if let description = task.description?.trimmingCharacters(in: .whitespacesAndNewlines), !description.isEmpty {
+            lines.append("  - Description: \(description.replacingOccurrences(of: "\n", with: " / "))")
+        }
         if !task.mvp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { lines.append("  - MVP: \(task.mvp)") }
         for subtask in task.coreTasks where !subtask.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             lines.append("  - [\(subtask.isComplete ? "x" : " ")] \(subtask.title)")

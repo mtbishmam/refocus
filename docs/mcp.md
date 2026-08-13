@@ -36,11 +36,12 @@ Tools:
   metrics, focus outcomes, and analyses.
 - `get_agenda` — scheduled work for a date range.
 - `get_day` — one day's tasks, metrics, sessions, and analysis.
-- `get_metric_trend` — dated values for weight, calories, solved problems, or a
+- `get_metric_trend` — dated values for weight, calories, expenses, solved
+  problems, CP Hours, or a
   custom metric.
 - `get_daily_dashboard` — the complete Daily state for one date: every
-  editable field, current metric inputs (including weight, calories, and solved
-  problems), every habit result, current and maximum streaks, total wins/losses,
+  editable field, current metric inputs (Weight, Calories, Expenses, Solved
+  Problems, and CP Hours), every habit result, current and maximum streaks, total wins/losses,
   month/lifetime Deltas, Stage, monthly history, weight progress/ETA, and the
   prompts used by `analyze_day`, plus the immutable Initial-vs-Final plan data.
 - `get_plan_diff` — token-efficient immutable Initial snapshots and the
@@ -52,7 +53,8 @@ Tools:
   progress, and ETA are derived and recalculate automatically. The server
   advertises the complete editable field list in `writeAccess.editableFields`.
 - `create_task` — create a dated Agenda task directly from an explicit prompt.
-  Supply an ISO date and concrete title. A half-hour start plus either an end
+  Supply an ISO date and concrete title; optional description, MVP, and
+  subtasks are preserved and returned by task reads. A half-hour start plus either an end
   or cycle count is optional: without a start, the task remains unscheduled in
   Agenda and appears automatically in that date's Today view. MCP quick tasks
   do not require an MVP or three subtasks. Any
@@ -72,7 +74,8 @@ labelled `default-not-saved` baseline. That fallback does not initialize the
 block or unlock work.
 
 `analyze_day` must call `get_daily_dashboard` before asking cause questions. Its
-preflight always shows or asks for Weight, Calories, and Solved problems, then
+preflight always shows or asks for Weight, Calories, Expenses, Solved Problems,
+and CP Hours, then
 reviews every returned habit—including hidden imported habits—with its result,
 streaks, Deltas, Stage, Wins, and Losses. If a task's MCP inventory does not
 expose the full dashboard or write tool, the local Keychain-backed proxy above

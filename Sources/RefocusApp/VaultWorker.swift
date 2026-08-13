@@ -95,7 +95,7 @@ actor VaultWorker {
 
     func loadDailyMetricHistory() throws -> [DailyFieldValue] {
         try store.allFieldValues().filter {
-            ["weight", "calories", "solved-problems"].contains($0.definitionID) && !$0.value.isEmpty
+            ["weight", "calories", "expenses", "solved-problems", "cp-hours"].contains($0.definitionID) && !$0.value.isEmpty
         }
     }
 

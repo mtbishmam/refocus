@@ -434,6 +434,40 @@ do {
         try expect(normalIssues.contains(.missingMVP(task: normal.title)), "Normal task MVP rule was accidentally relaxed")
         try expect(normalIssues.contains(.tooFewSubtasks(task: normal.title)), "Normal task subtask rule was accidentally relaxed")
     }
+    try check("Historical tasks may omit MVP and subtasks while active tasks remain strict") {
+        let validator = PlanValidator()
+        let profile = RoutineProfileResolver(calendar: calendar).profile(for: try date("2026-08-13", format: "yyyy-MM-dd"))
+        let ended = PlanTask(title: "Earlier task", startMinute: 360, cycles: 1)
+        let active = PlanTask(title: "Active task", startMinute: 600, cycles: 1)
+        let now = try date("2026-08-13 09:00:00")
+        let pastIssues = validator.validate(
+            tasks: [ended], profile: profile, minimumCycles: 0, requireFixedTasks: false,
+            scheduledDate: now, now: now, calendar: calendar
+        )
+        let activeIssues = validator.validate(
+            tasks: [active], profile: profile, minimumCycles: 0, requireFixedTasks: false,
+            scheduledDate: now, now: now, calendar: calendar
+        )
+        try expect(!pastIssues.contains(.missingMVP(task: ended.title)), "Ended task still required an MVP")
+        try expect(!pastIssues.contains(.tooFewSubtasks(task: ended.title)), "Ended task still required subtasks")
+        try expect(activeIssues.contains(.missingMVP(task: active.title)), "Active task MVP rule was relaxed")
+        try expect(activeIssues.contains(.tooFewSubtasks(task: active.title)), "Active task subtask rule was relaxed")
+    }
+    try check("Task descriptions round-trip through Codable and Markdown") {
+        let task = PlanTask(
+            title: "Document architecture", description: "Preserve context\nKeep it concise",
+            startMinute: 600, cycles: 1, mvp: "A decision exists",
+            coreTasks: [CoreTask(title: "Read"), CoreTask(title: "Write"), CoreTask(title: "Review")]
+        )
+        let data = try JSONEncoder().encode(task)
+        let decoded = try JSONDecoder().decode(PlanTask.self, from: data)
+        try expect(decoded.description == task.description, "Codable lost task description")
+        let markdown = MarkdownPlanCodec(calendar: calendar).renderManagedBlock(tasks: [task], profile: .standard)
+        let parsed = try MarkdownPlanCodec(calendar: calendar).parseToday(
+            "# Today - 2026-08-13\n\n\(markdown)", date: try date("2026-08-13", format: "yyyy-MM-dd")
+        )
+        try expect(parsed.tasks.first?.description == task.description, "Markdown round-trip lost task description")
+    }
     try check("Diff defaults do not initialize a block; explicit save captures the displayed plan") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-default-diff-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
@@ -913,8 +947,14 @@ do {
         try store.importLegacy(today: nil, tomorrow: nil, agenda: [], templates: [], streaks: [])
         try store.savePlan(date: planDate, tasks: [task], profile: .fridaySSC, segment: .evening)
         try store.setFieldValue(definitionID: "weight", value: "72.4", date: planDate)
+        try store.setFieldValue(definitionID: "expenses", value: "450", date: planDate)
+        try store.setFieldValue(definitionID: "cp-hours", value: "3.5", date: planDate)
         let values = try store.fieldValues(from: planDate, through: planDate)
         try expect(values.contains { $0.definitionID == "weight" && $0.value == "72.4" }, "Weight was not stored")
+        try expect(values.contains { $0.definitionID == "expenses" && $0.value == "450" }, "Expenses were not stored")
+        try expect(values.contains { $0.definitionID == "cp-hours" && $0.value == "3.5" }, "CP Hours were not stored")
+        let metricOrder = try store.fieldDefinitions().filter { ["weight", "calories", "expenses", "solved-problems", "cp-hours"].contains($0.id) }.map(\.id)
+        try expect(metricOrder == ["weight", "calories", "expenses", "solved-problems", "cp-hours"], "Daily metrics are not in the requested order")
         let markdown = CleanMarkdownExporter(calendar: calendar).renderAgenda(
             [AgendaTask(date: planDate, task: task)], asOf: planDate
         )

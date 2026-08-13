@@ -424,6 +424,7 @@ public struct CoreTask: Identifiable, Codable, Equatable, Sendable {
 public struct PlanTask: Identifiable, Codable, Equatable, Sendable {
     public var id: UUID
     public var title: String
+    public var description: String?
     public var startMinute: Int
     public var cycles: Int
     public var kind: TaskKind
@@ -451,6 +452,7 @@ public struct PlanTask: Identifiable, Codable, Equatable, Sendable {
     public init(
         id: UUID = UUID(),
         title: String,
+        description: String? = nil,
         startMinute: Int,
         cycles: Int,
         kind: TaskKind = .normal,
@@ -472,6 +474,7 @@ public struct PlanTask: Identifiable, Codable, Equatable, Sendable {
     ) {
         self.id = id
         self.title = title
+        self.description = description?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true ? nil : description
         self.startMinute = startMinute
         self.cycles = cycles
         self.kind = kind

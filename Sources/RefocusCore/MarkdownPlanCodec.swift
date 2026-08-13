@@ -73,6 +73,9 @@ public struct MarkdownPlanCodec: Sendable {
             if let fixedRole = task.fixedRole { metadata += " fixed=\(fixedRole.rawValue)" }
             if task.routineOverride { metadata += " routineOverride=true" }
             lines.append(metadata + " -->")
+            if let description = task.description?.trimmingCharacters(in: .whitespacesAndNewlines), !description.isEmpty {
+                lines.append("  - Description → \(description.replacingOccurrences(of: "\n", with: "\\n"))")
+            }
             lines.append("  - MVP → \(task.mvp)")
             if !task.coreTasks.isEmpty {
                 lines.append("  - Subtasks")
@@ -193,6 +196,12 @@ public struct MarkdownPlanCodec: Sendable {
             let kind = kindText == "sscContest" ? .contest : kindText.flatMap(TaskKind.init(rawValue:)) ?? .normal
             let fixedRole = values["fixed"].flatMap(FixedTaskRole.init(rawValue:))
             let routineOverride = values["routineOverride"] == "true"
+            let description = block.compactMap { line -> String? in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard trimmed.hasPrefix("- Description →") else { return nil }
+                return trimmed.replacingOccurrences(of: "- Description →", with: "")
+                    .trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "\\n", with: "\n")
+            }.first
             let mvp = block.compactMap { line -> String? in
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 guard trimmed.hasPrefix("- MVP →") else { return nil }
@@ -202,6 +211,7 @@ public struct MarkdownPlanCodec: Sendable {
             tasks.append(PlanTask(
                 id: id,
                 title: header.title,
+                description: description,
                 startMinute: start,
                 cycles: cycles,
                 kind: kind,

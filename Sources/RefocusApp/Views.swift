@@ -507,6 +507,7 @@ private struct TaskEditorRow: View {
 
     private let priorities = ["Do/Die", "High", "Medium", "Low"]
     private let difficulties = ["Hard", "Moderate", "Easy"]
+    @FocusState private var taskNameFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -536,6 +537,15 @@ private struct TaskEditorRow: View {
                     .textFieldStyle(.roundedBorder)
                     .font(.headline)
                     .disabled(task.fixedRole != nil)
+                    .focused($taskNameFocused)
+              }
+              editorField("Description · optional") {
+                TextField("Notes, context, or instructions", text: Binding(
+                    get: { task.description ?? "" },
+                    set: { task.description = $0.isEmpty ? nil : $0 }
+                ), axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(2...5)
               }
               HStack(alignment: .bottom, spacing: 14) {
                 editorField("Start") {
@@ -642,6 +652,18 @@ private struct TaskEditorRow: View {
             }
         }
         .padding(.vertical, 12)
+        .onAppear {
+            if model.requestedTaskNameFocusID == task.id {
+                taskNameFocused = true
+                model.requestedTaskNameFocusID = nil
+            }
+        }
+        .onChange(of: model.requestedTaskNameFocusID) { _, requested in
+            if requested == task.id {
+                taskNameFocused = true
+                model.requestedTaskNameFocusID = nil
+            }
+        }
     }
 
     private var durationRange: ClosedRange<Int> {
@@ -902,22 +924,23 @@ struct AgendaView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 10) {
                 VStack(alignment: .leading) {
-                    Text("Agenda").font(.largeTitle.bold())
+                    Text("Agenda").font(.title.bold())
                     Text("Work Overview")
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: true, vertical: false)
                 }
                 Spacer()
                 Picker("Range", selection: $range) {
                     ForEach(AgendaRange.allCases) { Text($0.rawValue).tag($0) }
-                }.pickerStyle(.segmented).frame(width: 260)
+                }.pickerStyle(.segmented).frame(width: 225)
                 Picker("Priority", selection: $priority) {
                     ForEach(AgendaPriority.allCases) { Text($0.rawValue).tag($0) }
                 }
                 .pickerStyle(.menu)
-                .frame(width: 145)
+                .frame(width: 125)
                 Toggle("Show completed", isOn: $showCompleted)
                     .toggleStyle(.checkbox)
                     .fixedSize(horizontal: true, vertical: false)
@@ -931,15 +954,17 @@ struct AgendaView: View {
                     )
                 }
             }
-            .padding()
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
 
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 18) {
+                LazyVStack(alignment: .leading, spacing: 10) {
                     ForEach(grouped, id: \.0) { date, items in
                         AgendaDaySection(date: date, items: items)
                     }
                 }
-                .padding()
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
             }
             if !model.agendaValidationIssues.isEmpty {
                 ScrollView(.horizontal) {
@@ -964,6 +989,7 @@ private struct ScheduledTaskSheet: View {
     @State private var task = PlanTask(
         title: "", startMinute: 540, cycles: 1, mvp: "", coreTasks: [], timeAssigned: false
     )
+    @FocusState private var titleFocused: Bool
 
     private var canSave: Bool {
         !task.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -974,10 +1000,12 @@ private struct ScheduledTaskSheet: View {
             Text("Add Task").font(.title2.bold())
             DatePicker(
                 "Date", selection: $date,
-                in: WallClock.dhakaCalendar().startOfDay(for: model.now)...,
                 displayedComponents: .date
             )
-            TextField("Task name", text: $task.title).textFieldStyle(.roundedBorder)
+            TextField("Task name", text: $task.title).textFieldStyle(.roundedBorder).focused($titleFocused)
+            TextField("Description · optional", text: Binding(
+                get: { task.description ?? "" }, set: { task.description = $0.isEmpty ? nil : $0 }
+            ), axis: .vertical).textFieldStyle(.roundedBorder).lineLimit(2...5)
             HStack {
                 Toggle("Assign a time now", isOn: Binding(
                     get: { task.hasScheduledTime },
@@ -999,6 +1027,7 @@ private struct ScheduledTaskSheet: View {
         }
         .padding(24)
         .frame(width: 720)
+        .onAppear { titleFocused = true }
     }
 }
 
@@ -1008,15 +1037,17 @@ private struct AgendaDaySection: View {
     let items: [AgendaTask]
 
     private var heading: String {
-        let calendar = WallClock.dhakaCalendar()
-        if calendar.isDateInToday(date) { return "Today · \(date.formatted(.dateTime.month(.abbreviated).day()))" }
-        if calendar.isDateInTomorrow(date) { return "Tomorrow · \(date.formatted(.dateTime.month(.abbreviated).day()))" }
-        return date.formatted(.dateTime.weekday(.wide).month(.abbreviated).day())
+        let formatter = DateFormatter()
+        formatter.calendar = WallClock.dhakaCalendar()
+        formatter.timeZone = formatter.calendar.timeZone
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "MMM d > EEEE"
+        return formatter.string(from: date)
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(heading).font(.title3.bold())
+        VStack(alignment: .leading, spacing: 4) {
+            Text(heading).font(.headline.bold())
             ForEach(items) { entry in
                 AgendaTaskRow(entry: entry)
             }
@@ -1100,8 +1131,8 @@ private struct AgendaTaskRow: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
                 Button {
                     if isLiveToday {
                         model.toggleTaskCompletion(entry.id)
@@ -1117,27 +1148,30 @@ private struct AgendaTaskRow: View {
                 Text(entry.task.hasScheduledTime
                     ? MarkdownPlanCodec.time(entry.task.startMinute) + "–" + MarkdownPlanCodec.time(entry.task.endMinute)
                     : "No time")
-                    .monospacedDigit().foregroundStyle(.secondary).frame(width: 112, alignment: .leading)
-                Text(entry.task.title).font(.headline)
+                    .font(.caption)
+                    .monospacedDigit().foregroundStyle(.secondary).frame(width: 92, alignment: .leading)
+                Text(entry.task.title).font(.subheadline.weight(.semibold))
                 Spacer()
                 if canReschedule {
                     Button("Reschedule") {
                         moveDate = defaultMoveDate
                         showingMove = true
                     }
+                    .font(.caption)
                     .buttonStyle(.borderless)
                 }
                 if canDelete {
                     Button("Delete", role: .destructive) {
                         deleteEntry()
                     }
+                    .font(.caption)
                     .buttonStyle(.borderless)
                 }
                 agendaTag(entry.task.priority, color: priorityColor)
                 agendaTag(entry.task.difficulty, color: difficultyColor)
                 Button { model.toggleCollapsed(entry.id) } label: {
                     Image(systemName: model.collapsedTaskIDs.contains(entry.id) ? "chevron.down" : "chevron.up")
-                        .frame(width: 56, height: 44)
+                        .frame(width: 38, height: 32)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -1147,6 +1181,16 @@ private struct AgendaTaskRow: View {
                 VStack(alignment: .leading, spacing: 8) {
                     TextField("Task name", text: taskBinding.title)
                         .textFieldStyle(.roundedBorder)
+                    TextField("Description · optional", text: Binding(
+                        get: { taskBinding.wrappedValue.description ?? "" },
+                        set: { value in
+                            var task = taskBinding.wrappedValue
+                            task.description = value.isEmpty ? nil : value
+                            taskBinding.wrappedValue = task
+                        }
+                    ), axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(2...5)
                     HStack(spacing: 14) {
                         Toggle("Assign time", isOn: hasTimeBinding).toggleStyle(.checkbox)
                         if taskBinding.wrappedValue.hasScheduledTime {
@@ -1210,11 +1254,12 @@ private struct AgendaTaskRow: View {
                             .buttonStyle(.borderless)
                         }
                     }
-                }.padding(.leading, 148)
+                }.padding(.leading, 122)
             }
         }
-        .padding(12)
-        .background(rowColor.opacity(entry.task.displayColor == nil ? 0.05 : 0.13), in: RoundedRectangle(cornerRadius: 10))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(rowColor.opacity(entry.task.displayColor == nil ? 0.05 : 0.13), in: RoundedRectangle(cornerRadius: 8))
         .sheet(isPresented: $showingMove) {
             VStack(alignment: .leading, spacing: 18) {
                 Text("Reschedule \(entry.task.title)").font(.title2.bold())
@@ -1282,7 +1327,7 @@ private struct AgendaTaskRow: View {
 
     private func agendaTag(_ text: String, color: Color) -> some View {
         Text(text).font(.caption2.bold()).foregroundStyle(color)
-            .padding(.horizontal, 7).padding(.vertical, 3)
+            .padding(.horizontal, 6).padding(.vertical, 2)
             .background(color.opacity(0.16), in: Capsule())
     }
 
@@ -1396,7 +1441,7 @@ struct StreaksView: View {
                     )
                 let inputs = model.dailyFieldDefinitions.filter { $0.kind != .triState && $0.id != "daily-summary" }
                 if !inputs.isEmpty {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 210), spacing: 10)], spacing: 10) {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 8)], spacing: 8) {
                         ForEach(inputs) { definition in
                             VStack(alignment: .leading, spacing: 6) {
                                 HStack(spacing: 4) {
@@ -1422,6 +1467,7 @@ struct StreaksView: View {
                 .dashboardSurface()
 
                 DailyMetricHistoryTable(values: model.dailyMetricHistory)
+                    .environmentObject(model)
 
                 SectionTitle(
                     title: "Detailed Tracking",
@@ -1437,52 +1483,40 @@ struct StreaksView: View {
 }
 
 private struct DailyMetricHistoryTable: View {
+    @EnvironmentObject private var model: AppModel
     let values: [DailyFieldValue]
-
-    private struct Row: Identifiable {
-        let date: String
-        let weight: String
-        let calories: String
-        let solved: String
-        var id: String { date }
-    }
-
-    private var rows: [Row] {
-        let grouped = Dictionary(grouping: values, by: \.date)
-        return grouped.keys.sorted(by: >).prefix(90).map { date in
-            let day = grouped[date, default: []]
-            return Row(
-                date: date,
-                weight: day.first(where: { $0.definitionID == "weight" })?.value ?? "—",
-                calories: day.first(where: { $0.definitionID == "calories" })?.value ?? "—",
-                solved: day.first(where: { $0.definitionID == "solved-problems" })?.value ?? "—"
-            )
-        }
-    }
+    private let metrics = [
+        ("weight", "Weight"), ("calories", "Calories"), ("expenses", "Expenses"),
+        ("solved-problems", "Solved"), ("cp-hours", "CP Hours")
+    ]
+    private var dates: [String] { Array(Set(values.map(\.date))).sorted(by: >).prefix(365).map { $0 } }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             SectionTitle(
-                title: "Daily History",
-                subtitle: "Previous weight, calorie, and solved-problem entries."
+                title: "Daily Metrics",
+                subtitle: "Edit past metrics here; dependent analytics update automatically."
             )
-            if rows.isEmpty {
+            if dates.isEmpty {
                 Text("No metric history yet.").font(.caption).foregroundStyle(.secondary)
             } else {
-                Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 7) {
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 7) {
                     GridRow {
                         header("Date")
-                        header("Weight")
-                        header("Calories")
-                        header("Solved")
+                        ForEach(metrics, id: \.0) { header($0.1) }
                     }
-                    Divider().gridCellColumns(4)
-                    ForEach(rows) { row in
+                    Divider().gridCellColumns(metrics.count + 1)
+                    ForEach(dates, id: \.self) { date in
                         GridRow {
-                            Text(row.date).monospacedDigit()
-                            Text(row.weight)
-                            Text(row.calories)
-                            Text(row.solved)
+                            Text(date).monospacedDigit()
+                            ForEach(metrics, id: \.0) { metric in
+                                TextField("—", text: Binding(
+                                    get: { values.first(where: { $0.date == date && $0.definitionID == metric.0 })?.value ?? "" },
+                                    set: { model.setHistoricalDailyField(definitionID: metric.0, dateText: date, value: $0) }
+                                ))
+                                .textFieldStyle(.roundedBorder)
+                                .frame(minWidth: 72)
+                            }
                         }
                         .font(.caption)
                     }

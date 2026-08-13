@@ -420,7 +420,10 @@ public struct PlanValidator: Sendable {
         minimumCycles: Int = 12,
         requireFixedTasks: Bool = true,
         requireTaskDetails: Bool = true,
-        countedSegment: PlanningSegment? = nil
+        countedSegment: PlanningSegment? = nil,
+        scheduledDate: Date? = nil,
+        now: Date = Date(),
+        calendar: Calendar = WallClock.dhakaCalendar()
     ) -> [PlanValidationIssue] {
         var issues: [PlanValidationIssue] = []
         var seenTaskIDs = Set<UUID>()
@@ -458,7 +461,16 @@ public struct PlanValidator: Sendable {
                 }
             }
 
-            if requireTaskDetails && !task.isRoutineBlock && task.quickCapture != true {
+            let historical: Bool = {
+                guard let scheduledDate else { return false }
+                let day = calendar.startOfDay(for: scheduledDate)
+                let today = calendar.startOfDay(for: now)
+                if day < today { return true }
+                guard day == today, task.hasScheduledTime else { return false }
+                let parts = calendar.dateComponents([.hour, .minute], from: now)
+                return task.endMinute <= (parts.hour ?? 0) * 60 + (parts.minute ?? 0)
+            }()
+            if requireTaskDetails && !historical && !task.isRoutineBlock && task.quickCapture != true {
                 if task.mvp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     issues.append(.missingMVP(task: displayTitle))
                 }
