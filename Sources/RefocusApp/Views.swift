@@ -245,6 +245,42 @@ private func taskVisible(
     return showUser
 }
 
+private func planningSegment(for task: PlanTask) -> PlanningSegment {
+    if task.startMinute < PlanningSegment.afternoon.startMinute { return .morning }
+    if task.startMinute < PlanningSegment.evening.startMinute { return .afternoon }
+    return .evening
+}
+
+private struct PlanningBlockHeader: View {
+    let segment: PlanningSegment
+    let taskCount: Int
+    var addTask: (() -> Void)?
+
+    private var title: String { segment == .evening ? "Night Block" : segment.title }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.headline)
+                Text("\(MarkdownPlanCodec.time(segment.startMinute))–\(MarkdownPlanCodec.time(segment.endMinute)) · \(taskCount) \(taskCount == 1 ? "task" : "tasks")")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            Spacer()
+            if let addTask {
+                Button(action: addTask) {
+                    Label("Add Task", systemImage: "plus")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 4)
+        .padding(.top, 5)
+    }
+}
+
 private struct TaskVisibilityMenu: View {
     @Binding var showUser: Bool
     @Binding var showPredefined: Bool
@@ -355,25 +391,28 @@ struct PlanEditorView: View {
                         }
                     } else {
                         LazyVStack(spacing: 12) {
-                            ForEach(Array(model.tasks.enumerated()).filter {
-                                taskVisible($0.element, showUser: showUserTasks, showPredefined: showPredefinedBlocks, showFixed: showFixedBlocks)
-                            }, id: \.element.id) { index, task in
-                                TaskEditorRow(task: $model.tasks[index], cyclesChanged: {
-                                    model.normalizeCoreTasks(for: task.id)
-                                }, delete: {
-                                    model.removeTask(id: task.id)
-                                }, addSubtask: {
-                                    model.addSubtask(to: task.id)
-                                }, removeSubtask: { subtaskID in
-                                    model.removeSubtask(taskID: task.id, subtaskID: subtaskID)
-                                }, saveTemplate: {
-                                    model.saveTaskAsTemplate(task)
-                                })
-                                .id(task.id)
-                                .onChange(of: task) { model.markPlanDirty() }
-                                .padding(.horizontal, 16)
-                                .background((task.displayColor ?? .none).swiftUIColor.opacity(task.displayColor == nil ? 0.055 : 0.13), in: RoundedRectangle(cornerRadius: 14))
-                                .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.09)))
+                            ForEach(PlanningSegment.allCases, id: \.self) { segment in
+                                let segmentTasks = visibleTasks.filter { planningSegment(for: $0) == segment }
+                                PlanningBlockHeader(segment: segment, taskCount: segmentTasks.count) {
+                                    model.addTask(in: segment)
+                                }
+                                ForEach(segmentTasks) { task in
+                                    TaskEditorRow(task: taskBinding(for: task), cyclesChanged: {
+                                        model.normalizeCoreTasks(for: task.id)
+                                    }, delete: {
+                                        model.removeTask(id: task.id)
+                                    }, addSubtask: {
+                                        model.addSubtask(to: task.id)
+                                    }, removeSubtask: { subtaskID in
+                                        model.removeSubtask(taskID: task.id, subtaskID: subtaskID)
+                                    }, saveTemplate: {
+                                        model.saveTaskAsTemplate(task)
+                                    })
+                                    .id(task.id)
+                                    .padding(.horizontal, 16)
+                                    .background((task.displayColor ?? .none).swiftUIColor.opacity(task.displayColor == nil ? 0.055 : 0.13), in: RoundedRectangle(cornerRadius: 14))
+                                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.09)))
+                                }
                             }
                         }
                         .padding()
@@ -418,6 +457,13 @@ struct PlanEditorView: View {
             .background(color.opacity(0.12), in: Capsule())
             .fixedSize()
     }
+
+    private func taskBinding(for task: PlanTask) -> Binding<PlanTask> {
+        Binding(
+            get: { model.tasks.first(where: { $0.id == task.id }) ?? task },
+            set: { model.updateTodayTask($0) }
+        )
+    }
 }
 
 struct TomorrowPlanView: View {
@@ -461,22 +507,28 @@ struct TomorrowPlanView: View {
 
             ScrollView {
                 LazyVStack(spacing: 12) {
-                    ForEach(Array(model.tomorrowTasks.enumerated()).filter {
-                        taskVisible($0.element, showUser: showUserTasks, showPredefined: showPredefinedBlocks, showFixed: showFixedBlocks)
-                    }, id: \.element.id) { index, task in
-                        TaskEditorRow(
-                            task: $model.tomorrowTasks[index],
-                            cyclesChanged: { model.normalizeTomorrowSubtasks(for: task.id) },
-                            delete: { model.removeTomorrowTask(id: task.id) },
-                            addSubtask: { model.addTomorrowSubtask(to: task.id) },
-                            removeSubtask: { model.removeTomorrowSubtask(taskID: task.id, subtaskID: $0) },
-                            saveTemplate: { model.saveTaskAsTemplate(task) }
-                        )
-                        .id(task.id)
-                        .onChange(of: task) { model.markTomorrowDirty() }
-                        .padding(.horizontal, 16)
-                        .background((task.displayColor ?? .none).swiftUIColor.opacity(task.displayColor == nil ? 0.055 : 0.13), in: RoundedRectangle(cornerRadius: 14))
-                        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.09)))
+                    let visibleTasks = model.tomorrowTasks.filter {
+                        taskVisible($0, showUser: showUserTasks, showPredefined: showPredefinedBlocks, showFixed: showFixedBlocks)
+                    }
+                    ForEach(PlanningSegment.allCases, id: \.self) { segment in
+                        let segmentTasks = visibleTasks.filter { planningSegment(for: $0) == segment }
+                        PlanningBlockHeader(segment: segment, taskCount: segmentTasks.count) {
+                            model.addTomorrowTask(in: segment)
+                        }
+                        ForEach(segmentTasks) { task in
+                            TaskEditorRow(
+                                task: taskBinding(for: task),
+                                cyclesChanged: { model.normalizeTomorrowSubtasks(for: task.id) },
+                                delete: { model.removeTomorrowTask(id: task.id) },
+                                addSubtask: { model.addTomorrowSubtask(to: task.id) },
+                                removeSubtask: { model.removeTomorrowSubtask(taskID: task.id, subtaskID: $0) },
+                                saveTemplate: { model.saveTaskAsTemplate(task) }
+                            )
+                            .id(task.id)
+                            .padding(.horizontal, 16)
+                            .background((task.displayColor ?? .none).swiftUIColor.opacity(task.displayColor == nil ? 0.055 : 0.13), in: RoundedRectangle(cornerRadius: 14))
+                            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.09)))
+                        }
                     }
                 }.padding()
             }
@@ -493,6 +545,13 @@ struct TomorrowPlanView: View {
                 }.frame(height: 38)
             }
         }
+    }
+
+    private func taskBinding(for task: PlanTask) -> Binding<PlanTask> {
+        Binding(
+            get: { model.tomorrowTasks.first(where: { $0.id == task.id }) ?? task },
+            set: { model.updateTomorrowTask($0) }
+        )
     }
 }
 
@@ -703,8 +762,12 @@ private struct SavedPlanView: View {
                         showFixedBlocks = true
                     }
                 } else {
-                    ForEach(visibleTasks) { task in
-                        SavedTaskCard(task: task, isCurrent: task.id == model.executionTask?.id)
+                    ForEach(PlanningSegment.allCases, id: \.self) { segment in
+                        let segmentTasks = visibleTasks.filter { planningSegment(for: $0) == segment }
+                        PlanningBlockHeader(segment: segment, taskCount: segmentTasks.count)
+                        ForEach(segmentTasks) { task in
+                            SavedTaskCard(task: task, isCurrent: task.id == model.executionTask?.id)
+                        }
                     }
                 }
             }
@@ -728,7 +791,9 @@ private struct SavedTaskCard: View {
                     Image(systemName: task.isComplete ? "checkmark.circle.fill" : "circle")
                         .foregroundStyle(task.isComplete ? .green : .secondary)
                 }.buttonStyle(.plain)
-                Text(MarkdownPlanCodec.time(task.startMinute) + "–" + MarkdownPlanCodec.time(task.endMinute))
+                Text(task.hasScheduledTime
+                    ? MarkdownPlanCodec.time(task.startMinute) + "–" + MarkdownPlanCodec.time(task.endMinute)
+                    : "No time")
                     .monospacedDigit().foregroundStyle(.secondary).frame(width: 112, alignment: .leading)
                 Text(task.title).font(.headline)
                 tag(task.priority, color: priorityColor)
@@ -743,8 +808,7 @@ private struct SavedTaskCard: View {
                 }
                 if task.fixedRole == nil {
                     Button("Delete", role: .destructive) {
-                        model.removeTask(id: task.id)
-                        model.scheduleAgendaTodayAutosave()
+                        model.removeTask(id: task.id, autosave: true)
                     }
                     .buttonStyle(.borderless)
                 }
@@ -1081,14 +1145,10 @@ private struct AgendaTaskRow: View {
                 return model.agendaTasks.first(where: { $0.id == entry.id })?.task ?? entry.task
             },
             set: { updated in
-                if isLiveToday, let index = model.tasks.firstIndex(where: { $0.id == entry.id }) {
-                    model.tasks[index] = updated
-                    model.markPlanDirty()
-                    model.scheduleAgendaTodayAutosave()
-                } else if isLiveTomorrow, let index = model.tomorrowTasks.firstIndex(where: { $0.id == entry.id }) {
-                    model.tomorrowTasks[index] = updated
-                    model.markTomorrowDirty()
-                    model.scheduleAgendaTomorrowAutosave()
+                if isLiveToday {
+                    model.updateTodayTask(updated, autosave: true)
+                } else if isLiveTomorrow {
+                    model.updateTomorrowTask(updated, autosave: true)
                 } else {
                     model.updateAgendaTask(updated)
                 }
@@ -1306,11 +1366,9 @@ private struct AgendaTaskRow: View {
 
     private func deleteEntry() {
         if isLiveToday {
-            model.removeTask(id: entry.id)
-            model.scheduleAgendaTodayAutosave()
+            model.removeTask(id: entry.id, autosave: true)
         } else if isLiveTomorrow {
-            model.removeTomorrowTask(id: entry.id)
-            model.scheduleAgendaTomorrowAutosave()
+            model.removeTomorrowTask(id: entry.id, autosave: true)
         } else if isScheduledAgenda {
             model.deleteAgendaTask(entry.id)
         }
@@ -2110,23 +2168,31 @@ private struct TodayPlanPanel: View {
                     Text("Work is locked. Complete and save a valid \(model.requiredCycleMinimum)-cycle Today plan first.")
                         .foregroundStyle(.secondary)
                 } else if isEditing {
-                    ForEach(Array(model.tasks.enumerated()), id: \.element.id) { index, task in
-                        TaskEditorRow(
-                            task: $model.tasks[index],
-                            cyclesChanged: { model.normalizeCoreTasks(for: task.id) },
-                            delete: { model.removeTask(id: task.id) },
-                            addSubtask: { model.addSubtask(to: task.id) },
-                            removeSubtask: { model.removeSubtask(taskID: task.id, subtaskID: $0) },
-                            saveTemplate: { model.saveTaskAsTemplate(task) }
-                        )
-                        .id(task.id)
-                        .onChange(of: task) { model.markPlanDirty() }
-                        .padding(.horizontal, 14)
-                        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 12))
+                    ForEach(PlanningSegment.allCases, id: \.self) { segment in
+                        let segmentTasks = model.tasks.filter { planningSegment(for: $0) == segment }
+                        PlanningBlockHeader(segment: segment, taskCount: segmentTasks.count) {
+                            model.addTask(in: segment)
+                        }
+                        ForEach(segmentTasks) { task in
+                            TaskEditorRow(
+                                task: taskBinding(for: task),
+                                cyclesChanged: { model.normalizeCoreTasks(for: task.id) },
+                                delete: { model.removeTask(id: task.id) },
+                                addSubtask: { model.addSubtask(to: task.id) },
+                                removeSubtask: { model.removeSubtask(taskID: task.id, subtaskID: $0) },
+                                saveTemplate: { model.saveTaskAsTemplate(task) }
+                            )
+                            .id(task.id)
+                            .padding(.horizontal, 14)
+                            .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 12))
+                        }
                     }
                 } else {
-                    ForEach(model.executionTasks) { task in
-                        VStack(alignment: .leading, spacing: 8) {
+                    ForEach(PlanningSegment.allCases, id: \.self) { segment in
+                        let segmentTasks = model.executionTasks.filter { planningSegment(for: $0) == segment }
+                        PlanningBlockHeader(segment: segment, taskCount: segmentTasks.count)
+                        ForEach(segmentTasks) { task in
+                            VStack(alignment: .leading, spacing: 8) {
                             HStack(alignment: .center) {
                                 Button { model.toggleTaskCompletion(task.id) } label: {
                                     Image(systemName: task.isComplete ? "checkmark.circle.fill" : "circle")
@@ -2158,8 +2224,9 @@ private struct TodayPlanPanel: View {
                                 }
                             }
                         }
-                        .padding()
-                        .background(task.id == model.executionTask?.id ? Color.orange.opacity(0.2) : Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
+                            .padding()
+                            .background(task.id == model.executionTask?.id ? Color.orange.opacity(0.2) : Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
+                        }
                     }
                 }
             }
@@ -2169,5 +2236,12 @@ private struct TodayPlanPanel: View {
         .onChange(of: model.planIsDirty) { _, dirty in
             if !dirty { isEditing = false }
         }
+    }
+
+    private func taskBinding(for task: PlanTask) -> Binding<PlanTask> {
+        Binding(
+            get: { model.tasks.first(where: { $0.id == task.id }) ?? task },
+            set: { model.updateTodayTask($0) }
+        )
     }
 }

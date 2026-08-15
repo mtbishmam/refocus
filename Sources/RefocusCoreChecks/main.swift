@@ -384,6 +384,61 @@ do {
             "Add Task placed work inside Rest"
         )
     }
+    try check("Block Add Task placement chooses the earliest unused slot in every block") {
+        let validator = PlanValidator()
+        let tasks = [
+            PlanTask(title: "Morning start", startMinute: 360, cycles: 1),
+            PlanTask(title: "Afternoon start", startMinute: 720, cycles: 2),
+            PlanTask(title: "Night start", startMinute: 1080, cycles: 1),
+            PlanTask(
+                title: "Rest", startMinute: 1020, cycles: 2,
+                routineBlock: true, predefinedKind: .rest
+            ),
+        ]
+        try expect(
+            validator.firstUnusedSlot(in: tasks, startingAt: 360, before: 720) == 390,
+            "Morning Add Task did not select the first free half-hour"
+        )
+        try expect(
+            validator.firstUnusedSlot(in: tasks, startingAt: 720, before: 1080) == 780,
+            "Afternoon Add Task did not select the first free half-hour"
+        )
+        try expect(
+            validator.firstUnusedSlot(in: tasks, startingAt: 1080, before: 1290) == 1110,
+            "Night Add Task did not select the first free half-hour"
+        )
+        try expect(
+            validator.firstUnusedSlot(
+                in: [PlanTask(title: "Untimed", startMinute: 690, cycles: 1, timeAssigned: false)],
+                startingAt: 360,
+                before: 720
+            ) == 360,
+            "An untimed task incorrectly occupied a physical planning slot"
+        )
+    }
+    try check("Global quick tasks may remain untimed while ordinary Today tasks may not") {
+        let profile = RoutineProfileResolver(calendar: calendar).profile(for: try date("2026-08-10", format: "yyyy-MM-dd"))
+        let quick = PlanTask(
+            title: "Capture for later", startMinute: 360, cycles: 1,
+            quickCapture: true, timeAssigned: false
+        )
+        let ordinary = PlanTask(
+            title: "Ordinary untimed task", startMinute: 360, cycles: 1,
+            mvp: "Finish it",
+            coreTasks: [CoreTask(title: "One"), CoreTask(title: "Two"), CoreTask(title: "Three")],
+            timeAssigned: false
+        )
+        let quickIssues = PlanValidator().validate(
+            tasks: [quick], profile: profile, minimumCycles: 0,
+            requireFixedTasks: false, requireTaskDetails: true
+        )
+        let ordinaryIssues = PlanValidator().validate(
+            tasks: [ordinary], profile: profile, minimumCycles: 0,
+            requireFixedTasks: false, requireTaskDetails: true
+        )
+        try expect(!quickIssues.contains { if case .missingTime = $0 { return true }; return false }, "Global quick task incorrectly required a time")
+        try expect(ordinaryIssues.contains { if case .missingTime = $0 { return true }; return false }, "Ordinary Today task unexpectedly bypassed its time requirement")
+    }
     try check("Live Sunday planning state uses the current morning window") {
         let sundayEarly = try date("2026-08-09 04:35:00")
         let profile = RoutineProfileResolver(calendar: calendar).profile(for: sundayEarly)

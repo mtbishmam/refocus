@@ -47,6 +47,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var initialSegments: Set<PlanningSegment> = []
     @Published var collapsedTaskIDs: Set<UUID> = []
     @Published var requestedTaskNameFocusID: UUID?
+    @Published private(set) var taskUndoRevision = 0
     @Published var showCompletedSubtasks = false
     @Published var quickNote = ""
     @Published var isSavingQuickNote = false
@@ -81,6 +82,11 @@ final class AppModel: ObservableObject {
     private var knownTaskIDs: Set<UUID> = []
     private var userRequestedEditing = false
     private var accessedSecurityScopedResource = false
+    private let taskUndoManager: UndoManager = {
+        let manager = UndoManager()
+        manager.levelsOfUndo = 100
+        return manager
+    }()
     private lazy var overlayController = BreakOverlayController()
 
     init() {
@@ -110,6 +116,21 @@ final class AppModel: ObservableObject {
 
     var tomorrowDate: Date {
         WallClock.dhakaCalendar().date(byAdding: .day, value: 1, to: WallClock.dhakaCalendar().startOfDay(for: now)) ?? now
+    }
+
+    var canUndoTaskChange: Bool { taskUndoManager.canUndo }
+    var canRedoTaskChange: Bool { taskUndoManager.canRedo }
+
+    func undoTaskChange() {
+        guard taskUndoManager.canUndo else { return }
+        taskUndoManager.undo()
+        taskUndoRevision &+= 1
+    }
+
+    func redoTaskChange() {
+        guard taskUndoManager.canRedo else { return }
+        taskUndoManager.redo()
+        taskUndoRevision &+= 1
     }
 
     var executionTask: PlanTask? {
@@ -242,6 +263,10 @@ final class AppModel: ObservableObject {
         if planIsDirty && !force && !preservingLocalEdits {
             planMessage = "External changes detected — reload or save to resolve."
             return
+        }
+        if !preservingLocalEdits {
+            taskUndoManager.removeAllActions()
+            taskUndoRevision &+= 1
         }
         let localToday = tasks
         let localTodayBaseline = baselineTasks
@@ -403,14 +428,29 @@ final class AppModel: ObservableObject {
     }
 
     func addTomorrowTask() {
-        guard let nextStart = validator.firstUnusedSlot(in: tomorrowTasks, startingAt: 330, before: 1290) else {
-            errorMessage = "No unused half-hour slot remains in Tomorrow before 21:30."
-            return
+        addTomorrowTask(in: nil)
+    }
+
+    func addTomorrowTask(in segment: PlanningSegment?) {
+        let nextStart: Int
+        if let segment {
+            guard let slot = validator.firstUnusedSlot(
+                in: tomorrowTasks, startingAt: segment.startMinute, before: segment.endMinute
+            ) else {
+                errorMessage = "No unused half-hour slot remains in the \(displayName(for: segment))."
+                return
+            }
+            nextStart = slot
+        } else {
+            nextStart = PlanningSegment.morning.startMinute
         }
         let task = PlanTask(
             title: "New task", startMinute: nextStart, cycles: 1, mvp: "",
-            coreTasks: [CoreTask(title: ""), CoreTask(title: ""), CoreTask(title: "")]
+            coreTasks: segment == nil ? [] : [CoreTask(title: ""), CoreTask(title: ""), CoreTask(title: "")],
+            quickCapture: segment == nil,
+            timeAssigned: segment != nil
         )
+        registerTaskUndo(actionName: "Add Task", persistence: .none)
         tomorrowTasks.append(task)
         registerNewTask(task.id)
         markTomorrowDirty()
@@ -437,6 +477,7 @@ final class AppModel: ObservableObject {
 
     func addTemplateToToday(_ template: PlanTask) {
         let task = freshCopy(of: template)
+        registerTaskUndo(actionName: "Add Task", persistence: .none)
         tasks.append(task)
         registerNewTask(task.id)
         markPlanDirty()
@@ -444,18 +485,23 @@ final class AppModel: ObservableObject {
 
     func addTemplateToTomorrow(_ template: PlanTask) {
         let task = freshCopy(of: template)
+        registerTaskUndo(actionName: "Add Task", persistence: .none)
         tomorrowTasks.append(task)
         registerNewTask(task.id)
         markTomorrowDirty()
     }
 
-    func removeTomorrowTask(id: UUID) {
+    func removeTomorrowTask(id: UUID, autosave: Bool = false) {
+        guard tomorrowTasks.contains(where: { $0.id == id && $0.fixedRole == nil }) else { return }
+        registerTaskUndo(actionName: "Delete Task", persistence: autosave ? .tomorrowAgenda : .none)
         tomorrowTasks.removeAll { $0.id == id && $0.fixedRole == nil }
         markTomorrowDirty()
+        if autosave { scheduleAgendaTomorrowAutosave() }
     }
 
     func toggleTomorrowTaskCompletion(_ taskID: UUID) {
         guard let index = tomorrowTasks.firstIndex(where: { $0.id == taskID }) else { return }
+        registerTaskUndo(actionName: "Toggle Task Completion", persistence: .tomorrowAgenda)
         tomorrowTasks[index].isComplete.toggle()
         markTomorrowDirty()
         scheduleAgendaTomorrowAutosave()
@@ -469,6 +515,7 @@ final class AppModel: ObservableObject {
 
     func addTomorrowSubtask(to id: UUID) {
         guard let index = tomorrowTasks.firstIndex(where: { $0.id == id }) else { return }
+        registerTaskUndo(actionName: "Add Subtask", persistence: .none)
         tomorrowTasks[index].coreTasks.append(CoreTask(title: ""))
         markTomorrowDirty()
     }
@@ -477,6 +524,7 @@ final class AppModel: ObservableObject {
         guard let index = tomorrowTasks.firstIndex(where: { $0.id == taskID }) else { return }
         let minimum = tomorrowTasks[index].quickCapture == true ? 0 : 3
         guard tomorrowTasks[index].coreTasks.count > minimum else { return }
+        registerTaskUndo(actionName: "Delete Subtask", persistence: .none)
         tomorrowTasks[index].coreTasks.removeAll { $0.id == subtaskID }
         markTomorrowDirty()
     }
@@ -529,30 +577,70 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func updateTodayTask(_ updated: PlanTask, autosave: Bool = false) {
+        guard let index = tasks.firstIndex(where: { $0.id == updated.id }), tasks[index] != updated else { return }
+        registerTaskUndo(actionName: "Edit Task", persistence: autosave ? .todayAgenda : .none)
+        tasks[index] = updated
+        markPlanDirty()
+        if autosave { scheduleAgendaTodayAutosave() }
+    }
+
+    func updateTomorrowTask(_ updated: PlanTask, autosave: Bool = false) {
+        guard let index = tomorrowTasks.firstIndex(where: { $0.id == updated.id }), tomorrowTasks[index] != updated else { return }
+        registerTaskUndo(actionName: "Edit Task", persistence: autosave ? .tomorrowAgenda : .none)
+        tomorrowTasks[index] = updated
+        markTomorrowDirty()
+        if autosave { scheduleAgendaTomorrowAutosave() }
+    }
+
     func addTask() {
+        addTask(in: nil)
+    }
+
+    func addTask(in segment: PlanningSegment?) {
         userRequestedEditing = true
         isEditingPlan = true
-        guard let nextStart = validator.firstUnusedSlot(in: tasks, startingAt: 330, before: 1290) else {
-            errorMessage = "No unused half-hour slot remains Today before 21:30."
-            return
+        let nextStart: Int
+        if let segment {
+            guard let slot = validator.firstUnusedSlot(
+                in: tasks, startingAt: segment.startMinute, before: segment.endMinute
+            ) else {
+                errorMessage = "No unused half-hour slot remains in the \(displayName(for: segment))."
+                return
+            }
+            nextStart = slot
+        } else {
+            nextStart = PlanningSegment.morning.startMinute
         }
         let task = PlanTask(
             title: "New task", startMinute: nextStart, cycles: 1, mvp: "",
-            coreTasks: [CoreTask(title: ""), CoreTask(title: ""), CoreTask(title: "")]
+            coreTasks: segment == nil ? [] : [CoreTask(title: ""), CoreTask(title: ""), CoreTask(title: "")],
+            quickCapture: segment == nil,
+            timeAssigned: segment != nil
         )
+        registerTaskUndo(actionName: "Add Task", persistence: .none)
         tasks.append(task)
         registerNewTask(task.id)
         markPlanDirty()
     }
 
+    func displayName(for segment: PlanningSegment) -> String {
+        segment == .evening ? "Night Block" : segment.title
+    }
+
     func removeTasks(at offsets: IndexSet) {
+        guard !offsets.isEmpty else { return }
+        registerTaskUndo(actionName: "Delete Task", persistence: .none)
         tasks.remove(atOffsets: offsets)
         markPlanDirty()
     }
 
-    func removeTask(id: UUID) {
+    func removeTask(id: UUID, autosave: Bool = false) {
+        guard tasks.contains(where: { $0.id == id && $0.fixedRole == nil }) else { return }
+        registerTaskUndo(actionName: "Delete Task", persistence: autosave ? .todayAgenda : .none)
         tasks.removeAll { $0.id == id && $0.fixedRole == nil }
         markPlanDirty()
+        if autosave { scheduleAgendaTodayAutosave() }
     }
 
     func beginEditingPlan() {
@@ -625,6 +713,7 @@ final class AppModel: ObservableObject {
 
     func addSubtask(to taskID: UUID) {
         guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { return }
+        registerTaskUndo(actionName: "Add Subtask", persistence: .none)
         tasks[index].coreTasks.append(CoreTask(title: ""))
         markPlanDirty()
     }
@@ -633,6 +722,7 @@ final class AppModel: ObservableObject {
         guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { return }
         let minimum = tasks[index].quickCapture == true ? 0 : 3
         guard tasks[index].coreTasks.count > minimum else { return }
+        registerTaskUndo(actionName: "Delete Subtask", persistence: .none)
         tasks[index].coreTasks.removeAll { $0.id == subtaskID }
         markPlanDirty()
     }
@@ -669,6 +759,7 @@ final class AppModel: ObservableObject {
 
     func toggleTaskCompletion(_ taskID: UUID) {
         guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { return }
+        registerTaskUndo(actionName: "Toggle Task Completion", persistence: .todayPlan)
         tasks[index].isComplete.toggle()
         markPlanDirty()
         savePlan()
@@ -677,6 +768,7 @@ final class AppModel: ObservableObject {
     func toggleSubtaskCompletion(taskID: UUID, subtaskID: UUID) {
         guard let taskIndex = tasks.firstIndex(where: { $0.id == taskID }),
               let subtaskIndex = tasks[taskIndex].coreTasks.firstIndex(where: { $0.id == subtaskID }) else { return }
+        registerTaskUndo(actionName: "Toggle Subtask Completion", persistence: .todayPlan)
         tasks[taskIndex].coreTasks[subtaskIndex].isComplete.toggle()
         markPlanDirty()
         savePlan()
@@ -819,6 +911,7 @@ final class AppModel: ObservableObject {
             scheduledTask.routineOverride = true
             entry.task = scheduledTask
         }
+        registerTaskUndo(actionName: "Add Task", persistence: .agenda)
         agendaTasks = (agendaTasks + [entry]).sorted(by: agendaSort)
         registerNewTask(entry.id)
         Task { [weak self] in
@@ -830,6 +923,7 @@ final class AppModel: ObservableObject {
 
     func toggleAgendaTaskCompletion(_ taskID: UUID) {
         guard let worker, let index = agendaTasks.firstIndex(where: { $0.id == taskID }) else { return }
+        registerTaskUndo(actionName: "Toggle Task Completion", persistence: .agenda)
         agendaTasks[index].task.isComplete.toggle()
         Task { [weak self] in
             guard let self else { return }
@@ -839,7 +933,8 @@ final class AppModel: ObservableObject {
     }
 
     func updateAgendaTask(_ updated: PlanTask) {
-        guard let index = agendaTasks.firstIndex(where: { $0.id == updated.id }) else { return }
+        guard let index = agendaTasks.firstIndex(where: { $0.id == updated.id }), agendaTasks[index].task != updated else { return }
+        registerTaskUndo(actionName: "Edit Task", persistence: .agenda)
         agendaTasks[index].task = updated
         agendaTasks.sort(by: agendaSort)
         agendaSaveTask?.cancel()
@@ -853,6 +948,7 @@ final class AppModel: ObservableObject {
 
     func deleteAgendaTask(_ taskID: UUID) {
         guard let worker, agendaTasks.contains(where: { $0.id == taskID }) else { return }
+        registerTaskUndo(actionName: "Delete Task", persistence: .agenda)
         agendaTasks.removeAll { $0.id == taskID }
         Task { [weak self] in
             do { try await worker.deleteTask(taskID) }
@@ -1196,6 +1292,91 @@ final class AppModel: ObservableObject {
                 tasks[index].startMinute = cursor
             }
             cursor = tasks[index].endMinute
+        }
+    }
+
+    private enum TaskUndoPersistence {
+        case none
+        case todayPlan
+        case todayAgenda
+        case tomorrowAgenda
+        case agenda
+    }
+
+    private struct TaskUndoSnapshot {
+        var today: [PlanTask]
+        var tomorrow: [PlanTask]
+        var agenda: [AgendaTask]
+        var collapsed: Set<UUID>
+    }
+
+    private func currentTaskUndoSnapshot() -> TaskUndoSnapshot {
+        TaskUndoSnapshot(
+            today: tasks,
+            tomorrow: tomorrowTasks,
+            agenda: agendaTasks,
+            collapsed: collapsedTaskIDs
+        )
+    }
+
+    private func registerTaskUndo(actionName: String, persistence: TaskUndoPersistence) {
+        let snapshot = currentTaskUndoSnapshot()
+        taskUndoManager.registerUndo(withTarget: self) { target in
+            target.restoreTaskUndoSnapshot(snapshot, actionName: actionName, persistence: persistence)
+        }
+        taskUndoManager.setActionName(actionName)
+        taskUndoRevision &+= 1
+    }
+
+    private func restoreTaskUndoSnapshot(
+        _ snapshot: TaskUndoSnapshot,
+        actionName: String,
+        persistence: TaskUndoPersistence
+    ) {
+        let outgoing = currentTaskUndoSnapshot()
+        taskUndoManager.registerUndo(withTarget: self) { target in
+            target.restoreTaskUndoSnapshot(outgoing, actionName: actionName, persistence: persistence)
+        }
+        taskUndoManager.setActionName(actionName)
+
+        tasks = snapshot.today
+        tomorrowTasks = snapshot.tomorrow
+        agendaTasks = snapshot.agenda
+        collapsedTaskIDs = snapshot.collapsed
+        requestedTaskNameFocusID = nil
+        markPlanDirty()
+        markTomorrowDirty()
+        taskUndoRevision &+= 1
+
+        switch persistence {
+        case .none:
+            break
+        case .todayPlan:
+            savePlan()
+        case .todayAgenda:
+            scheduleAgendaTodayAutosave()
+        case .tomorrowAgenda:
+            scheduleAgendaTomorrowAutosave()
+        case .agenda:
+            persistAgendaTransition(from: outgoing.agenda, to: snapshot.agenda)
+        }
+    }
+
+    private func persistAgendaTransition(from oldEntries: [AgendaTask], to newEntries: [AgendaTask]) {
+        guard let worker else { return }
+        let oldIDs = Set(oldEntries.map(\.id))
+        let newIDs = Set(newEntries.map(\.id))
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                for deletedID in oldIDs.subtracting(newIDs) {
+                    try await worker.deleteTask(deletedID)
+                }
+                try await worker.saveAgenda(newEntries)
+            } catch {
+                self.errorMessage = "Could not persist undone Agenda change: \(error.localizedDescription)"
+                self.reloadVault(force: true)
+            }
         }
     }
 

@@ -482,7 +482,7 @@ public struct PlanValidator: Sendable {
                     issues.append(.emptyCoreTask(task: displayTitle))
                 }
             }
-            if requireTaskDetails && !task.hasScheduledTime {
+            if requireTaskDetails && !task.hasScheduledTime && task.quickCapture != true {
                 issues.append(.missingTime(task: displayTitle))
             }
             guard task.hasScheduledTime else { continue }

@@ -21,6 +21,14 @@ struct ReFocusApplication: App {
         }
         .menuBarExtraStyle(.window)
         .commands {
+            CommandGroup(replacing: .undoRedo) {
+                Button("Undo") { model.undoTaskChange() }
+                    .keyboardShortcut("z", modifiers: .command)
+                    .disabled(!model.canUndoTaskChange)
+                Button("Redo") { model.redoTaskChange() }
+                    .keyboardShortcut("z", modifiers: [.command, .shift])
+                    .disabled(!model.canRedoTaskChange)
+            }
             CommandGroup(replacing: .pasteboard) {
                 Button("Cut") { NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: nil) }
                     .keyboardShortcut("x")
