@@ -54,6 +54,7 @@ public final class RefocusStore: @unchecked Sendable {
         try migrateRenamedDefinitions()
         try migrateDailyFieldCatalog()
         try repairMissingDayPlans()
+        try migratePredefinedTaskMetadata()
     }
 
     deinit {
@@ -1056,6 +1057,25 @@ public final class RefocusStore: @unchecked Sendable {
         guard !missingDates.isEmpty else { return }
         try transaction {
             for date in missingDates { try ensureDayPlan(date: date) }
+        }
+    }
+
+    /// Repairs every active predefined row already in SQLite, not only the
+    /// current Today/Tomorrow dates. This keeps historical Daily views and D1
+    /// synchronization consistent after Description became distinct from MVP.
+    private func migratePredefinedTaskMetadata() throws {
+        var upgrades: [(Date, PlanTask)] = []
+        try query("SELECT scheduled_date, payload FROM tasks WHERE deleted = 0", []) { row in
+            guard let dateText = row.text(0), let date = parseDay(dateText), let payload = row.blob(1),
+                  let existing = try? decoder.decode(PlanTask.self, from: payload), existing.isRoutineBlock,
+                  let definition = PredefinedRoutineBlocks.daily(for: date, calendar: calendar).first(where: { $0.id == existing.id }),
+                  (existing.predefinedVersion ?? 0) < (definition.predefinedVersion ?? 0)
+            else { return }
+            upgrades.append((date, PredefinedRoutineBlocks.upgrade(existing, to: definition)))
+        }
+        guard !upgrades.isEmpty else { return }
+        try transaction {
+            for (date, task) in upgrades { try upsertTask(task, date: date) }
         }
     }
 

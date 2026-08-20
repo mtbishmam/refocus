@@ -246,7 +246,7 @@ do {
         let sundayMashup = sundayBlocks.first { $0.title == "5H Mashup" }
         try expect(saturdayMashup?.startMinute == 840 && saturdayMashup?.endMinute == 1140, "Saturday 14:00–19:00 mashup missing")
         try expect(saturdayMashup?.priority == "High" && saturdayMashup?.difficulty == "Hard" && saturdayMashup?.kind == .contest, "Saturday mashup metadata drifted")
-        try expect(saturdayMashup?.mvp == "Just start the contest" && saturdayMashup?.displayColor == .yellow, "Saturday mashup MVP or color drifted")
+        try expect(saturdayMashup?.mvp.isEmpty == true && saturdayMashup?.description == "Just start the contest" && saturdayMashup?.displayColor == .yellow, "Saturday mashup description, MVP, or color drifted")
         try expect(saturdayMashup?.coreTasks.first?.title == "2 - 2.5 -> Skim & Write approaches, tags", "Saturday mashup subtasks did not start at 2")
         try expect(saturdayMashup?.coreTasks.last?.title == "6 - 7 -> if 4 unsolved, then retry; else 5th", "Saturday mashup subtasks did not end at 7")
         try expect(sundayMashup?.coreTasks.first?.title == "6 - 6.5 -> Skim & Write approaches, tags", "Morning mashup subtasks did not start at 6")
@@ -263,15 +263,22 @@ do {
             try expect(!duplicateIssues.contains { if case .overlap = $0 { return true }; return false }, "Duplicate task identity created a self-overlap")
             try expect(!duplicateIssues.contains { if case .insufficientCycles = $0 { return true }; return false }, "Spanning mashup reported 0/8 Afternoon cycles")
         }
-        try expect(sundayBlocks.contains { $0.title == "CSE220L Class" && $0.mvp == "CSE220L-15-TBA-09B-09L" && $0.startMinute == 840 && $0.endMinute == 1020 }, "Sunday university lab missing")
-        try expect(sundayBlocks.filter { $0.predefinedKind == .university }.allSatisfy { $0.displayColor == .red && $0.predefinedVersion == 3 }, "Sunday university classes are not canonical red blocks")
-        if let university = sundayBlocks.first(where: { $0.title == "CSE220L Class" }) {
+        try expect(sundayBlocks.contains { $0.title == "CSE220 Lab" && $0.mvp.isEmpty && $0.description == "CSE220L-15-TBA-09B-09L" && $0.startMinute == 840 && $0.endMinute == 1020 }, "Sunday university lab missing")
+        try expect(sundayBlocks.filter { $0.predefinedKind == .university }.allSatisfy { $0.displayColor == .red && $0.predefinedVersion == 4 && $0.mvp.isEmpty }, "Sunday university classes are not canonical red blocks with empty MVPs")
+        if let university = sundayBlocks.first(where: { $0.title == "CSE220 Lab" }) {
             var staleUniversity = university
+            staleUniversity.title = "CSE220L Class"
+            staleUniversity.description = nil
+            staleUniversity.mvp = "CSE220L-15-TBA-09B-09L"
             staleUniversity.displayColor = .orange
-            staleUniversity.predefinedVersion = 2
+            staleUniversity.predefinedVersion = 3
             let upgraded = PredefinedRoutineBlocks.upgrade(staleUniversity, to: university)
-            try expect(upgraded.displayColor == .red && upgraded.predefinedVersion == 3, "Existing orange university class was not repaired")
+            try expect(upgraded.title == "CSE220 Lab" && upgraded.description == "CSE220L-15-TBA-09B-09L" && upgraded.mvp.isEmpty, "Existing university MVP was not migrated into Description")
+            try expect(upgraded.displayColor == .red && upgraded.predefinedVersion == 4, "Existing orange university class was not repaired")
         }
+        let tuesday = try date("2026-08-11", format: "yyyy-MM-dd")
+        let tuesdayBlocks = PredefinedRoutineBlocks.daily(for: tuesday, calendar: calendar)
+        try expect(tuesdayBlocks.contains { $0.title == "CSE111 Lab" && $0.startMinute == 840 && $0.endMinute == 1020 }, "Tuesday three-hour CSE111 Lab title missing")
         try expect(sundayBlocks.contains { $0.title == "Return Home / Transition" && $0.startMinute == 1020 && $0.endMinute == 1050 }, "Sunday return-home block missing")
         try expect(sundayBlocks.first { $0.title == "Rest" }?.countsTowardPlanning == false, "Rest counted toward the planning gate")
         try expect(Set(saturdayBlocks.map(\.id)).count == saturdayBlocks.count, "Routine IDs are not unique")
@@ -280,6 +287,33 @@ do {
                 == "1027c355-0f27-51c2-8e27-c02f0d27be9c",
             "Native routine IDs drifted from the web ID algorithm"
         )
+    }
+    try check("Stored predefined MVP descriptions migrate across every date") {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-predefined-description-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let databaseURL = temporary.appendingPathComponent("refocus.sqlite3")
+        let day = try date("2026-08-11", format: "yyyy-MM-dd")
+        let canonical = PredefinedRoutineBlocks.daily(for: day, calendar: calendar).first { $0.title == "CSE111 Lab" }
+        try expect(canonical != nil, "Canonical CSE111 Lab was unavailable for migration check")
+        if var stale = canonical {
+            stale.title = "CSE111 Class"
+            stale.description = nil
+            stale.mvp = "CSE111-08-KNI-09B-11L"
+            stale.predefinedVersion = 3
+            do {
+                let store = try RefocusStore(databaseURL: databaseURL, calendar: calendar)
+                try store.importLegacy(
+                    today: TodayPlan(date: day, profile: .universityLate, tasks: [stale]),
+                    tomorrow: nil, agenda: [], templates: [], streaks: []
+                )
+            }
+            let reopened = try RefocusStore(databaseURL: databaseURL, calendar: calendar)
+            let repaired = try reopened.tasks(on: day).first { $0.id == stale.id }
+            try expect(repaired?.title == "CSE111 Lab", "Stored three-hour CSE111 block did not migrate to Lab")
+            try expect(repaired?.description == "CSE111-08-KNI-09B-11L" && repaired?.mvp.isEmpty == true, "Stored predefined MVP was not moved into Description")
+            try expect(repaired?.predefinedVersion == 4, "Stored predefined version did not advance")
+        }
     }
     try check("Fixed evening blocks and flexible subtasks validate") {
         var tasks = FixedPlanTasks.daily()

@@ -997,12 +997,22 @@ struct AgendaView: View {
                         .fixedSize(horizontal: true, vertical: false)
                 }
                 Spacer()
+                Text("Range")
+                    .font(.subheadline)
+                    .fixedSize(horizontal: true, vertical: false)
                 Picker("Range", selection: $range) {
                     ForEach(AgendaRange.allCases) { Text($0.rawValue).tag($0) }
-                }.pickerStyle(.segmented).frame(width: 225)
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(width: 225)
+                Text("Priority")
+                    .font(.subheadline)
+                    .fixedSize(horizontal: true, vertical: false)
                 Picker("Priority", selection: $priority) {
                     ForEach(AgendaPriority.allCases) { Text($0.rawValue).tag($0) }
                 }
+                .labelsHidden()
                 .pickerStyle(.menu)
                 .frame(width: 125)
                 Toggle("Show completed", isOn: $showCompleted)

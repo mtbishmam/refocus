@@ -93,7 +93,7 @@ public enum PredefinedRoutineBlocks {
         let weekday = calendar.component(.weekday, from: date)
         var blocks = [block(
             date: date, key: "morning-routine", title: "Morning Routine",
-            start: 330, end: 360, mvp: "Audio Wakeup + Bath & Weight + Coffee & Water",
+            start: 330, end: 360, description: "Audio Wakeup + Bath & Weight + Coffee & Water",
             predefinedKind: .morningRoutine, calendar: calendar
         )]
 
@@ -110,10 +110,10 @@ public enum PredefinedRoutineBlocks {
             ]
         case 1: // Sunday
             blocks.append(mashup(date: date, key: "mashup-morning", start: 360, end: 660, calendar: calendar))
-            blocks += lateUniversity(date: date, finalTitle: "CSE220L Class", finalDetail: "CSE220L-15-TBA-09B-09L", calendar: calendar)
+            blocks += lateUniversity(date: date, finalTitle: "CSE220 Lab", finalDetail: "CSE220L-15-TBA-09B-09L", calendar: calendar)
         case 3: // Tuesday
             blocks.append(mashup(date: date, key: "mashup-morning", start: 360, end: 660, calendar: calendar))
-            blocks += lateUniversity(date: date, finalTitle: "CSE111 Class", finalDetail: "CSE111-08-KNI-09B-11L", calendar: calendar)
+            blocks += lateUniversity(date: date, finalTitle: "CSE111 Lab", finalDetail: "CSE111-08-KNI-09B-11L", calendar: calendar)
         default:
             blocks += standardWorkday(date: date, calendar: calendar)
         }
@@ -143,7 +143,7 @@ public enum PredefinedRoutineBlocks {
     private static func rest(date: Date, key: String, start: Int, end: Int, calendar: Calendar) -> PlanTask {
         block(
             date: date, key: key, title: "Rest", start: start, end: end,
-            mvp: "InstaS + Bath + Food + Coffee", displayColor: .green,
+            description: "InstaS + Bath + Food + Coffee", displayColor: .green,
             predefinedKind: .rest, calendar: calendar
         )
     }
@@ -159,12 +159,12 @@ public enum PredefinedRoutineBlocks {
         date: Date, key: String, title: String, detail: String, start: Int, end: Int, calendar: Calendar
     ) -> PlanTask {
         var task = block(
-            date: date, key: key, title: title, start: start, end: end, mvp: detail,
+            date: date, key: key, title: title, start: start, end: end, description: detail,
             displayColor: .red, predefinedKind: .university, calendar: calendar
         )
-        // Version 3 repairs university rows created before red became the
-        // canonical class color.
-        task.predefinedVersion = 3
+        // Version 4 also moves the old room/course detail out of MVP and
+        // gives three-hour university blocks their canonical Lab title.
+        task.predefinedVersion = 4
         return task
     }
 
@@ -191,28 +191,29 @@ public enum PredefinedRoutineBlocks {
         }
         var task = block(
             date: date, key: key, title: "5H Mashup", start: start, end: end,
-            mvp: "Just start the contest", kind: .contest, displayColor: .yellow,
+            description: "Just start the contest", kind: .contest, displayColor: .yellow,
             predefinedKind: .mashup, calendar: calendar
         )
         task.priority = "High"
         task.difficulty = "Hard"
         task.coreTasks = labels.map { CoreTask(title: $0) }
-        task.predefinedVersion = 3
+        task.predefinedVersion = 4
         return task
     }
 
     private static func block(
         date: Date, key: String, title: String, start: Int, end: Int,
-        mvp: String = "", kind: TaskKind = .normal, displayColor: TaskDisplayColor = .none,
+        description: String = "", kind: TaskKind = .normal, displayColor: TaskDisplayColor = .none,
         predefinedKind: PredefinedBlockKind, calendar: Calendar
     ) -> PlanTask {
         PlanTask(
             id: stableID(date: date, key: key, calendar: calendar), title: title,
+            description: description,
             startMinute: start, cycles: max(1, (end - start + 29) / 30),
-            kind: kind, priority: "Medium", difficulty: "Easy", mvp: mvp,
+            kind: kind, priority: "Medium", difficulty: "Easy", mvp: "",
             routineOverride: true, routineBlock: true, durationMinutes: end - start,
             displayColor: displayColor, predefinedKind: predefinedKind,
-            predefinedKey: key, predefinedVersion: 2
+            predefinedKey: key, predefinedVersion: 4
         )
     }
 
@@ -227,12 +228,21 @@ public enum PredefinedRoutineBlocks {
         let legacyTitles: Set<String> = [
             "Morning Routine — Audio Wakeup + Bath & Weight + Coffee & Water",
             "Rest — InstaS + Bath + Food + Coffee",
+            "CSE111 Class", "CSE111L Class", "CSE220 Class", "CSE220L Class",
             "CSE220-15-SHBZ-09D-17C", "CSE220L-15-TBA-09B-09L",
             "STA201-16-SFQR-09H-37C", "CSE111-06-ADU-09H-35C", "CSE111-08-KNI-09B-11L",
         ]
         if legacyTitles.contains(task.title) || task.title.isEmpty { task.title = definition.title }
+        let previousMVP = task.mvp.trimmingCharacters(in: .whitespacesAndNewlines)
+        let currentDescription = task.description?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if currentDescription.isEmpty {
+            task.description = previousMVP.isEmpty ? definition.description : previousMVP
+        } else if !previousMVP.isEmpty && !currentDescription.contains(previousMVP) {
+            task.description = currentDescription + "\n" + previousMVP
+        }
+        task.mvp = ""
         if definition.predefinedKind == .mashup {
-            // Version 3 intentionally normalizes every recurring Mashup to the
+            // Version 4 intentionally normalizes every recurring Mashup to the
             // exact contest definition requested by the user.
             task.title = definition.title
             task.startMinute = definition.startMinute
@@ -241,16 +251,14 @@ public enum PredefinedRoutineBlocks {
             task.kind = definition.kind
             task.priority = definition.priority
             task.difficulty = definition.difficulty
-            task.mvp = definition.mvp
+            task.description = definition.description
             task.coreTasks = definition.coreTasks
             task.displayColor = definition.displayColor
         } else if definition.predefinedKind == .university {
             // University color is semantic, not decorative: every class and
             // lab must remain visibly red across native/web synchronization.
             task.displayColor = .red
-            if task.mvp.isEmpty { task.mvp = definition.mvp }
         } else {
-            if task.mvp.isEmpty { task.mvp = definition.mvp }
             if task.displayColor == nil { task.displayColor = definition.displayColor }
         }
         task.routineBlock = true
