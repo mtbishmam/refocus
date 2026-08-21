@@ -474,7 +474,7 @@ public struct PlanValidator: Sendable {
                 let day = calendar.startOfDay(for: scheduledDate)
                 let today = calendar.startOfDay(for: now)
                 if day < today { return true }
-                guard day == today, task.hasScheduledTime else { return false }
+                guard day == today else { return false }
                 let parts = calendar.dateComponents([.hour, .minute], from: now)
                 return task.endMinute <= (parts.hour ?? 0) * 60 + (parts.minute ?? 0)
             }()
@@ -490,7 +490,7 @@ public struct PlanValidator: Sendable {
                     issues.append(.emptyCoreTask(task: displayTitle))
                 }
             }
-            if requireTaskDetails && !task.hasScheduledTime && task.quickCapture != true {
+            if requireTaskDetails && !historical && !task.hasScheduledTime && task.quickCapture != true {
                 issues.append(.missingTime(task: displayTitle))
             }
             guard task.hasScheduledTime else { continue }

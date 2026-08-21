@@ -1552,12 +1552,16 @@ struct StreaksView: View {
 
 private struct DailyMetricHistoryTable: View {
     @EnvironmentObject private var model: AppModel
+    @State private var newDate = Date()
+    @State private var addedDates: Set<String> = []
     let values: [DailyFieldValue]
     private let metrics = [
         ("weight", "Weight"), ("calories", "Calories"), ("expenses", "Expenses"),
         ("solved-problems", "Solved"), ("cp-hours", "CP Hours")
     ]
-    private var dates: [String] { Array(Set(values.map(\.date))).sorted(by: >).prefix(365).map { $0 } }
+    private var dates: [String] {
+        Array(Set(values.map(\.date)).union(addedDates)).sorted(by: >).prefix(365).map { $0 }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1565,6 +1569,20 @@ private struct DailyMetricHistoryTable: View {
                 title: "Daily Metrics",
                 subtitle: "Edit past metrics here; dependent analytics update automatically."
             )
+            HStack(spacing: 8) {
+                DatePicker(
+                    "Date",
+                    selection: $newDate,
+                    in: ...model.now,
+                    displayedComponents: .date
+                )
+                .labelsHidden()
+                Button("Add Date") {
+                    addedDates.insert(Self.dateText(newDate))
+                }
+                .buttonStyle(.borderedProminent)
+                Spacer()
+            }
             if dates.isEmpty {
                 Text("No metric history yet.").font(.caption).foregroundStyle(.secondary)
             } else {
@@ -1596,6 +1614,15 @@ private struct DailyMetricHistoryTable: View {
 
     private func header(_ title: String) -> some View {
         Text(title).font(.caption2.bold()).foregroundStyle(.secondary)
+    }
+
+    private static func dateText(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = WallClock.dhakaCalendar()
+        formatter.timeZone = formatter.calendar.timeZone
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
     }
 }
 

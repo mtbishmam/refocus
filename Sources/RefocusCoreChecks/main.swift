@@ -527,6 +527,7 @@ do {
         let validator = PlanValidator()
         let profile = RoutineProfileResolver(calendar: calendar).profile(for: try date("2026-08-13", format: "yyyy-MM-dd"))
         let ended = PlanTask(title: "Earlier task", startMinute: 360, cycles: 1)
+        let endedUntimed = PlanTask(title: "Earlier untimed event", startMinute: 540, cycles: 2, timeAssigned: false)
         let active = PlanTask(title: "Active task", startMinute: 600, cycles: 1)
         let now = try date("2026-08-13 09:00:00")
         let pastIssues = validator.validate(
@@ -537,8 +538,15 @@ do {
             tasks: [active], profile: profile, minimumCycles: 0, requireFixedTasks: false,
             scheduledDate: now, now: now, calendar: calendar
         )
+        let endedUntimedIssues = validator.validate(
+            tasks: [endedUntimed], profile: profile, minimumCycles: 0, requireFixedTasks: false,
+            scheduledDate: now, now: try date("2026-08-13 21:00:00"), calendar: calendar
+        )
         try expect(!pastIssues.contains(.missingMVP(task: ended.title)), "Ended task still required an MVP")
         try expect(!pastIssues.contains(.tooFewSubtasks(task: ended.title)), "Ended task still required subtasks")
+        try expect(!endedUntimedIssues.contains(.missingMVP(task: endedUntimed.title)), "Ended untimed event still required an MVP")
+        try expect(!endedUntimedIssues.contains(.tooFewSubtasks(task: endedUntimed.title)), "Ended untimed event still required subtasks")
+        try expect(!endedUntimedIssues.contains(.missingTime(task: endedUntimed.title)), "Ended untimed event still required a start time")
         try expect(activeIssues.contains(.missingMVP(task: active.title)), "Active task MVP rule was relaxed")
         try expect(activeIssues.contains(.tooFewSubtasks(task: active.title)), "Active task subtask rule was relaxed")
     }
