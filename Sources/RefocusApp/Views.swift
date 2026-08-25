@@ -578,10 +578,8 @@ private struct TaskEditorRow: View {
                     .monospacedDigit().foregroundStyle(.secondary).frame(width: 112, alignment: .leading)
                 Text(task.title).font(.headline)
                 Spacer()
-                if task.fixedRole == nil {
-                    Button("Delete", role: .destructive, action: delete)
-                        .buttonStyle(.borderless)
-                }
+                Button("Delete", role: .destructive, action: delete)
+                    .buttonStyle(.borderless)
                 Button { model.toggleCollapsed(task.id) } label: {
                     Image(systemName: model.collapsedTaskIDs.contains(task.id) ? "chevron.down" : "chevron.up")
                         .frame(width: 56, height: 44)
@@ -806,12 +804,10 @@ private struct SavedTaskCard: View {
                     }
                     .buttonStyle(.borderless)
                 }
-                if task.fixedRole == nil {
-                    Button("Delete", role: .destructive) {
-                        model.removeTask(id: task.id, autosave: true)
-                    }
-                    .buttonStyle(.borderless)
+                Button("Delete", role: .destructive) {
+                    model.removeTask(id: task.id, autosave: true)
                 }
+                .buttonStyle(.borderless)
                 Button { model.toggleCollapsed(task.id) } label: {
                     Image(systemName: model.collapsedTaskIDs.contains(task.id) ? "chevron.down" : "chevron.up")
                         .frame(width: 56, height: 44)

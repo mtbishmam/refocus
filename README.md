@@ -104,6 +104,12 @@ edits use the write-scoped `update_daily_values` tool; it covers every field
 advertised by `writeAccess.editableFields`, while streaks, Deltas, Stage,
 progress, and ETA remain derived.
 
+Explicit task removal uses the write-scoped `delete_task` or `delete_tasks`
+tools. Before deleting, the AI rereads `get_day` or `get_agenda` with
+`include_task_ids=true`; normal reads omit IDs. Deletions create synchronized
+tombstones, including when the user explicitly removes a predefined or fixed
+evening block for that date.
+
 ## Safety boundary
 
 The screen-break overlay stays native and leaves Command-Q, Force Quit, logout,

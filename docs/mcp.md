@@ -34,8 +34,10 @@ Tools:
 
 - `get_optimization_context` — preferred first call; compact recent agenda,
   metrics, focus outcomes, and analyses.
-- `get_agenda` — scheduled work for a date range.
-- `get_day` — one day's tasks, metrics, sessions, and analysis.
+- `get_agenda` — scheduled work for a date range. Pass
+  `include_task_ids=true` only when preparing an explicit task mutation.
+- `get_day` — one day's tasks, metrics, sessions, and analysis. Pass
+  `include_task_ids=true` only when preparing an explicit task mutation.
 - `get_metric_trend` — dated values for weight, calories, expenses, solved
   problems, CP Hours, or a
   custom metric.
@@ -60,6 +62,19 @@ Tools:
   do not require an MVP or three subtasks. Any
   overlapping predefined routine blocks are durably replaced for that date;
   fixed evening tasks and existing user tasks are never silently deleted.
+- `delete_task` — tombstone one explicitly selected task by the stable
+  `task_id` returned by an ID-enabled read. Optional expected date, title, and
+  start fields make the deletion fail safely if the task changed after it was
+  read.
+- `delete_tasks` — atomically validate and tombstone up to 100 explicitly
+  selected task IDs. Use this for replacing a whole plan after reading the
+  target date with IDs. The batch performs no deletion when any target is
+  missing or no longer matches its supplied expected fields.
+
+Task deletion requires a write-scoped token and an explicit user instruction.
+The tombstones synchronize through D1 to native and web, including for
+explicitly targeted predefined or fixed evening blocks. Compact reads continue
+to omit IDs by default so ordinary AI context stays token-efficient.
 
 Scheduled task creation still enforces half-hour scheduling, normal/contest
 duration limits, and the 21:30 cutoff. It requires a write-scoped token and an explicit

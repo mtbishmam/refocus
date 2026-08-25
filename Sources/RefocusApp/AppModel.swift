@@ -296,7 +296,7 @@ final class AppModel: ObservableObject {
             case .success(let plan):
                 self.hasPersistedToday = true
                 self.initialSegments = plan.initialSegments
-                let normalized = self.withRecurringFixedTasks(plan.tasks)
+                let normalized = self.withRecurringFixedTasks(plan.tasks, addMissing: false)
                 self.baselineTasks = normalized
                 self.tasks = preservingLocalEdits && hadTodayEdits
                     ? self.mergeRemoteTasks(current: localToday, baseline: localTodayBaseline, remote: normalized)
@@ -337,7 +337,7 @@ final class AppModel: ObservableObject {
             var tomorrowBase = tomorrowResult?.tasks ?? []
             let existingTomorrowIDs = Set(tomorrowBase.map(\.id))
             tomorrowBase.append(contentsOf: scheduledTomorrow.filter { !existingTomorrowIDs.contains($0.id) })
-            let preparedTomorrow = self.withRecurringFixedTasks(tomorrowBase)
+            let preparedTomorrow = self.withRecurringFixedTasks(tomorrowBase, addMissing: tomorrowResult == nil)
             self.tomorrowBaselineTasks = preparedTomorrow
             self.tomorrowTasks = preservingLocalEdits && hadTomorrowEdits
                 ? self.mergeRemoteTasks(current: localTomorrow, baseline: localTomorrowBaseline, remote: preparedTomorrow)
@@ -492,9 +492,9 @@ final class AppModel: ObservableObject {
     }
 
     func removeTomorrowTask(id: UUID, autosave: Bool = false) {
-        guard tomorrowTasks.contains(where: { $0.id == id && $0.fixedRole == nil }) else { return }
+        guard tomorrowTasks.contains(where: { $0.id == id }) else { return }
         registerTaskUndo(actionName: "Delete Task", persistence: autosave ? .tomorrowAgenda : .none)
-        tomorrowTasks.removeAll { $0.id == id && $0.fixedRole == nil }
+        tomorrowTasks.removeAll { $0.id == id }
         markTomorrowDirty()
         if autosave { scheduleAgendaTomorrowAutosave() }
     }
@@ -636,9 +636,9 @@ final class AppModel: ObservableObject {
     }
 
     func removeTask(id: UUID, autosave: Bool = false) {
-        guard tasks.contains(where: { $0.id == id && $0.fixedRole == nil }) else { return }
+        guard tasks.contains(where: { $0.id == id }) else { return }
         registerTaskUndo(actionName: "Delete Task", persistence: autosave ? .todayAgenda : .none)
-        tasks.removeAll { $0.id == id && $0.fixedRole == nil }
+        tasks.removeAll { $0.id == id }
         markPlanDirty()
         if autosave { scheduleAgendaTodayAutosave() }
     }
@@ -1413,7 +1413,7 @@ final class AppModel: ObservableObject {
             tasks: candidate,
             profile: dayProfile,
             minimumCycles: minimumCycles,
-            requireFixedTasks: true,
+            requireFixedTasks: false,
             requireTaskDetails: true,
             countedSegment: activeSegment,
             scheduledDate: now,
@@ -1447,7 +1447,7 @@ final class AppModel: ObservableObject {
             tasks: candidate,
             profile: resolver.profile(for: tomorrowDate),
             minimumCycles: 0,
-            requireFixedTasks: true,
+            requireFixedTasks: false,
             requireTaskDetails: true,
             scheduledDate: tomorrowDate,
             now: now
@@ -1462,7 +1462,7 @@ final class AppModel: ObservableObject {
         return issues
     }
 
-    private func withRecurringFixedTasks(_ existing: [PlanTask]) -> [PlanTask] {
+    private func withRecurringFixedTasks(_ existing: [PlanTask], addMissing: Bool = true) -> [PlanTask] {
         var seen = Set<UUID>()
         var result = existing.filter { seen.insert($0.id).inserted }
         for fixed in FixedPlanTasks.daily() {
@@ -1488,7 +1488,7 @@ final class AppModel: ObservableObject {
                 while result[index].coreTasks.count < 3 {
                     result[index].coreTasks.append(fixed.coreTasks[result[index].coreTasks.count])
                 }
-            } else {
+            } else if addMissing {
                 result.append(fixed)
             }
         }

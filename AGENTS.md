@@ -119,13 +119,20 @@ The day is independently planned and snapshotted in three super-blocks:
   duration, collision, and cutoff rules. An MCP quick task durably replaces
   overlapping predefined routine blocks for that date, but never silently
   deletes fixed evening tasks or existing user tasks.
+- Explicit write-scoped MCP `delete_task` and `delete_tasks` calls may remove
+  tasks only after an ID-enabled `get_day` or `get_agenda` read and an explicit
+  user instruction. Normal reads omit IDs. Optional expected date/title/start
+  guards should be supplied when practical. Deletion writes the same durable
+  tombstone and sync change used by native/web UI deletion; an explicitly
+  targeted predefined or fixed evening block remains deleted for that date.
 - Ikigai-derived University, Rest, Morning Routine, and Return Home blocks are
   predefined synchronized routine blocks. They are deliberately editable and
   removable for a date; a deletion is durable and must not silently reappear.
 - User-planned tasks may not run after 21:30. The five-minute screen-break
   blocker is independent of this task cutoff and runs around the clock whenever
   ReFocus is running.
-- Every day includes:
+- Every day starts with these fixed evening defaults, each explicitly deletable
+  for that date:
   - 20:00–20:30 — `Day Analysis and Streaks (CF & Git)`.
   - 20:30–21:00 — `Plan Tomorrow + Miscel Tasks`, extendable to 21:30.
   - 21:00–21:30 — `ReVision`, with ReSolve, ReSync, and Routes, Goals and
