@@ -2010,6 +2010,7 @@ struct SettingsView: View {
                 Text("Focus: :00–:25 and :30–:55")
                 Text("Screen break: :25–:30 and :55–:00")
                 Text("Screen breaks stay active around the clock while ReFocus is running.")
+                Text("Scheduled Rest and an unsaved planning gate can be released for one minute at a time.")
                 Text("Timezone: Asia/Dhaka")
             }
         }
@@ -2075,6 +2076,10 @@ struct PlanningGateOverlayView: View {
                             .foregroundStyle(.white)
                         Text(model.planGateMessage)
                             .foregroundStyle(.white.opacity(0.7))
+                        Button("Take a 1-minute break") {
+                            model.takeOneMinuteOverlayBreak()
+                        }
+                        .buttonStyle(.borderedProminent)
                     }
                     DashboardView()
                         .environmentObject(model)
@@ -2096,6 +2101,35 @@ struct PlanningGateOverlayView: View {
                 }
                 .foregroundStyle(.white)
             }
+        }
+    }
+}
+
+struct RestGateOverlayView: View {
+    @EnvironmentObject private var model: AppModel
+    let isPrimary: Bool
+
+    var body: some View {
+        ZStack {
+            Color(red: 0.035, green: 0.04, blue: 0.055).ignoresSafeArea()
+            VStack(spacing: 16) {
+                Image(systemName: "cup.and.saucer.fill")
+                    .font(.system(size: 46))
+                    .foregroundStyle(.green)
+                Text("REST")
+                    .font(.system(size: 18, weight: .heavy, design: .rounded))
+                    .tracking(4)
+                    .foregroundStyle(.green)
+                Text(isPrimary ? "Step away from the screen" : "Rest is active on the main display.")
+                    .font(.title2.bold())
+                if isPrimary {
+                    Button("Take a 1-minute break") {
+                        model.takeOneMinuteOverlayBreak()
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            .foregroundStyle(.white)
         }
     }
 }

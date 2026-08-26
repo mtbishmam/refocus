@@ -56,14 +56,14 @@ public enum PlanningSegment: String, Codable, CaseIterable, Sendable {
         switch self {
         case .morning: 720
         case .afternoon: 1080
-        case .evening: 1290
+        case .evening: 1440
         }
     }
 
     public var maximumCycles: Int {
         switch self {
         case .morning, .afternoon: 12
-        case .evening: 7
+        case .evening: 12
         }
     }
 
@@ -835,7 +835,7 @@ public enum PlanValidationIssue: Equatable, Sendable, CustomStringConvertible {
     case emptyCoreTask(task: String)
     case overlap(first: String, second: String)
     case routineConflict(taskID: UUID, task: String, reason: String, startMinute: Int, endMinute: Int)
-    case afterSleepCutoff(task: String)
+    case afterDayBoundary(task: String)
     case missingFixedTask(name: String)
     case invalidFixedTask(name: String, requirement: String)
 
@@ -865,7 +865,7 @@ public enum PlanValidationIssue: Equatable, Sendable, CustomStringConvertible {
         case .overlap(let first, let second): return "\(first) overlaps \(second)."
         case .routineConflict(_, let task, let reason, let start, let end):
             return "\(task) overlaps \(Self.time(start))–\(Self.time(end)), protected for \(reason)."
-        case .afterSleepCutoff(let task): return "\(task) runs after the 9:30 PM cutoff."
+        case .afterDayBoundary(let task): return "\(task) runs past midnight; continue it on the next date."
         case .missingFixedTask(let name): return "The fixed daily block \(name) is missing."
         case .invalidFixedTask(let name, let requirement): return "\(name) must \(requirement)."
         }

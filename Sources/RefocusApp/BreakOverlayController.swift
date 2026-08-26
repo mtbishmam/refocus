@@ -3,6 +3,7 @@ import SwiftUI
 
 enum ReFocusOverlayMode {
     case planningGate
+    case rest
     case screenBreak
 }
 
@@ -43,6 +44,10 @@ final class BreakOverlayController {
             return
         }
         show(model: model, mode: .screenBreak)
+    }
+
+    func showRest(model: AppModel) {
+        show(model: model, mode: .rest)
     }
 
     private func show(model: AppModel, mode: ReFocusOverlayMode) {
@@ -98,6 +103,12 @@ final class BreakOverlayController {
             case .screenBreak:
                 content = AnyView(
                     BreakOverlayView()
+                        .environmentObject(model)
+                        .preferredColorScheme(.dark)
+                )
+            case .rest:
+                content = AnyView(
+                    RestGateOverlayView(isPrimary: isPrimary)
                         .environmentObject(model)
                         .preferredColorScheme(.dark)
                 )

@@ -303,26 +303,26 @@ public struct RoutineProfileResolver: Sendable {
             return DayProfile(kind: .universityEarly, windows: [
                 RoutineWindow(360, 480, .work, "Morning ordinary block"),
                 RoutineWindow(480, 840, .protected, "University"),
-                RoutineWindow(840, 1290, .work, "Post-university ordinary blocks"),
+                RoutineWindow(840, 1440, .work, "Post-university ordinary blocks"),
             ])
         case 1, 3: // Sunday, Tuesday
             return DayProfile(kind: .universityLate, windows: [
                 RoutineWindow(360, 660, .contest, "Five-hour contest"),
                 RoutineWindow(720, 750, .protected, "university transition"),
                 RoutineWindow(750, 1020, .protected, "University"),
-                RoutineWindow(1080, 1290, .eveningRoutine, "Evening routine"),
+                RoutineWindow(1080, 1440, .eveningRoutine, "Evening routine"),
             ])
         case 6: // Friday
             return DayProfile(kind: .fridaySSC, windows: [
                 RoutineWindow(360, 540, .work, "Morning ordinary blocks"),
                 RoutineWindow(540, 780, .contest, "Four-hour SSC contest"),
-                RoutineWindow(780, 1290, .work, "Afternoon and evening ordinary blocks"),
+                RoutineWindow(780, 1440, .work, "Afternoon and evening ordinary blocks"),
             ])
         default:
             return DayProfile(kind: .standard, windows: [
                 RoutineWindow(360, 660, .contest, "Five-hour contest"),
                 RoutineWindow(720, 1050, .work, "Upsolving"),
-                RoutineWindow(1080, 1290, .eveningRoutine, "Evening routine"),
+                RoutineWindow(1080, 1440, .eveningRoutine, "Evening routine"),
             ])
         }
     }
@@ -494,7 +494,7 @@ public struct PlanValidator: Sendable {
                 issues.append(.missingTime(task: displayTitle))
             }
             guard task.hasScheduledTime else { continue }
-            if task.endMinute > 1290 { issues.append(.afterSleepCutoff(task: displayTitle)) }
+            if task.endMinute > 1440 { issues.append(.afterDayBoundary(task: displayTitle)) }
             if !task.routineOverride && !task.isRoutineBlock {
                 for window in profile.protectedWindows where window.overlaps(start: task.startMinute, end: task.endMinute) {
                     issues.append(.routineConflict(

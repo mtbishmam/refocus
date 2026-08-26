@@ -77,7 +77,8 @@ explicitly targeted predefined or fixed evening blocks. Compact reads continue
 to omit IDs by default so ordinary AI context stays token-efficient.
 
 Scheduled task creation still enforces half-hour scheduling, normal/contest
-duration limits, and the 21:30 cutoff. It requires a write-scoped token and an explicit
+duration limits, and the midnight date boundary. It accepts `00:00` or `24:00`
+as the end of a task that starts earlier that date. It requires a write-scoped token and an explicit
 user instruction. The new task synchronizes through D1 to native and web.
 
 Diff keeps the planning gate explicit. The first successful Save Plan in each

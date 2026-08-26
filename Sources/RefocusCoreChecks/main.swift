@@ -347,7 +347,7 @@ do {
     try check("Late planning minimum shrinks to remaining cycles") {
         let moment = try date("2026-08-05 20:15:00")
         let profile = RoutineProfileResolver(calendar: calendar).profile(for: moment)
-        try expect(PlanValidator().requiredCycles(at: moment, profile: profile, calendar: calendar) == 3, "Expected the three evening slots through 21:30")
+        try expect(PlanValidator().requiredCycles(at: moment, profile: profile, calendar: calendar) == 8, "Expected eight evening slots through midnight")
     }
     try check("Planning minimums are independent per super-block") {
         let validator = PlanValidator()
@@ -357,7 +357,7 @@ do {
         let profile = RoutineProfileResolver(calendar: calendar).profile(for: thursdayMorning)
         try expect(validator.requiredCycles(at: thursdayMorning, profile: profile, calendar: calendar) == 4, "Thursday morning should stop at University")
         try expect(validator.requiredCycles(at: thursdayAfternoon, profile: profile, calendar: calendar) == 6, "Thursday afternoon should count 14:00–17:00")
-        try expect(validator.requiredCycles(at: thursdayEvening, profile: profile, calendar: calendar) == 7, "Evening should use seven cycles")
+        try expect(validator.requiredCycles(at: thursdayEvening, profile: profile, calendar: calendar) == 12, "Evening should expose twelve cycles through midnight")
         let issues = validator.validate(
             tasks: FixedPlanTasks.daily(), profile: profile, minimumCycles: 4,
             countedSegment: .morning
@@ -438,7 +438,7 @@ do {
             "Afternoon Add Task did not select the first free half-hour"
         )
         try expect(
-            validator.firstUnusedSlot(in: tasks, startingAt: 1080, before: 1290) == 1110,
+            validator.firstUnusedSlot(in: tasks, startingAt: 1080, before: 1440) == 1110,
             "Night Add Task did not select the first free half-hour"
         )
         try expect(
@@ -490,6 +490,22 @@ do {
                 == .noAvailableCycles(segment: .afternoon),
             "A zero-availability planning block did not produce a hard lock issue"
         )
+    }
+    try check("Tasks may continue after 21:30 and end at midnight") {
+        let moment = try date("2026-08-05 22:00:00")
+        let profile = RoutineProfileResolver(calendar: calendar).profile(for: moment)
+        let task = PlanTask(
+            title: "Late mock rotations", startMinute: 1260, cycles: 6, kind: .contest,
+            priority: "High", difficulty: "Hard", mvp: "Finish the rotations",
+            coreTasks: [CoreTask(title: "One"), CoreTask(title: "Two"), CoreTask(title: "Three")]
+        )
+        let issues = PlanValidator().validate(
+            tasks: [task], profile: profile, minimumCycles: 0,
+            requireFixedTasks: false, requireTaskDetails: true,
+            scheduledDate: moment, now: moment
+        )
+        try expect(!issues.contains { if case .afterDayBoundary = $0 { return true }; return false }, "A task ending at midnight was rejected")
+        try expect(PlanValidator().requiredCycles(at: moment, profile: profile, calendar: calendar) == 4, "Late-night planning did not remain available")
     }
     try check("Task templates round-trip through Markdown") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-template-check-\(UUID().uuidString)")

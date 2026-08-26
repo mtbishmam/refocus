@@ -76,6 +76,7 @@ final class AppModel: ObservableObject {
     private var rescheduleTaskQueue: Task<Void, Never>?
     private var dailyFieldSaveTasks: [String: Task<Void, Never>] = [:]
     private var activeBreakID: String?
+    private var overlayPauseUntil: Date?
     private var attemptedFinalCaptureDay: Date?
     private var baselineTasks: [PlanTask] = []
     private var tomorrowBaselineTasks: [PlanTask] = []
@@ -141,6 +142,13 @@ final class AppModel: ObservableObject {
 
     var currentTaskTitle: String {
         executionTask?.title ?? (isArmed ? "Solve five harder problems" : "No active task")
+    }
+
+    var activeRestTask: PlanTask? {
+        let minute = clock.minuteOfDay(for: now)
+        return executionTasks.first {
+            $0.isRoutineBlock && $0.predefinedKind == .rest && $0.contains(minuteOfDay: minute)
+        }
     }
 
     var countdownText: String {
@@ -235,6 +243,12 @@ final class AppModel: ObservableObject {
             overlayController.hide()
             isBreakVisible = false
         }
+    }
+
+    func takeOneMinuteOverlayBreak() {
+        overlayPauseUntil = now.addingTimeInterval(60)
+        overlayController.hide()
+        isBreakVisible = false
     }
 
     func chooseVault() {
@@ -1192,9 +1206,28 @@ final class AppModel: ObservableObject {
             }
         }
 
-        // Screen breaks are a device-level productivity guard, not a planning
-        // feature. They remain active around the clock whenever ReFocus is
-        // running, including after the 21:30 planning cutoff.
+        if let pauseUntil = overlayPauseUntil {
+            if date < pauseUntil {
+                if overlayController.mode != nil { overlayController.hide() }
+                isBreakVisible = false
+                return
+            }
+            overlayPauseUntil = nil
+        }
+
+        // A scheduled Rest is a full-block screen guard. The overlay offers a
+        // one-minute temporary release, then restores itself until Rest ends.
+        if activeRestTask != nil {
+            activeBreakID = nil
+            if overlayController.mode != .rest { overlayController.showRest(model: self) }
+            isBreakVisible = true
+            return
+        } else if overlayController.mode == .rest {
+            overlayController.hide()
+            isBreakVisible = false
+        }
+
+        // Periodic five-minute screen breaks remain active around the clock.
         if snapshot.phase == .screenBreak {
             let breakID = sessionID(for: snapshot.cycleStart)
             if activeBreakID != breakID || overlayController.mode != .screenBreak {
@@ -1213,9 +1246,9 @@ final class AppModel: ObservableObject {
         }
         activeBreakID = nil
 
-        // Planning gates apply only to the active day. Outside the routine
-        // window ReFocus stays quiet until the next five-minute screen break.
-        guard minute >= 330 && minute < 1290 else {
+        // Planning gates apply from the morning routine through midnight.
+        // Night planning remains available after the fixed 20:00 routines.
+        guard minute >= 330 else {
             isArmed = false
             if overlayController.mode == .planningGate { overlayController.hide() }
             isBreakVisible = false
@@ -1420,7 +1453,7 @@ final class AppModel: ObservableObject {
             now: now
         )
         let minute = clock.minuteOfDay(for: now)
-        if minute >= 330, minute < 1290,
+        if minute >= 330,
            let availabilityIssue = validator.availabilityIssue(
                in: activeSegment, at: now, profile: dayProfile, tasks: candidate
            ) {

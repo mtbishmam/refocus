@@ -69,7 +69,7 @@ The day is independently planned and snapshotted in three super-blocks:
 |---|---:|---:|
 | Morning | 06:00–12:00 | `min(12, usable half-hour cycles remaining in this block)` |
 | Afternoon | 12:00–18:00 | `min(12, usable half-hour cycles remaining in this block)` |
-| Evening | 18:00–21:30 | `min(7, usable half-hour cycles remaining in this block)` |
+| Evening | 18:00–00:00 | `min(12, usable half-hour cycles remaining in this block)` |
 
 - The normal 11:00–12:00 and 17:00–18:00 Rest tasks consume two physical
   cycles each, leaving the usual Morning/Afternoon requirement at 10. Because
@@ -128,9 +128,11 @@ The day is independently planned and snapshotted in three super-blocks:
 - Ikigai-derived University, Rest, Morning Routine, and Return Home blocks are
   predefined synchronized routine blocks. They are deliberately editable and
   removable for a date; a deletion is durable and must not silently reappear.
-- User-planned tasks may not run after 21:30. The five-minute screen-break
-  blocker is independent of this task cutoff and runs around the clock whenever
-  ReFocus is running.
+- User-planned tasks and focused work may continue after 21:30 through the
+  midnight boundary. Work after midnight belongs to the next dated plan. The
+  five-minute periodic screen-break blocker runs around the clock whenever
+  ReFocus is running. Scheduled one-hour Rest blockers and the persistent
+  no-plan blocker each offer a one-minute temporary release before relocking.
 - Every day starts with these fixed evening defaults, each explicitly deletable
   for that date:
   - 20:00–20:30 — `Day Analysis and Streaks (CF & Git)`.

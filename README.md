@@ -43,7 +43,8 @@ Morning (06:00–12:00) and Afternoon (12:00–18:00) each contain 12 physical
 half-hour cycles. A scheduled one-hour Rest task occupies two of those slots,
 so the normal gate requires 10 work cycles. Rest remains editable for each
 date: deleting it releases its slots and immediately raises that block's
-required plan to 12. Evening remains 18:00–21:30 with up to seven cycles.
+required plan to 12. Evening runs 18:00–00:00 with up to twelve cycles, so work
+and task scheduling remain available after 21:30.
 
 ## Build and verify
 
