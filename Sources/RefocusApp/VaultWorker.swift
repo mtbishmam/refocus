@@ -415,11 +415,14 @@ actor VaultWorker {
         var minute = requestedMinute
         var interpretation: String?
         if let requestedMinute, !allowOverride,
-           let restWindow = FixedPlanTasks.restWindow(overlapping: requestedMinute, end: requestedMinute + cycles * 30) {
+           let restWindow = protectedRestWindow(
+               on: date, start: requestedMinute, end: requestedMinute + cycles * 30
+           ) {
             guard let replacement = automaticStartTime(
                 cycles: cycles,
                 after: restWindow.endMinute,
-                existing: schedulingExisting
+                existing: schedulingExisting,
+                on: date
             ) else {
                 throw RefocusStoreError.corrupt("Could not move this task after protected Rest without crossing midnight.")
             }
@@ -431,7 +434,8 @@ actor VaultWorker {
             guard let automaticallyAllocated = automaticStartTime(
                 cycles: cycles,
                 after: anchor,
-                existing: schedulingExisting
+                existing: schedulingExisting,
+                on: date
             ) else {
                 throw RefocusStoreError.corrupt("Could not allocate this task after the last explicitly timed task without entering a protected Rest window or crossing midnight.")
             }
@@ -462,7 +466,8 @@ actor VaultWorker {
                 guard let automaticallyAllocated = automaticStartTime(
                     cycles: cycles,
                     after: anchor,
-                    existing: existing.filter { $0.id != match.id }
+                    existing: existing.filter { $0.id != match.id },
+                    on: date
                 ) else {
                     throw RefocusStoreError.corrupt("Could not allocate this matched task after the last explicitly timed task without entering a protected Rest window or crossing midnight.")
                 }
@@ -473,7 +478,8 @@ actor VaultWorker {
             if !allowOverride && !merged.routineOverride {
                 let restInterpretation = try moveTaskOutOfProtectedRest(
                     &merged,
-                    existing: existing.filter { $0.id != match.id }
+                    existing: existing.filter { $0.id != match.id },
+                    on: date
                 )
                 if let restInterpretation {
                     interpretation = [interpretation, restInterpretation].compactMap { $0 }.joined(separator: " ")
@@ -557,11 +563,11 @@ actor VaultWorker {
             .max()
     }
 
-    private func automaticStartTime(cycles: Int, after anchor: Int?, existing: [PlanTask]) -> Int? {
+    private func automaticStartTime(cycles: Int, after anchor: Int?, existing: [PlanTask], on date: Date) -> Int? {
         guard let anchor else { return nil }
         var cursor = max(0, anchor)
         while cursor + cycles * 30 <= 1440 {
-            if let rest = FixedPlanTasks.restWindow(overlapping: cursor, end: cursor + cycles * 30) {
+            if let rest = protectedRestWindow(on: date, start: cursor, end: cursor + cycles * 30) {
                 cursor = rest.endMinute
                 continue
             }
@@ -574,9 +580,9 @@ actor VaultWorker {
         return nil
     }
 
-    private func moveTaskOutOfProtectedRest(_ task: inout PlanTask, existing: [PlanTask]) throws -> String? {
+    private func moveTaskOutOfProtectedRest(_ task: inout PlanTask, existing: [PlanTask], on date: Date) throws -> String? {
         guard task.hasScheduledTime,
-              let restWindow = FixedPlanTasks.restWindow(overlapping: task.startMinute, end: task.endMinute)
+              let restWindow = protectedRestWindow(on: date, start: task.startMinute, end: task.endMinute)
         else { return nil }
         if FixedPlanTasks.isRestAlias(task.title),
            FixedPlanTasks.isAllowedScheduledRest(start: task.startMinute, end: task.endMinute) {
@@ -586,13 +592,29 @@ actor VaultWorker {
         guard let replacement = automaticStartTime(
             cycles: task.cycles,
             after: restWindow.endMinute,
-            existing: existing
+            existing: existing,
+            on: date
         ) else {
             throw RefocusStoreError.corrupt("Could not move \(task.title) after protected Rest without crossing midnight.")
         }
         task.startMinute = replacement
         task.timeAssigned = nil
         return "Moved \(quoted(task.title)) from \(MarkdownPlanCodec.time(oldStart)) to \(MarkdownPlanCodec.time(replacement)) after protected Rest."
+    }
+
+    private func protectedRestWindow(on date: Date, start: Int, end: Int, now: Date = Date()) -> RoutineWindow? {
+        guard !isHistoricalInterval(on: date, endingAt: end, now: now) else { return nil }
+        return FixedPlanTasks.restWindow(overlapping: start, end: end)
+    }
+
+    private func isHistoricalInterval(on date: Date, endingAt endMinute: Int, now: Date) -> Bool {
+        let day = calendar.startOfDay(for: date)
+        let today = calendar.startOfDay(for: now)
+        if day < today { return true }
+        guard day == today else { return false }
+        let components = calendar.dateComponents([.hour, .minute], from: now)
+        let currentMinute = (components.hour ?? 0) * 60 + (components.minute ?? 0)
+        return endMinute <= currentMinute
     }
 
     private func closestExistingTask(title: String, in tasks: [PlanTask]) -> PlanTask? {
@@ -688,7 +710,8 @@ actor VaultWorker {
         if !allowOverride && !entry.task.routineOverride {
             interpretation = try moveTaskOutOfProtectedRest(
                 &entry.task,
-                existing: try store.tasks(on: entry.date).filter { $0.id != id }
+                existing: try store.tasks(on: entry.date).filter { $0.id != id },
+                on: entry.date
             )
         }
         entry.task.quickCapture = true
@@ -722,7 +745,8 @@ actor VaultWorker {
         if !allowOverride && !entry.task.routineOverride {
             interpretation = try moveTaskOutOfProtectedRest(
                 &entry.task,
-                existing: try store.tasks(on: entry.date).filter { $0.id != id }
+                existing: try store.tasks(on: entry.date).filter { $0.id != id },
+                on: entry.date
             )
         }
         try validateAIWrite(entry.task, on: entry.date, replacing: id)
@@ -769,7 +793,7 @@ actor VaultWorker {
             throw RefocusStoreError.corrupt("Protected Rest blocks must remain at 05:00–06:00, 11:00–12:00, 17:00–18:00, or 23:00–00:00.")
         }
         if !task.isRoutineBlock && !task.routineOverride && task.hasScheduledTime,
-           let restWindow = FixedPlanTasks.restWindow(overlapping: task.startMinute, end: task.endMinute) {
+           let restWindow = protectedRestWindow(on: date, start: task.startMinute, end: task.endMinute) {
             throw RefocusStoreError.corrupt("\(task.title) cannot be scheduled during protected Rest \(MarkdownPlanCodec.time(restWindow.startMinute))–\(MarkdownPlanCodec.time(restWindow.endMinute)).")
         }
         let validator = PlanValidator()
