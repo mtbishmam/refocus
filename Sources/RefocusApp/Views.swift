@@ -2815,11 +2815,8 @@ private struct ScreenBreakAIChatPanel: View {
     }
 }
 
-private struct BreakClockHeader: View {
-    @ObservedObject var model: AppModel
-    @ObservedObject var clock: ClockDisplay
-
-    private static let dateTimeFormatter: DateFormatter = {
+private enum ReFocusOverlayDateTime {
+    static let formatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.calendar = WallClock.dhakaCalendar()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -2827,6 +2824,15 @@ private struct BreakClockHeader: View {
         formatter.dateFormat = "EEE, MMM d, yyyy · h:mm:ss a"
         return formatter
     }()
+
+    static func string(from date: Date) -> String {
+        formatter.string(from: date)
+    }
+}
+
+private struct BreakClockHeader: View {
+    @ObservedObject var model: AppModel
+    @ObservedObject var clock: ClockDisplay
 
     var body: some View {
         VStack(spacing: 4) {
@@ -2837,7 +2843,7 @@ private struct BreakClockHeader: View {
                 .offset(y: 6)
             Text(model.countdownText).font(.system(size: 64, weight: .bold, design: .rounded)).monospacedDigit()
             Text(model.currentTaskTitle).font(.title2.bold())
-            Text(Self.dateTimeFormatter.string(from: model.now))
+            Text(ReFocusOverlayDateTime.string(from: model.now))
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.68))
                 .monospacedDigit()
@@ -2874,6 +2880,10 @@ struct PlanningGateOverlayView: View {
                             .foregroundStyle(.white)
                         Text(model.planGateMessage)
                             .foregroundStyle(.white.opacity(0.7))
+                        Text(ReFocusOverlayDateTime.string(from: model.now))
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.68))
+                            .monospacedDigit()
                         Button("Take a 1-minute break") {
                             model.takeOneMinuteOverlayBreak()
                         }

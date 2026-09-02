@@ -245,8 +245,11 @@ final class AppModel: ObservableObject {
                 self.finishAIMessage(id: assistantID, status: "Stopped")
             } catch {
                 if let index = self.aiMessages.firstIndex(where: { $0.id == assistantID }) {
+                    let failureMessage = "I couldn’t complete that request: " + error.localizedDescription
                     if self.aiMessages[index].text.isEmpty {
-                        self.aiMessages[index].text = "I couldn’t complete that request: \(error.localizedDescription)"
+                        self.aiMessages[index].text = failureMessage
+                    } else {
+                        self.aiMessages[index].text += "\n\n" + failureMessage
                     }
                 }
                 self.finishAIMessage(id: assistantID, status: "Failed")

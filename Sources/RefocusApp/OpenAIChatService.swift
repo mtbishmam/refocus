@@ -163,6 +163,18 @@ actor OpenAIResponsesClient {
     typealias ToolExecutor = @Sendable (_ name: String, _ arguments: Data) async throws -> String
     typealias EventHandler = @Sendable (AIStreamEvent) async -> Void
 
+    private actor StreamAttemptState {
+        private var streamedContent = false
+
+        func markContentStreamed() {
+            streamedContent = true
+        }
+
+        func hasStreamedContent() -> Bool {
+            streamedContent
+        }
+    }
+
     private struct ToolCall: Sendable {
         var itemID: String
         var callID: String
@@ -193,7 +205,7 @@ actor OpenAIResponsesClient {
         var input: Any = conversation
 
         for _ in 0..<8 {
-            let result = try await streamResponse(
+            let result = try await streamResponseWithRetry(
                 apiKey: apiKey, model: model, instructions: instructions,
                 input: input, previousResponseID: previousResponseID, onEvent: onEvent
             )
@@ -220,6 +232,58 @@ actor OpenAIResponsesClient {
             input = outputs
         }
         throw OpenAIChatError.toolLoopLimit
+    }
+
+    private func streamResponseWithRetry(
+        apiKey: String,
+        model: String,
+        instructions: String,
+        input: Any,
+        previousResponseID: String?,
+        onEvent: @escaping EventHandler
+    ) async throws -> (responseID: String, calls: [ToolCall]) {
+        let maxAttempts = 3
+
+        for attempt in 1...maxAttempts {
+            let state = StreamAttemptState()
+            let attemptEvent: EventHandler = { event in
+                switch event {
+                case .outputDelta, .reasoningDelta:
+                    await state.markContentStreamed()
+                case .toolStarted, .toolFinished:
+                    break
+                }
+                await onEvent(event)
+            }
+
+            do {
+                return try await streamResponse(
+                    apiKey: apiKey,
+                    model: model,
+                    instructions: instructions,
+                    input: input,
+                    previousResponseID: previousResponseID,
+                    onEvent: attemptEvent
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                guard !Task.isCancelled,
+                      attempt < maxAttempts,
+                      Self.isRetryable(error),
+                      !(await state.hasStreamedContent())
+                else {
+                    if attempt > 1 {
+                        throw Self.errorAfterRetries(error, attempts: attempt)
+                    }
+                    throw error
+                }
+
+                try await Task.sleep(nanoseconds: UInt64(attempt) * 400_000_000)
+            }
+        }
+
+        throw OpenAIChatError.invalidResponse
     }
 
     private func streamResponse(
@@ -252,7 +316,8 @@ actor OpenAIResponsesClient {
         guard (200..<300).contains(http.statusCode) else {
             var body = ""
             for try await line in bytes.lines { body += line }
-            let message = Self.apiMessage(from: body) ?? "OpenAI request failed (HTTP \(http.statusCode))."
+            let detail = Self.apiMessage(from: body) ?? "No additional error details."
+            let message = "OpenAI request failed (HTTP " + String(http.statusCode) + "): " + detail
             throw OpenAIChatError.api(message)
         }
 
@@ -272,6 +337,12 @@ actor OpenAIResponsesClient {
                 if let response = event["response"] as? [String: Any], let id = response["id"] as? String {
                     responseID = id
                 }
+            case "response.failed":
+                let message = Self.streamFailureMessage(from: event) ?? "OpenAI response failed."
+                throw OpenAIChatError.api(message)
+            case "response.incomplete":
+                let message = Self.streamFailureMessage(from: event) ?? "OpenAI response was incomplete."
+                throw OpenAIChatError.api(message)
             case "response.output_text.delta":
                 if let delta = event["delta"] as? String { await onEvent(.outputDelta(delta)) }
             case "response.reasoning_summary_text.delta":
@@ -293,7 +364,7 @@ actor OpenAIResponsesClient {
                 guard let itemID = event["item_id"] as? String, calls[itemID] != nil else { continue }
                 if let arguments = event["arguments"] as? String { calls[itemID]?.arguments = arguments }
             case "error":
-                let message = (event["message"] as? String) ?? "OpenAI streaming failed."
+                let message = Self.streamFailureMessage(from: event) ?? "OpenAI streaming failed."
                 throw OpenAIChatError.api(message)
             default:
                 continue
@@ -309,6 +380,59 @@ actor OpenAIResponsesClient {
               let error = json["error"] as? [String: Any]
         else { return nil }
         return error["message"] as? String
+    }
+
+    private static func streamFailureMessage(from event: [String: Any]) -> String? {
+        if let message = event["message"] as? String, !message.isEmpty {
+            return message
+        }
+        if let error = event["error"] as? [String: Any],
+           let message = error["message"] as? String,
+           !message.isEmpty {
+            return message
+        }
+        if let response = event["response"] as? [String: Any],
+           let error = response["error"] as? [String: Any],
+           let message = error["message"] as? String,
+           !message.isEmpty {
+            return message
+        }
+        if let response = event["response"] as? [String: Any],
+           let details = response["incomplete_details"] as? [String: Any],
+           let reason = details["reason"] as? String,
+           !reason.isEmpty {
+            return "OpenAI response was incomplete: " + reason + "."
+        }
+        return nil
+    }
+
+    private static func isRetryable(_ error: Error) -> Bool {
+        if error is URLError { return true }
+        guard let chatError = error as? OpenAIChatError else { return false }
+        switch chatError {
+        case .invalidResponse:
+            return true
+        case .api(let message):
+            let normalized = message.lowercased()
+            return [
+                "server_error", "server error", "overloaded", "rate limit", "rate_limit",
+                "timeout", "timed out", "temporarily", "try again", "connection",
+                "network", "stream", "failed to generate", "http 500", "http 502",
+                "http 503", "http 504", "http 429", "http 529",
+            ].contains { normalized.contains($0) }
+        case .missingAPIKey, .keychain, .toolLoopLimit:
+            return false
+        }
+    }
+
+    private static func errorAfterRetries(_ error: Error, attempts: Int) -> OpenAIChatError {
+        let message: String
+        if let chatError = error as? OpenAIChatError, let description = chatError.errorDescription {
+            message = description
+        } else {
+            message = error.localizedDescription
+        }
+        return .api(message + " (Retried " + String(attempts - 1) + " times.)")
     }
 
     private static func escape(_ text: String) -> String {
