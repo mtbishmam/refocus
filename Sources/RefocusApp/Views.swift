@@ -991,15 +991,6 @@ struct PlanEditorView: View {
                             color: model.isPlanCommitted ? .green : .orange
                         )
                     }
-                    if let blocker = model.validationIssues.first(where: model.isBlocking) {
-                        Label(blocker.description, systemImage: "lock.fill")
-                            .font(.caption.bold())
-                            .foregroundStyle(.red)
-                    } else if !model.isPlanReady {
-                        Text("Planning gate locked")
-                            .font(.caption.bold())
-                            .foregroundStyle(.orange)
-                    }
                 }
                 Spacer()
                 TaskVisibilityMenu(showUser: $showUserTasks, showPredefined: $showPredefinedBlocks, showFixed: $showFixedBlocks)

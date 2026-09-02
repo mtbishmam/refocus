@@ -502,11 +502,27 @@ public struct PlanValidator: Sendable {
         var issues: [PlanValidationIssue] = []
         var seenTaskIDs = Set<UUID>()
         let uniqueTasks = tasks.filter { seenTaskIDs.insert($0.id).inserted }
+        let historicalTaskIDs: Set<UUID> = Set(uniqueTasks.compactMap { task in
+            guard let scheduledDate else { return nil }
+            let day = calendar.startOfDay(for: scheduledDate)
+            let today = calendar.startOfDay(for: now)
+            if day < today { return task.id }
+            guard day == today else { return nil }
+            let parts = calendar.dateComponents([.hour, .minute], from: now)
+            let currentMinute = (parts.hour ?? 0) * 60 + (parts.minute ?? 0)
+            return task.endMinute <= currentMinute ? task.id : nil
+        })
         let totalCycles: Int
         if let countedSegment {
-            totalCycles = uniqueTasks.reduce(0) { $0 + $1.planningCycles(in: countedSegment) }
+            totalCycles = uniqueTasks
+                .filter { !historicalTaskIDs.contains($0.id) }
+                .reduce(0) { $0 + $1.planningCycles(in: countedSegment) }
         } else {
-            totalCycles = uniqueTasks.filter(\.hasScheduledTime).filter(\.countsTowardPlanning).reduce(0) { $0 + $1.cycles }
+            totalCycles = uniqueTasks
+                .filter { !historicalTaskIDs.contains($0.id) }
+                .filter(\.hasScheduledTime)
+                .filter(\.countsTowardPlanning)
+                .reduce(0) { $0 + $1.cycles }
         }
         if totalCycles < minimumCycles {
             issues.append(.insufficientCycles(actual: totalCycles, required: minimumCycles))
@@ -535,15 +551,7 @@ public struct PlanValidator: Sendable {
                 }
             }
 
-            let historical: Bool = {
-                guard let scheduledDate else { return false }
-                let day = calendar.startOfDay(for: scheduledDate)
-                let today = calendar.startOfDay(for: now)
-                if day < today { return true }
-                guard day == today else { return false }
-                let parts = calendar.dateComponents([.hour, .minute], from: now)
-                return task.endMinute <= (parts.hour ?? 0) * 60 + (parts.minute ?? 0)
-            }()
+            let historical = historicalTaskIDs.contains(task.id)
             if requireTaskDetails && !historical && !task.isRoutineBlock && task.quickCapture != true {
                 if task.mvp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     issues.append(.missingMVP(task: displayTitle))
@@ -564,7 +572,7 @@ public struct PlanValidator: Sendable {
             let isLegacyRestAlias = !task.isRoutineBlock
                 && FixedPlanTasks.isRestAlias(task.title)
                 && FixedPlanTasks.isAllowedScheduledRest(start: task.startMinute, end: task.endMinute)
-            if !task.isRoutineBlock && !task.routineOverride && !isLegacyRestAlias {
+            if !historical && !task.isRoutineBlock && !task.routineOverride && !isLegacyRestAlias {
                 if let restWindow = FixedPlanTasks.restWindow(overlapping: task.startMinute, end: task.endMinute) {
                     issues.append(.restConflict(
                         task: displayTitle,
@@ -573,7 +581,7 @@ public struct PlanValidator: Sendable {
                     ))
                 }
             }
-            if !task.routineOverride && !task.isRoutineBlock {
+            if !historical && !task.routineOverride && !task.isRoutineBlock {
                 for window in profile.protectedWindows where window.overlaps(start: task.startMinute, end: task.endMinute) {
                     issues.append(.routineConflict(
                         taskID: task.id,
@@ -588,7 +596,12 @@ public struct PlanValidator: Sendable {
 
         if requireFixedTasks { validateFixedTasks(uniqueTasks, issues: &issues) }
 
-        let ordered = uniqueTasks.filter(\.hasScheduledTime).sorted { $0.startMinute < $1.startMinute }
+        // Completed intervals are history. They must not create an overlap or
+        // Rest conflict with an active/future task later in the same plan.
+        let ordered = uniqueTasks
+            .filter(\.hasScheduledTime)
+            .filter { !historicalTaskIDs.contains($0.id) }
+            .sorted { $0.startMinute < $1.startMinute }
         for pair in zip(ordered, ordered.dropFirst()) where pair.0.endMinute > pair.1.startMinute {
             let allowedEveningOverlap = Set([pair.0.fixedRole, pair.1.fixedRole]) == Set([.planTomorrow, .revision])
                 && max(pair.0.startMinute, pair.1.startMinute) >= 1260
