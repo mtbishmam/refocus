@@ -242,6 +242,7 @@ do {
         let sundayBlocks = PredefinedRoutineBlocks.daily(for: sunday, calendar: calendar)
         try expect(saturdayBlocks.contains { $0.title == "CSE111/220 Study" && $0.startMinute == 570 && $0.endMinute == 615 }, "Saturday 09:30–10:15 study block missing")
         try expect(saturdayBlocks.contains { $0.title == "Return Home / Transition" && $0.startMinute == 750 && $0.endMinute == 780 }, "Saturday return-home block missing")
+        try expect(!saturdayBlocks.contains { $0.predefinedKind == .rest }, "Saturday retained an out-of-window Rest block")
         let saturdayMashup = saturdayBlocks.first { $0.title == "5H Mashup" }
         let sundayMashup = sundayBlocks.first { $0.title == "5H Mashup" }
         try expect(saturdayMashup?.startMinute == 840 && saturdayMashup?.endMinute == 1140, "Saturday 14:00–19:00 mashup missing")
@@ -281,12 +282,21 @@ do {
         try expect(tuesdayBlocks.contains { $0.title == "CSE111 Lab" && $0.startMinute == 840 && $0.endMinute == 1020 }, "Tuesday three-hour CSE111 Lab title missing")
         try expect(sundayBlocks.contains { $0.title == "Return Home / Transition" && $0.startMinute == 1020 && $0.endMinute == 1050 }, "Sunday return-home block missing")
         try expect(sundayBlocks.first { $0.title == "Rest" }?.countsTowardPlanning == false, "Rest counted toward the planning gate")
+        try expect(sundayBlocks.filter { $0.predefinedKind == .rest }.allSatisfy {
+            FixedPlanTasks.isAllowedScheduledRest(start: $0.startMinute, end: $0.endMinute)
+        }, "Sunday retained a Rest block outside the allowed screen-guard windows")
         try expect(Set(saturdayBlocks.map(\.id)).count == saturdayBlocks.count, "Routine IDs are not unique")
         try expect(
             PredefinedRoutineBlocks.stableID(date: saturday, key: "morning-routine", calendar: calendar).uuidString.lowercased()
                 == "1027c355-0f27-51c2-8e27-c02f0d27be9c",
             "Native routine IDs drifted from the web ID algorithm"
         )
+    }
+    try check("Scheduled Rest screen guards are limited to the two live windows") {
+        try expect(FixedPlanTasks.isAllowedScheduledRest(start: 660, end: 720), "11:00–12:00 Rest was not allowed")
+        try expect(FixedPlanTasks.isAllowedScheduledRest(start: 1050, end: 1080), "17:30–18:00 Rest was not allowed")
+        try expect(!FixedPlanTasks.isAllowedScheduledRest(start: 780, end: 840), "13:00–14:00 Rest incorrectly remained a screen guard")
+        try expect(!FixedPlanTasks.isAllowedScheduledRest(start: 990, end: 1050), "16:30–17:30 Rest incorrectly crossed into the screen-guard window")
     }
     try check("Stored predefined MVP descriptions migrate across every date") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-predefined-description-\(UUID().uuidString)")
@@ -347,7 +357,7 @@ do {
     try check("Late planning minimum shrinks to remaining cycles") {
         let moment = try date("2026-08-05 20:15:00")
         let profile = RoutineProfileResolver(calendar: calendar).profile(for: moment)
-        try expect(PlanValidator().requiredCycles(at: moment, profile: profile, calendar: calendar) == 8, "Expected eight evening slots through midnight")
+        try expect(PlanValidator().requiredCycles(at: moment, profile: profile, calendar: calendar) == 3, "Expected three evening slots through 21:30")
     }
     try check("Planning minimums are independent per super-block") {
         let validator = PlanValidator()
@@ -357,7 +367,7 @@ do {
         let profile = RoutineProfileResolver(calendar: calendar).profile(for: thursdayMorning)
         try expect(validator.requiredCycles(at: thursdayMorning, profile: profile, calendar: calendar) == 4, "Thursday morning should stop at University")
         try expect(validator.requiredCycles(at: thursdayAfternoon, profile: profile, calendar: calendar) == 6, "Thursday afternoon should count 14:00–17:00")
-        try expect(validator.requiredCycles(at: thursdayEvening, profile: profile, calendar: calendar) == 12, "Evening should expose twelve cycles through midnight")
+        try expect(validator.requiredCycles(at: thursdayEvening, profile: profile, calendar: calendar) == 7, "Evening should expose seven cycles through 21:30")
         let issues = validator.validate(
             tasks: FixedPlanTasks.daily(), profile: profile, minimumCycles: 4,
             countedSegment: .morning
@@ -491,11 +501,50 @@ do {
             "A zero-availability planning block did not produce a hard lock issue"
         )
     }
-    try check("Tasks may continue after 21:30 and end at midnight") {
+    try check("Explicit work in a protected window stays saveable") {
+        let moment = try date("2026-08-06 08:37:00")
+        let profile = RoutineProfileResolver(calendar: calendar).profile(for: moment)
+        let validator = PlanValidator()
+        let task = PlanTask(
+            title: "CSE111 Assignment", startMinute: 480, cycles: 4,
+            mvp: "Submit the assignment",
+            coreTasks: [CoreTask(title: "Part one"), CoreTask(title: "Part two"), CoreTask(title: "Review")]
+        )
+
+        try expect(
+            validator.requiredCycles(in: .morning, at: moment, profile: profile, calendar: calendar) == 0,
+            "The test day should have no protected-window-free morning slots remaining"
+        )
+        try expect(
+            validator.hasRemainingPlannedWork(in: .morning, at: moment, tasks: [task], calendar: calendar),
+            "Future work inside the protected window was not detected"
+        )
+        try expect(
+            validator.availabilityIssue(in: .morning, at: moment, profile: profile, tasks: [task], calendar: calendar) == nil,
+            "Explicit protected-window work was incorrectly converted into a hard availability lock"
+        )
+
+        let issues = validator.validate(
+            tasks: [task], profile: profile, minimumCycles: 0,
+            requireFixedTasks: false, requireTaskDetails: true,
+            countedSegment: .morning, scheduledDate: moment, now: moment,
+            calendar: calendar
+        )
+        try expect(
+            issues.contains { if case .routineConflict = $0 { return true }; return false },
+            "The protected-window exception did not remain visible as a warning"
+        )
+        try expect(
+            !issues.contains { if case .noAvailableCycles = $0 { return true }; return false },
+            "A saveable protected-window plan still produced a hard availability issue"
+        )
+    }
+    try check("Late Night relocks at 21:30 and plans only through 23:00") {
+        let before = try date("2026-08-05 21:29:00")
         let moment = try date("2026-08-05 22:00:00")
         let profile = RoutineProfileResolver(calendar: calendar).profile(for: moment)
         let task = PlanTask(
-            title: "Late mock rotations", startMinute: 1260, cycles: 6, kind: .contest,
+            title: "Late mock rotations", startMinute: 1290, cycles: 3, kind: .contest,
             priority: "High", difficulty: "Hard", mvp: "Finish the rotations",
             coreTasks: [CoreTask(title: "One"), CoreTask(title: "Two"), CoreTask(title: "Three")]
         )
@@ -504,8 +553,10 @@ do {
             requireFixedTasks: false, requireTaskDetails: true,
             scheduledDate: moment, now: moment
         )
-        try expect(!issues.contains { if case .afterDayBoundary = $0 { return true }; return false }, "A task ending at midnight was rejected")
-        try expect(PlanValidator().requiredCycles(at: moment, profile: profile, calendar: calendar) == 4, "Late-night planning did not remain available")
+        try expect(PlanValidator().segment(at: before, calendar: calendar) == .evening, "Evening switched before 21:30")
+        try expect(PlanValidator().segment(at: moment, calendar: calendar) == .lateNight, "Late Night did not activate after 21:30")
+        try expect(!issues.contains { if case .afterDayBoundary = $0 { return true }; return false }, "A task ending at 23:00 was rejected")
+        try expect(PlanValidator().requiredCycles(at: moment, profile: profile, calendar: calendar) == 2, "Late-night gate did not stop at 23:00")
     }
     try check("Task templates round-trip through Markdown") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-template-check-\(UUID().uuidString)")
@@ -538,6 +589,40 @@ do {
         try expect(!quickIssues.contains(.tooFewSubtasks(task: quick.title)), "Quick task still required three subtasks")
         try expect(normalIssues.contains(.missingMVP(task: normal.title)), "Normal task MVP rule was accidentally relaxed")
         try expect(normalIssues.contains(.tooFewSubtasks(task: normal.title)), "Normal task subtask rule was accidentally relaxed")
+    }
+    try check("AI task writes replace only routine blocks and preserve stable IDs") {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-ai-task-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let store = try RefocusStore(databaseURL: temporary.appendingPathComponent("refocus.sqlite3"), calendar: calendar)
+        try store.importLegacy(today: nil, tomorrow: nil, agenda: [], templates: [], streaks: [])
+        let originalDay = try date("2026-08-29", format: "yyyy-MM-dd")
+        let movedDay = try date("2026-08-30", format: "yyyy-MM-dd")
+        let routine = PlanTask(
+            title: "Rest", startMinute: 1080, cycles: 2, routineBlock: true,
+            displayColor: .green, predefinedKind: .rest, predefinedKey: "rest-evening"
+        )
+        let user = PlanTask(title: "Existing user task", startMinute: 1110, cycles: 1, quickCapture: true)
+        let fixed = PlanTask(title: "Fixed task", startMinute: 1080, cycles: 1, fixedRole: .dayAnalysis)
+        try store.saveScheduledEntries([
+            AgendaTask(date: originalDay, task: routine), AgendaTask(date: originalDay, task: user),
+            AgendaTask(date: originalDay, task: fixed),
+        ])
+
+        var aiTask = PlanTask(title: "AI plan", startMinute: 1080, cycles: 2, quickCapture: true)
+        try store.upsertAIQuickTask(aiTask, on: originalDay)
+        let saved = try store.tasks(on: originalDay)
+        try expect(!saved.contains(where: { $0.id == routine.id }), "AI task did not replace the overlapping routine block")
+        try expect(saved.contains(where: { $0.id == user.id }), "AI task replaced an existing user task")
+        try expect(saved.contains(where: { $0.id == fixed.id }), "AI task replaced a fixed evening task")
+
+        aiTask.title = "AI plan revised"
+        aiTask.startMinute = 1260
+        try store.replaceAITask(id: aiTask.id, with: aiTask, on: movedDay)
+        let remainingOriginal = try store.tasks(on: originalDay)
+        try expect(!remainingOriginal.contains(where: { $0.id == aiTask.id }), "Moved AI task remained on its source date")
+        let moved = try require(store.tasks(on: movedDay).first(where: { $0.id == aiTask.id }), "Moved AI task disappeared")
+        try expect(moved.title == "AI plan revised" && moved.startMinute == 1260, "AI update lost its stable ID or edited fields")
     }
     try check("Historical tasks may omit MVP and subtasks while active tasks remain strict") {
         let validator = PlanValidator()
@@ -698,7 +783,7 @@ do {
         let text = try String(contentsOf: logURL, encoding: .utf8)
         try expect(logURL.lastPathComponent == "aug-4.md", "Daily log filename wrong")
         try expect(text.contains("date: 2026-08-04"), "ISO frontmatter missing")
-        try expect(text.contains("What I did → Solved one problem"), "Check-in missing")
+        try expect(text.contains("Description → Solved one problem"), "Description-backed check-in missing")
         try expect(text.contains("state=blank"), "Blank streak state missing")
         let automaticDefinition = VaultRepository.defaultStreaks[2]
         try repository.setStreakValue(automaticDefinition, status: .fail, date: focusStart)
@@ -830,8 +915,9 @@ do {
         let fixed = PlanTask(title: "ReVision", startMinute: 1260, cycles: 1, mvp: "Review", fixedRole: .revision)
         try store.saveCompletePlan(date: day, tasks: [morning, rest, university, user, fixed], profile: .universityLate)
         let first = try require(store.planSnapshots(on: day), "Initial snapshots missing")
-        try expect(Set(first.initial.keys) == Set(PlanningSegment.allCases), "All three planning blocks were not initialized")
+        try expect(Set(first.initial.keys) == Set(PlanningSegment.preplannedCases), "The three advance-planning blocks were not initialized")
         try expect(first.initialCapturedAt.count == 3, "Initial snapshot timestamps were not persisted")
+        try expect(first.initial[.lateNight] == nil, "Tomorrow save incorrectly initialized the 21:30 Late Night gate")
         var changedUser = user
         changedUser.title = "Changed later"
         try store.saveCompletePlan(date: day, tasks: [morning, rest, university, changedUser, fixed], profile: .universityLate)
@@ -968,7 +1054,7 @@ do {
         defer { try? FileManager.default.removeItem(at: temporary) }
         let store = try RefocusStore(databaseURL: temporary.appendingPathComponent("refocus.sqlite3"), calendar: calendar)
         try store.importLegacy(today: nil, tomorrow: nil, agenda: [], templates: [], streaks: [])
-        let day = try date("2026-08-08", format: "yyyy-MM-dd")
+        let day = try date("2026-08-05", format: "yyyy-MM-dd")
         let initiallySeeded = try store.ensurePredefinedRoutineBlocks(on: day)
         try expect(initiallySeeded, "Routine defaults were not seeded")
         let rest = try store.tasks(on: day).first { $0.title.hasPrefix("Rest") }
@@ -1316,6 +1402,63 @@ do {
         try expect(log.contains("## Morning Block - Modified plan"), "Modified snapshot heading missing from clean log")
         try expect(log.contains("08:30–09:30 · CP Plan"), "Modified snapshot time missing from clean log")
         try expect(!log.localizedCaseInsensitiveContains(id.uuidString), "Internal task ID leaked into clean log")
+    }
+    try check("Legacy focus answers migrate into one Description") {
+        struct LegacyCheckIn: Encodable {
+            var id: String
+            var taskID: UUID?
+            var taskTitle: String
+            var focusStart: Date
+            var focusEnd: Date
+            var whatDid: String
+            var better: String
+            var faster: String
+            var outcome: CheckInOutcome
+        }
+        let start = try date("2026-09-02 08:00:00")
+        let legacy = LegacyCheckIn(
+            id: "legacy", taskID: nil, taskTitle: "Study", focusStart: start,
+            focusEnd: try date("2026-09-02 08:25:00"), whatDid: "Solved Q1",
+            better: "Read first", faster: "Use template", outcome: .partial
+        )
+        let decoded = try JSONDecoder().decode(CheckIn.self, from: JSONEncoder().encode(legacy))
+        try expect(decoded.description == "Solved Q1\nBetter: Read first\nFaster: Use template", "Legacy answers were not preserved")
+        let log = CleanMarkdownExporter(calendar: calendar).renderDailyLog(
+            date: start, tasks: [], checkIns: [decoded], definitions: [], values: [], analysis: nil
+        )
+        try expect(log.contains("Description: Solved Q1 / Better: Read first / Faster: Use template"), "Focus log did not use Description")
+        try expect(!log.contains("  - Did:"), "Legacy question label leaked into the new log")
+    }
+    try check("Description edits appear as Diff metadata") {
+        let id = UUID()
+        let initial = PlanTask(id: id, title: "Work", description: "Started", startMinute: 480, cycles: 1)
+        var finalTask = initial
+        finalTask.description = "Finished and checked"
+        let rows = PlanDiffEngine.rows(
+            initial: [initial],
+            final: [FinalTaskSnapshot(task: finalTask, scheduledDate: "2026-09-02")],
+            date: "2026-09-02"
+        )
+        try expect(rows.first?.changes.contains(.metadata) == true, "Description change was absent from Diff")
+    }
+    try check("Screen-break skips are durable and idempotent per day") {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-break-skips-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let store = try RefocusStore(databaseURL: temporary.appendingPathComponent("refocus.sqlite3"), calendar: calendar)
+        let first = try date("2026-09-02 08:25:00")
+        let nextDay = try date("2026-09-03 08:25:00")
+        let firstCount = try store.recordScreenBreakSkip(id: "08:00", at: first)
+        let retryCount = try store.recordScreenBreakSkip(id: "08:00", at: first)
+        let secondCount = try store.recordScreenBreakSkip(id: "08:30", at: first)
+        _ = try store.recordScreenBreakSkip(id: "09:00", at: first)
+        let cappedCount = try store.recordScreenBreakSkip(id: "09:30", at: first)
+        let nextDayCount = try store.screenBreakSkipCount(on: nextDay)
+        try expect(firstCount == 1, "First skip was not recorded")
+        try expect(retryCount == 1, "Retry counted the same break twice")
+        try expect(secondCount == 2, "Second break was not counted")
+        try expect(cappedCount == 3, "The persistence layer allowed more than three daily skips")
+        try expect(nextDayCount == 0, "Skip count leaked into the next Dhaka day")
     }
     try check("Local store stays inside the speed budget") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-speed-\(UUID().uuidString)")

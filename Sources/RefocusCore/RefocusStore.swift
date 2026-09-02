@@ -297,7 +297,7 @@ public final class RefocusStore: @unchecked Sendable {
             var initial = try snapshotMap(date: date, column: "initial_snapshots")
             var initialTimes = try initialSnapshotTimes(date: date)
             let savedAt = Date()
-            for segment in PlanningSegment.allCases where initial[segment.rawValue] == nil {
+            for segment in PlanningSegment.preplannedCases where initial[segment.rawValue] == nil {
                 initial[segment.rawValue] = tasks.filter {
                     segment.contains($0) || $0.planningCycles(in: segment) > 0
                 }
@@ -316,7 +316,7 @@ public final class RefocusStore: @unchecked Sendable {
                   updated_hlc=excluded.updated_hlc
                 """,
                 [.text(dayKey(date)), .text(profile.rawValue),
-                 .text(PlanningSegment.allCases.map(\.rawValue).joined(separator: ",")),
+                 .text(PlanningSegment.preplannedCases.map(\.rawValue).joined(separator: ",")),
                  .blob(try encoder.encode(initial)), .blob(try encoder.encode(modified)),
                  .blob(try encoder.encode(initialTimes)), .text(nextHLC())]
             )
@@ -406,7 +406,81 @@ public final class RefocusStore: @unchecked Sendable {
     }
 
     public func deleteTask(id: UUID) throws {
-        try transaction { try tombstoneTask(id: id.uuidString.lowercased()) }
+        try transaction {
+            let idText = id.uuidString.lowercased()
+            let oldDateText = try scalar("SELECT scheduled_date FROM tasks WHERE id = ? AND deleted = 0", [.text(idText)])
+            try tombstoneTask(id: idText)
+            if let oldDateText, let oldDate = parseDay(oldDateText) {
+                try ensureDayPlan(date: oldDate)
+                let profile = RoutineProfileResolver(calendar: calendar).profile(for: oldDate).kind
+                try refreshPlanMetadata(date: oldDate, tasks: try tasks(on: oldDate), profile: profile, segment: .morning)
+            }
+        }
+    }
+
+    /// Returns the durable task and its scheduled date for trusted native
+    /// integrations such as the in-app planning assistant.
+    public func taskEntry(id: UUID) throws -> AgendaTask? {
+        let idText = id.uuidString.lowercased()
+        guard let row = try firstRow(
+            "SELECT scheduled_date, payload FROM tasks WHERE id = ? AND deleted = 0",
+            [.text(idText)]
+        ), let dateText = row[0], let date = parseDay(dateText),
+           let encoded = row[1].flatMap({ Data(base64Encoded: $0) })
+        else { return nil }
+        return AgendaTask(date: date, task: try decoder.decode(PlanTask.self, from: encoded))
+    }
+
+    /// Creates or replaces a quick task from the native AI surface. Overlap
+    /// only removes editable predefined routine rows; fixed evening and user
+    /// tasks are never silently deleted.
+    public func upsertAIQuickTask(_ task: PlanTask, on date: Date) throws {
+        try transaction {
+            try ensureDayPlan(date: date)
+            if task.hasScheduledTime {
+                for existing in try tasks(on: date) where existing.id != task.id
+                    && existing.isRoutineBlock
+                    && existing.startMinute < task.endMinute
+                    && existing.endMinute > task.startMinute {
+                    try tombstoneTask(id: existing.id.uuidString.lowercased())
+                }
+            }
+            try upsertTask(task, date: date)
+            let profile = RoutineProfileResolver(calendar: calendar).profile(for: date).kind
+            try refreshPlanMetadata(date: date, tasks: try tasks(on: date), profile: profile, segment: .morning)
+        }
+    }
+
+    /// Replaces any editable field of an existing task and optionally moves it
+    /// to another day while preserving its stable task ID.
+    public func replaceAITask(id: UUID, with task: PlanTask, on date: Date) throws {
+        try transaction {
+            guard let existing = try taskEntry(id: id) else {
+                throw RefocusStoreError.corrupt("task to update was not found")
+            }
+            try ensureDayPlan(date: existing.date)
+            try ensureDayPlan(date: date)
+            if task.hasScheduledTime {
+                for candidate in try tasks(on: date) where candidate.id != id
+                    && candidate.isRoutineBlock
+                    && candidate.startMinute < task.endMinute
+                    && candidate.endMinute > task.startMinute {
+                    try tombstoneTask(id: candidate.id.uuidString.lowercased())
+                }
+            }
+            try upsertTask(task, date: date)
+            let resolver = RoutineProfileResolver(calendar: calendar)
+            try refreshPlanMetadata(
+                date: existing.date, tasks: try tasks(on: existing.date),
+                profile: resolver.profile(for: existing.date).kind, segment: .morning
+            )
+            if !calendar.isDate(existing.date, inSameDayAs: date) {
+                try refreshPlanMetadata(
+                    date: date, tasks: try tasks(on: date),
+                    profile: resolver.profile(for: date).kind, segment: .morning
+                )
+            }
+        }
     }
 
     public func loadTemplates() throws -> [PlanTask] {
@@ -450,6 +524,35 @@ public final class RefocusStore: @unchecked Sendable {
             if let data = row.blob(0) { result.append(try decoder.decode(CheckIn.self, from: data)) }
         }
         return result
+    }
+
+    public func screenBreakSkipCount(on date: Date) throws -> Int {
+        Int(try scalar(
+            "SELECT COUNT(*) FROM screen_break_skips WHERE day = ?",
+            [.text(dayKey(date))]
+        ) ?? "0") ?? 0
+    }
+
+    /// Records one specific periodic break once and returns today's durable
+    /// count. A primary key on day + break ID makes retries idempotent.
+    public func recordScreenBreakSkip(id: String, at date: Date) throws -> Int {
+        try transaction {
+            let day = dayKey(date)
+            let alreadyRecorded = try scalar(
+                "SELECT break_id FROM screen_break_skips WHERE day = ? AND break_id = ?",
+                [.text(day), .text(id)]
+            ) != nil
+            let count = Int(try scalar(
+                "SELECT COUNT(*) FROM screen_break_skips WHERE day = ?",
+                [.text(day)]
+            ) ?? "0") ?? 0
+            guard alreadyRecorded || count < 3 else { return }
+            try execute(
+                "INSERT OR IGNORE INTO screen_break_skips(day, break_id, skipped_at) VALUES(?, ?, ?)",
+                [.text(day), .text(id), .double(date.timeIntervalSince1970)]
+            )
+        }
+        return try screenBreakSkipCount(on: date)
     }
 
     public func fieldDefinitions() throws -> [DailyFieldDefinition] {
@@ -769,6 +872,11 @@ public final class RefocusStore: @unchecked Sendable {
             );
             CREATE TABLE IF NOT EXISTS check_ins(id TEXT PRIMARY KEY, day TEXT NOT NULL, payload BLOB NOT NULL, updated_hlc TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS check_ins_day ON check_ins(day);
+            CREATE TABLE IF NOT EXISTS screen_break_skips(
+              day TEXT NOT NULL, break_id TEXT NOT NULL, skipped_at REAL NOT NULL,
+              PRIMARY KEY(day, break_id)
+            );
+            CREATE INDEX IF NOT EXISTS screen_break_skips_day ON screen_break_skips(day);
             CREATE TABLE IF NOT EXISTS captures(id TEXT PRIMARY KEY, text TEXT NOT NULL, created_at REAL NOT NULL, updated_hlc TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS field_definitions(
               id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, unit TEXT,

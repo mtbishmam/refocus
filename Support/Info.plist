@@ -24,8 +24,8 @@
     <string>15</string>
     <key>LSMinimumSystemVersion</key>
     <string>15.0</string>
-	<!-- Keep the menu-bar item, but expose a normal app/Dock presence so the
-	     dashboard is discoverable when launched with `open`. -->
+	<!-- Keep a normal app/Dock presence; the status item itself is retained
+	     independently and its panel moves to the active Space. -->
 	<key>LSUIElement</key>
 	<false/>
     <key>NSHighResolutionCapable</key>

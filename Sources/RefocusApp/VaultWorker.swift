@@ -9,9 +9,32 @@ enum PersistenceError: LocalizedError {
     }
 }
 
+private struct AITaskRecord: Codable {
+    var date: String
+    var task: PlanTask
+}
+
+private struct AIContextPayload: Codable {
+    var asOf: String
+    var timezone: String
+    var currentDate: String
+    var currentTime: String
+    var currentMinute: Int
+    var currentPhase: String
+    var currentCycleStart: String
+    var nextCycleStart: String
+    var currentTask: AITaskRecord?
+    var selectedDate: String
+    var tasks: [AITaskRecord]
+    var agenda: [AITaskRecord]
+    var dailyFields: [DailyFieldDefinition]
+    var recentDailyValues: [DailyFieldValue]
+}
+
 actor VaultWorker {
     private let store: RefocusStore
     private let projection: ProjectionWriter
+    private let vaultURL: URL
     private let calendar = WallClock.dhakaCalendar()
     private let cloud = CloudSyncClient()
     private var projectionTask: Task<Void, Never>?
@@ -19,6 +42,7 @@ actor VaultWorker {
     private var pendingCaptureLines: [String] = []
 
     init(vaultURL: URL) throws {
+        self.vaultURL = vaultURL
         store = try RefocusStore(databaseURL: RefocusStore.defaultDatabaseURL())
         projection = ProjectionWriter(vaultURL: vaultURL)
 
@@ -183,6 +207,235 @@ actor VaultWorker {
         scheduleBackgroundWork(days: [])
     }
 
+    func loadAIContext(on date: Date) throws -> String {
+        let now = Date()
+        _ = try store.ensurePredefinedRoutineBlocks(on: date)
+        let dayTasks = try store.tasks(on: date)
+        let lower = calendar.date(byAdding: .day, value: -30, to: date) ?? date
+        let upper = calendar.date(byAdding: .day, value: 365, to: date) ?? date
+        let agenda = try store.agenda(asOf: date).filter { $0.date >= lower && $0.date <= upper }
+        let definitions = try store.fieldDefinitions()
+        let historyStart = calendar.date(byAdding: .day, value: -45, to: date) ?? date
+        let values = try store.fieldValues(from: historyStart, through: date)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let today = calendar.startOfDay(for: now)
+        _ = try store.ensurePredefinedRoutineBlocks(on: today)
+        let currentTasks = calendar.isDate(today, inSameDayAs: date) ? dayTasks : try store.tasks(on: today)
+        let wallClock = WallClock(calendar: calendar)
+        let snapshot = wallClock.snapshot(at: now)
+        let currentMinute = wallClock.minuteOfDay(for: snapshot.cycleStart)
+        let currentTask = currentTasks.first(where: { $0.contains(minuteOfDay: currentMinute) })
+        let nextCycle = calendar.date(byAdding: .minute, value: 30, to: snapshot.cycleStart) ?? snapshot.phaseEnd
+        let payload = AIContextPayload(
+            asOf: ISO8601DateFormatter().string(from: now),
+            timezone: "Asia/Dhaka",
+            currentDate: dayKey(now),
+            currentTime: localTime(now),
+            currentMinute: wallClock.minuteOfDay(for: now),
+            currentPhase: snapshot.phase.rawValue,
+            currentCycleStart: localTime(snapshot.cycleStart),
+            nextCycleStart: localTime(nextCycle),
+            currentTask: currentTask.map { AITaskRecord(date: dayKey(today), task: $0) },
+            selectedDate: dayKey(date),
+            tasks: dayTasks.map { AITaskRecord(date: dayKey(date), task: $0) },
+            agenda: agenda.map { AITaskRecord(date: dayKey($0.date), task: $0.task) },
+            dailyFields: definitions,
+            recentDailyValues: values
+        )
+        return String(data: try encoder.encode(payload), encoding: .utf8) ?? "{}"
+    }
+
+    private func localTime(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter.string(from: date)
+    }
+
+    func loadAIVaultPrimer() -> String {
+        let relativePaths = [
+            "ego/ikigai.md", "ego/non-negotiables.md", "ego/goals.md",
+            "ego/habits.md", "ego/universal-truths.md", "ego/gyoji.md",
+        ]
+        var remaining = 48_000
+        var sections: [String] = []
+        for relativePath in relativePaths where remaining > 0 {
+            let url = vaultURL.appendingPathComponent(relativePath)
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            let excerpt = String(text.prefix(min(remaining, 12_000)))
+            sections.append("## \(relativePath)\n\(excerpt)")
+            remaining -= excerpt.count
+        }
+        return sections.joined(separator: "\n\n")
+    }
+
+    func searchVaultForAI(_ query: String) -> String {
+        let terms = query.lowercased().split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        guard !terms.isEmpty else { return "[]" }
+        let keys: [URLResourceKey] = [.isRegularFileKey, .isHiddenKey]
+        guard let enumerator = FileManager.default.enumerator(
+            at: vaultURL, includingPropertiesForKeys: keys,
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else { return "[]" }
+        var matches: [[String: String]] = []
+        for case let url as URL in enumerator {
+            if matches.count >= 10 { break }
+            guard url.pathExtension.lowercased() == "md",
+                  let values = try? url.resourceValues(forKeys: Set(keys)),
+                  values.isRegularFile == true,
+                  let text = try? String(contentsOf: url, encoding: .utf8)
+            else { continue }
+            let lower = text.lowercased()
+            guard terms.allSatisfy(lower.contains) else { continue }
+            let first = terms.compactMap { lower.range(of: $0)?.lowerBound }.min() ?? lower.startIndex
+            let start = lower.index(first, offsetBy: -500, limitedBy: lower.startIndex) ?? lower.startIndex
+            let end = lower.index(first, offsetBy: 1_500, limitedBy: lower.endIndex) ?? lower.endIndex
+            matches.append([
+                "path": url.path.replacingOccurrences(of: vaultURL.path + "/", with: ""),
+                "excerpt": String(text[start..<end]),
+            ])
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: matches, options: [.prettyPrinted, .sortedKeys]) else { return "[]" }
+        return String(data: data, encoding: .utf8) ?? "[]"
+    }
+
+    func createAITask(_ arguments: AICreateTaskArguments) throws -> AgendaTask {
+        let date = try parseAIDate(arguments.date)
+        let minute = try parseAITime(arguments.startTime)
+        let requestedKind = TaskKind(rawValue: arguments.kind ?? "normal") ?? .normal
+        let cycles = max(1, min(10, arguments.cycles))
+        let fallback = compactTaskDetails(title: arguments.title)
+        var subtaskTitles = (arguments.subtasks ?? []).map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty }
+        for candidate in fallback.subtasks where subtaskTitles.count < 3 && !subtaskTitles.contains(candidate) {
+            subtaskTitles.append(candidate)
+        }
+        let task = PlanTask(
+            title: arguments.title,
+            description: arguments.description,
+            startMinute: minute ?? 0,
+            cycles: cycles,
+            kind: cycles > 4 ? .contest : requestedKind,
+            priority: arguments.priority ?? "Medium",
+            difficulty: arguments.difficulty ?? "Moderate",
+            mvp: arguments.mvp?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? arguments.mvp! : fallback.mvp,
+            coreTasks: Array(subtaskTitles.prefix(3)).map { CoreTask(title: $0) },
+            displayColor: TaskDisplayColor(rawValue: arguments.color ?? "none") ?? .none,
+            quickCapture: true,
+            timeAssigned: minute != nil
+        )
+        try store.upsertAIQuickTask(task, on: date)
+        scheduleBackgroundWork(days: [date])
+        return AgendaTask(date: date, task: task)
+    }
+
+    func appendAITaskDescription(taskID: String, text: String) throws -> AgendaTask {
+        guard let id = UUID(uuidString: taskID), var entry = try store.taskEntry(id: id) else {
+            throw RefocusStoreError.corrupt("task to update was not found")
+        }
+        let addition = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !addition.isEmpty else { return entry }
+        let existing = entry.task.description?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        entry.task.description = existing.isEmpty ? addition : existing + "\n" + addition
+        try store.replaceAITask(id: id, with: entry.task, on: entry.date)
+        scheduleBackgroundWork(days: [entry.date])
+        return entry
+    }
+
+    private func compactTaskDetails(title: String) -> (mvp: String, subtasks: [String]) {
+        let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (
+            "Finish \(clean)",
+            ["Open + scope", "Do \(clean)", "Check + save"]
+        )
+    }
+
+    func updateAITask(_ arguments: AIUpdateTaskArguments) throws -> AgendaTask {
+        guard let id = UUID(uuidString: arguments.taskID), var entry = try store.taskEntry(id: id) else {
+            throw RefocusStoreError.corrupt("task to update was not found")
+        }
+        if let date = arguments.date { entry.date = try parseAIDate(date) }
+        if let title = arguments.title { entry.task.title = title }
+        if let description = arguments.description {
+            entry.task.description = description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : description
+        }
+        if let startTime = arguments.startTime {
+            if startTime.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                entry.task.timeAssigned = false
+                entry.task.startMinute = 0
+            } else {
+                entry.task.startMinute = try parseAITime(startTime) ?? 0
+                entry.task.timeAssigned = nil
+            }
+        }
+        if let cycles = arguments.cycles { entry.task.cycles = max(1, min(10, cycles)) }
+        if let kind = arguments.kind, let value = TaskKind(rawValue: kind) { entry.task.kind = value }
+        if let priority = arguments.priority { entry.task.priority = priority }
+        if let difficulty = arguments.difficulty { entry.task.difficulty = difficulty }
+        if let color = arguments.color, let value = TaskDisplayColor(rawValue: color) {
+            entry.task.displayColor = value == .none ? nil : value
+        }
+        if let mvp = arguments.mvp { entry.task.mvp = mvp }
+        if let completed = arguments.completed { entry.task.isComplete = completed }
+        if let subtasks = arguments.subtasks {
+            entry.task.coreTasks = subtasks.map { CoreTask(title: $0.title, isComplete: $0.completed) }
+        }
+        entry.task.quickCapture = true
+        try store.replaceAITask(id: id, with: entry.task, on: entry.date)
+        scheduleBackgroundWork(days: [entry.date])
+        return entry
+    }
+
+    func rescheduleAITask(_ arguments: AIRescheduleTaskArguments) throws -> AgendaTask {
+        guard let id = UUID(uuidString: arguments.taskID), var entry = try store.taskEntry(id: id) else {
+            throw RefocusStoreError.corrupt("task to reschedule was not found")
+        }
+        entry.date = try parseAIDate(arguments.date)
+        if let startTime = arguments.startTime {
+            if startTime.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                entry.task.timeAssigned = false
+                entry.task.startMinute = 0
+            } else {
+                entry.task.startMinute = try parseAITime(startTime) ?? 0
+                entry.task.timeAssigned = nil
+            }
+        }
+        try store.replaceAITask(id: id, with: entry.task, on: entry.date)
+        scheduleBackgroundWork(days: [entry.date])
+        return entry
+    }
+
+    func setAIFieldValue(definitionID: String, value: String, dateText: String) throws {
+        let date = try parseAIDate(dateText)
+        guard try store.fieldDefinitions().contains(where: { $0.id == definitionID }) else {
+            throw RefocusStoreError.corrupt("daily field was not found")
+        }
+        try store.setFieldValue(definitionID: definitionID, value: value, date: date)
+        scheduleBackgroundWork(days: [date])
+    }
+
+    private func parseAIDate(_ value: String) throws -> Date {
+        let parts = value.split(separator: "-").compactMap { Int($0) }
+        guard parts.count == 3,
+              let date = calendar.date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2]))
+        else { throw RefocusStoreError.corrupt("date must use YYYY-MM-DD") }
+        return date
+    }
+
+    private func parseAITime(_ value: String?) throws -> Int? {
+        guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let parts = value.split(separator: ":").compactMap { Int($0) }
+        guard parts.count == 2, (0...23).contains(parts[0]), [0, 30].contains(parts[1]) else {
+            throw RefocusStoreError.corrupt("start_time must use a half-hour HH:mm value")
+        }
+        return parts[0] * 60 + parts[1]
+    }
+
     func appendQuickNote(_ line: String, submissionID: UUID) throws {
         // Commit to SQLite immediately so the global shortcut never waits on
         // network or the cross-device export lease. Projection and cloud work
@@ -214,6 +467,14 @@ actor VaultWorker {
     func saveCheckIn(_ checkIn: CheckIn, streaks: [StreakDefinition]) throws {
         try store.saveCheckIn(checkIn)
         scheduleBackgroundWork(days: [checkIn.focusStart])
+    }
+
+    func screenBreakSkipCount(on date: Date) throws -> Int {
+        try store.screenBreakSkipCount(on: date)
+    }
+
+    func recordScreenBreakSkip(id: String, at date: Date) throws -> Int {
+        try store.recordScreenBreakSkip(id: id, at: date)
     }
 
     func updatePlanMinimum(date: Date, completed: Bool) throws {

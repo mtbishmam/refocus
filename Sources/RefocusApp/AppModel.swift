@@ -4,6 +4,16 @@ import Foundation
 import ServiceManagement
 import RefocusCore
 
+enum DashboardTab: Hashable {
+    case agenda
+    case today
+    case tomorrow
+    case streaks
+    case diff
+    case ai
+    case settings
+}
+
 @MainActor
 final class ClockDisplay: ObservableObject {
     @Published var snapshot = WallClock().snapshot(at: Date())
@@ -11,7 +21,7 @@ final class ClockDisplay: ObservableObject {
 
 @MainActor
 final class AppModel: ObservableObject {
-    private(set) var now = Date()
+    @Published private(set) var now = Date()
     let clockDisplay = ClockDisplay()
     @Published var tasks: [PlanTask] = []
     @Published var agendaTasks: [AgendaTask] = []
@@ -27,6 +37,7 @@ final class AppModel: ObservableObject {
     @Published var isArmed = false
     @Published var isBreakVisible = false
     @Published var currentCheckIn: CheckIn?
+    @Published private(set) var screenBreakSkipsUsed = 0
     @Published var streakDefinitions: [StreakDefinition] = []
     @Published var streakSummaries: [StreakSummary] = []
     @Published var dailyFieldDefinitions: [DailyFieldDefinition] = []
@@ -61,6 +72,14 @@ final class AppModel: ObservableObject {
     @Published var cloudSyncPendingCount = 0
     @Published var cloudSyncLastSuccess: Date?
     @Published var cloudSyncIssue: String?
+    @Published var selectedDashboardTab: DashboardTab = .today
+    @Published var aiDraft = ""
+    @Published var aiMessages: [AIChatMessage] = []
+    @Published var aiIsResponding = false
+    @Published var aiStatus = "Ready"
+    @Published var openAIKeyDraft = ""
+    @Published var openAIKeyConfigured = OpenAIKeychain.load() != nil
+    @Published private(set) var openAIModel = "gpt-5.4-mini"
 
     private let clock = WallClock()
     private let resolver = RoutineProfileResolver()
@@ -68,8 +87,11 @@ final class AppModel: ObservableObject {
     private var worker: VaultWorker?
     private var watchers: [VaultWatcher] = []
     private var ticker: Task<Void, Never>?
+    private var reloadGeneration = 0
     private var cloudSyncTicker: Task<Void, Never>?
+    private var aiResponseTask: Task<Void, Never>?
     private var saveTask: Task<Void, Never>?
+    private var breakTaskSaveTask: Task<Void, Never>?
     private var agendaSaveTask: Task<Void, Never>?
     private var agendaPlanSaveTask: Task<Void, Never>?
     private var agendaTomorrowSaveTask: Task<Void, Never>?
@@ -89,23 +111,259 @@ final class AppModel: ObservableObject {
         return manager
     }()
     private lazy var overlayController = BreakOverlayController()
+    private let openAIClient = OpenAIResponsesClient()
 
     init() {
+        // ReFocus deliberately uses one fast, tool-capable model. Persist the
+        // choice so existing installations migrate away from older defaults.
+        UserDefaults.standard.set(openAIModel, forKey: "refocus.openai.model")
         restoreVault()
         refreshLoginStatus()
-        ensureLaunchAtLogin()
         startTicker()
     }
 
     deinit {
         ticker?.cancel()
         cloudSyncTicker?.cancel()
+        aiResponseTask?.cancel()
         saveTask?.cancel()
+        breakTaskSaveTask?.cancel()
         agendaSaveTask?.cancel()
         agendaPlanSaveTask?.cancel()
         agendaTomorrowSaveTask?.cancel()
         rescheduleTaskQueue?.cancel()
         dailyFieldSaveTasks.values.forEach { $0.cancel() }
+    }
+
+    func saveOpenAISettings() {
+        do {
+            if !openAIKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                try OpenAIKeychain.save(openAIKeyDraft)
+                openAIKeyDraft = ""
+                openAIKeyConfigured = true
+            }
+            UserDefaults.standard.set(openAIModel, forKey: "refocus.openai.model")
+            aiStatus = "OpenAI settings saved"
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func pasteOpenAIKey() {
+        guard let value = NSPasteboard.general.string(forType: .string) else {
+            errorMessage = "The clipboard does not contain text."
+            return
+        }
+        let clean = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else {
+            errorMessage = "The clipboard does not contain an OpenAI API key."
+            return
+        }
+        openAIKeyDraft = clean
+        aiStatus = "API key ready to save"
+    }
+
+    func removeOpenAIKey() {
+        OpenAIKeychain.remove()
+        openAIKeyDraft = ""
+        openAIKeyConfigured = false
+        aiStatus = "API key removed"
+    }
+
+    func cancelAIResponse() {
+        aiResponseTask?.cancel()
+        aiResponseTask = nil
+        aiIsResponding = false
+        aiStatus = "Stopped"
+        if let index = aiMessages.indices.last, aiMessages[index].role == .assistant {
+            aiMessages[index].isStreaming = false
+        }
+    }
+
+    func sendAIMessage(_ suppliedPrompt: String? = nil) {
+        // Wake/sleep and a long-running process must never leave an AI prompt
+        // anchored to yesterday. Refresh the Dhaka clock before interpreting
+        // relative words such as current, today, and next.
+        tick(at: Date())
+        let prompt = (suppliedPrompt ?? aiDraft).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty, !aiIsResponding else { return }
+        guard worker != nil else {
+            errorMessage = "Choose the ReFocus vault before using ReFocus AI."
+            return
+        }
+        guard openAIKeyConfigured else {
+            selectedDashboardTab = .settings
+            errorMessage = "Add your OpenAI API key in Settings before using ReFocus AI."
+            return
+        }
+        let history = aiMessages.filter { !$0.isStreaming && !$0.text.isEmpty }
+        aiDraft = ""
+        selectedDashboardTab = .ai
+        aiMessages.append(AIChatMessage(role: .user, text: prompt))
+        let assistantID = UUID()
+        aiMessages.append(AIChatMessage(id: assistantID, role: .assistant, text: "", isStreaming: true))
+        aiIsResponding = true
+        aiStatus = "Thinking"
+
+        aiResponseTask?.cancel()
+        aiResponseTask = Task { [weak self] in
+            guard let self, let worker = self.worker else { return }
+            let primer = await worker.loadAIVaultPrimer()
+            let instructions = self.aiInstructions(vaultPrimer: primer)
+            do {
+                try await self.openAIClient.respond(
+                    history: history,
+                    prompt: prompt,
+                    instructions: instructions,
+                    model: self.openAIModel,
+                    executeTool: { [weak self] name, arguments in
+                        guard let self else { throw CancellationError() }
+                        return try await self.performAITool(name: name, arguments: arguments, userPrompt: prompt)
+                    },
+                    onEvent: { event in
+                        await self.applyAIEvent(event, messageID: assistantID)
+                    }
+                )
+                guard !Task.isCancelled else { return }
+                self.finishAIMessage(id: assistantID)
+                self.reloadVault(force: true)
+            } catch is CancellationError {
+                self.finishAIMessage(id: assistantID, status: "Stopped")
+            } catch {
+                if let index = self.aiMessages.firstIndex(where: { $0.id == assistantID }) {
+                    if self.aiMessages[index].text.isEmpty {
+                        self.aiMessages[index].text = "I couldn’t complete that request: \(error.localizedDescription)"
+                    }
+                }
+                self.finishAIMessage(id: assistantID, status: "Failed")
+            }
+        }
+    }
+
+    private func finishAIMessage(id: UUID, status: String = "Ready") {
+        if let index = aiMessages.firstIndex(where: { $0.id == id }) {
+            aiMessages[index].isStreaming = false
+        }
+        aiIsResponding = false
+        aiStatus = status
+        aiResponseTask = nil
+    }
+
+    private func applyAIEvent(_ event: AIStreamEvent, messageID: UUID) {
+        guard let index = aiMessages.firstIndex(where: { $0.id == messageID }) else { return }
+        switch event {
+        case .outputDelta(let delta):
+            aiMessages[index].text += delta
+            aiStatus = "Writing"
+        case .reasoningDelta(let delta):
+            aiMessages[index].reasoningSummary += delta
+            aiStatus = "Thinking"
+        case .toolStarted(let name):
+            aiMessages[index].toolActivity.append("Running \(name)…")
+            aiStatus = "Updating ReFocus"
+        case .toolFinished(let name):
+            if let activityIndex = aiMessages[index].toolActivity.lastIndex(where: { $0 == "Running \(name)…" }) {
+                aiMessages[index].toolActivity[activityIndex] = "Completed \(name)"
+            }
+        }
+    }
+
+    private func performAITool(name: String, arguments: Data, userPrompt: String) async throws -> String {
+        guard let worker else { throw PersistenceError.missingPlan("vault") }
+        let decoder = JSONDecoder()
+        switch name {
+        case "get_refocus_context":
+            let object = (try? JSONSerialization.jsonObject(with: arguments) as? [String: Any]) ?? [:]
+            let date = try aiDate(from: object["date"] as? String)
+            return try await worker.loadAIContext(on: date)
+        case "create_task":
+            let entry = try await worker.createAITask(decoder.decode(AICreateTaskArguments.self, from: arguments))
+            return aiTaskResult(entry, action: "created")
+        case "update_task":
+            let entry = try await worker.updateAITask(decoder.decode(AIUpdateTaskArguments.self, from: arguments))
+            return aiTaskResult(entry, action: "updated")
+        case "append_task_description":
+            let object = try JSONSerialization.jsonObject(with: arguments) as? [String: Any]
+            guard let taskID = object?["task_id"] as? String, let text = object?["text"] as? String else {
+                throw OpenAIChatError.api("append_task_description requires task_id and text")
+            }
+            let entry = try await worker.appendAITaskDescription(taskID: taskID, text: text)
+            return aiTaskResult(entry, action: "description_appended")
+        case "reschedule_task":
+            let entry = try await worker.rescheduleAITask(decoder.decode(AIRescheduleTaskArguments.self, from: arguments))
+            return aiTaskResult(entry, action: "rescheduled")
+        case "delete_task":
+            let lower = userPrompt.lowercased()
+            guard ["delete", "remove", "cancel"].contains(where: lower.contains) else {
+                return "{\"ok\":false,\"error\":\"Deletion requires an explicit delete, remove, or cancel instruction in the current prompt.\"}"
+            }
+            let object = try JSONSerialization.jsonObject(with: arguments) as? [String: Any]
+            guard let rawID = object?["task_id"] as? String, let id = UUID(uuidString: rawID) else {
+                throw OpenAIChatError.api("delete_task requires a valid task_id")
+            }
+            try await worker.deleteTask(id)
+            return "{\"ok\":true,\"action\":\"deleted\",\"task_id\":\"\(id.uuidString.lowercased())\"}"
+        case "set_daily_metric":
+            let object = try JSONSerialization.jsonObject(with: arguments) as? [String: Any]
+            guard let date = object?["date"] as? String,
+                  let fieldID = object?["field_id"] as? String,
+                  let value = object?["value"] as? String else {
+                throw OpenAIChatError.api("set_daily_metric requires date, field_id, and value")
+            }
+            try await worker.setAIFieldValue(definitionID: fieldID, value: value, dateText: date)
+            return "{\"ok\":true,\"action\":\"daily_field_updated\"}"
+        case "search_vault":
+            let object = try JSONSerialization.jsonObject(with: arguments) as? [String: Any]
+            return await worker.searchVaultForAI(object?["query"] as? String ?? "")
+        default:
+            throw OpenAIChatError.api("Unknown ReFocus tool: \(name)")
+        }
+    }
+
+    private func aiTaskResult(_ entry: AgendaTask, action: String) -> String {
+        let date = MarkdownPlanCodec.isoDate(entry.date, calendar: WallClock.dhakaCalendar())
+        let time = entry.task.hasScheduledTime ? MarkdownPlanCodec.time(entry.task.startMinute) : "untimed"
+        return "{\"ok\":true,\"action\":\"\(action)\",\"task_id\":\"\(entry.id.uuidString.lowercased())\",\"date\":\"\(date)\",\"time\":\"\(time)\"}"
+    }
+
+    private func aiDate(from value: String?) throws -> Date {
+        guard let value, !value.isEmpty else { return now }
+        let parts = value.split(separator: "-").compactMap { Int($0) }
+        guard parts.count == 3,
+              let date = WallClock.dhakaCalendar().date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2]))
+        else { throw OpenAIChatError.api("Date must use YYYY-MM-DD") }
+        return date
+    }
+
+    private func aiInstructions(vaultPrimer: String) -> String {
+        let localFormatter = DateFormatter()
+        localFormatter.calendar = WallClock.dhakaCalendar()
+        localFormatter.locale = Locale(identifier: "en_US_POSIX")
+        localFormatter.timeZone = TimeZone(identifier: "Asia/Dhaka")
+        localFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss EEEE"
+        let localNow = localFormatter.string(from: now)
+        let cycleStart = MarkdownPlanCodec.time(clock.minuteOfDay(for: snapshot.cycleStart))
+        let nextCycleDate = WallClock.dhakaCalendar().date(byAdding: .minute, value: 30, to: snapshot.cycleStart) ?? snapshot.phaseEnd
+        let nextCycleStart = MarkdownPlanCodec.time(clock.minuteOfDay(for: nextCycleDate))
+        return """
+        You are ReFocus AI, the fast planning assistant inside the native ReFocus app.
+        Live Asia/Dhaka date and time for this turn: \(localNow). Current phase: \(snapshot.phase.rawValue). Current cycle starts at \(cycleStart); the next cycle starts at \(nextCycleStart). This live value overrides dates or times inherited from older chat turns.
+
+        Use get_refocus_context before changing tasks or Daily data. Stable task IDs from that read are mandatory for update, reschedule, and delete. Every created task must have a custom, very terse MVP and exactly three custom, very terse subtasks; mirror the shorthand style of nearby existing entries. Timed quick tasks may replace overlapping predefined routine rows, but never silently remove user tasks or fixed evening tasks. Only delete when the current user prompt explicitly asks to delete, remove, or cancel. After writes, state exactly what changed. Never claim a write succeeded unless its tool returned ok=true.
+
+        ReFocus shorthand is executable, not a clarification request:
+        - `cur -> did X` means append X to Description of the task occupying the current cycle. During a screen break at HH:25-HH:29 or HH:55-HH:59, current means the focus cycle that just ended; use currentTask from get_refocus_context and append_task_description.
+        - `next -> 1 cyc/cycle -> Y, then 2 cyc/cycle -> Z` means create Y for one consecutive half-hour cycle beginning at nextCycleStart, then Z for the next two consecutive half-hour cycles. Continue sequentially for more `then` clauses. Use the live currentDate, rolling to the next date if a computed start crosses midnight.
+        - `cyc` and `cycle` both mean one 30-minute ReFocus cycle.
+        Do not ask which date or current block when live context supplies it.
+
+        Planning rules: Morning 06:00-12:00, Afternoon 12:00-18:00, Evening 18:00-21:30, and a separate Late Night gate 21:30-23:00. The first three may be planned in advance; Late Night must be saved after 21:30. Use half-hour times. Prefer untimed Agenda capture when the user gives a date but no time. Search the vault only when the supplied primer and live ReFocus context do not answer the question.
+
+        Show concise progress summaries and supported tool activity. Do not expose or invent private chain-of-thought. A supported reasoning summary may explain the approach at a high level.
+
+        Canonical vault primer:
+        \(vaultPrimer)
+        """
     }
 
     var currentTask: PlanTask? {
@@ -147,7 +405,10 @@ final class AppModel: ObservableObject {
     var activeRestTask: PlanTask? {
         let minute = clock.minuteOfDay(for: now)
         return executionTasks.first {
-            $0.isRoutineBlock && $0.predefinedKind == .rest && $0.contains(minuteOfDay: minute)
+            $0.isRoutineBlock
+                && $0.predefinedKind == .rest
+                && FixedPlanTasks.isAllowedScheduledRest(start: $0.startMinute, end: $0.endMinute)
+                && $0.contains(minuteOfDay: minute)
         }
     }
 
@@ -166,7 +427,13 @@ final class AppModel: ObservableObject {
     }
 
     var cycleSummaryText: String {
-        if requiredCycleMinimum == 0 { return "\(activeSegment.title) · no work cycles available" }
+        if requiredCycleMinimum == 0 {
+            let hasExceptionWork = validator.hasRemainingPlannedWork(
+                in: activeSegment, at: now, tasks: tasks
+            )
+            if hasExceptionWork { return "\(activeSegment.title) · save required" }
+            return "\(activeSegment.title) · no work cycles available"
+        }
         return "\(activeSegment.title) · \(plannedCycles) planned · \(requiredCycleMinimum) required now"
     }
 
@@ -209,17 +476,23 @@ final class AppModel: ObservableObject {
     }
 
     var tomorrowCycleSummary: String {
-        PlanningSegment.allCases.map { segment in
+        PlanningSegment.preplannedCases.map { segment in
             "\(segment.title.replacingOccurrences(of: " Block", with: "")) \(tomorrowTasks.reduce(0) { $0 + $1.planningCycles(in: segment) })/\(tomorrowRequiredCycles(segment, tasks: tomorrowTasks))"
         }.joined(separator: " · ")
     }
 
     var planGateMessage: String {
         if isPlanCommitted { return "Today is ready." }
-        if requiredCycleMinimum == 0 {
+        if isPlanReady { return "Save Today to unlock focused work." }
+        let hasExceptionWork = validator.hasRemainingPlannedWork(
+            in: activeSegment, at: now, tasks: tasks
+        )
+        if requiredCycleMinimum == 0 && !hasExceptionWork {
             return "No work cycles remain in the \(activeSegment.title.lowercased()). Work stays locked until the next planning block."
         }
-        if isPlanReady { return "Save Today to unlock focused work." }
+        if requiredCycleMinimum == 0 {
+            return "Fix the plan warnings before focused work begins, then save Today."
+        }
         return "Plan the \(activeSegment.title.lowercased()) before focused work begins: \(requiredCycleMinimum) available work cycles."
     }
 
@@ -249,6 +522,35 @@ final class AppModel: ObservableObject {
         overlayPauseUntil = now.addingTimeInterval(60)
         overlayController.hide()
         isBreakVisible = false
+    }
+
+    var screenBreakSkipsRemaining: Int { max(0, 3 - screenBreakSkipsUsed) }
+
+    func skipCurrentScreenBreak() {
+        guard snapshot.phase == .screenBreak,
+              screenBreakSkipsUsed < 3,
+              let worker else { return }
+        let breakID = activeBreakID ?? sessionID(for: snapshot.cycleStart)
+        let skippedAt = now
+        overlayPauseUntil = snapshot.phaseEnd
+        if var checkIn = currentCheckIn {
+            checkIn.outcome = .interrupted
+            checkIn.emergencyReason = "Screen break skipped"
+            currentCheckIn = checkIn
+            saveCurrentCheckIn()
+        }
+        overlayController.hide()
+        isBreakVisible = false
+        Task { [weak self] in
+            do {
+                let count = try await worker.recordScreenBreakSkip(id: breakID, at: skippedAt)
+                self?.screenBreakSkipsUsed = count
+            } catch {
+                self?.overlayPauseUntil = nil
+                self?.errorMessage = "Could not skip this screen break: \(error.localizedDescription)"
+                self?.tick()
+            }
+        }
     }
 
     func chooseVault() {
@@ -289,6 +591,8 @@ final class AppModel: ObservableObject {
         let localTomorrowBaseline = tomorrowBaselineTasks
         let hadTomorrowEdits = tomorrowIsDirty
         let date = now
+        reloadGeneration &+= 1
+        let generation = reloadGeneration
         Task { [weak self] in
             guard let self else { return }
             let planResult: Result<TodayPlan, Error>
@@ -300,9 +604,16 @@ final class AppModel: ObservableObject {
             let agendaResult = (try? await worker.loadAgenda(asOf: date)) ?? []
             let fieldDefinitions = (try? await worker.loadDailyFieldDefinitions()) ?? []
             let fieldValues = (try? await worker.loadDailyFieldValues(for: date)) ?? []
+            let skipCount = (try? await worker.screenBreakSkipCount(on: date)) ?? 0
             let templatesResult = (try? await worker.loadTemplates()) ?? []
             let nextDate = WallClock.dhakaCalendar().date(byAdding: .day, value: 1, to: date) ?? date
             let tomorrowResult = try? await worker.loadTomorrow(date: nextDate)
+
+            // A long-lived app can cross midnight while this work is in
+            // flight. Only the newest reload may publish its result; without
+            // this guard, yesterday's slower load could overwrite today's
+            // plan after today's load had already completed.
+            guard self.reloadGeneration == generation else { return }
 
             self.dayProfile = self.resolver.profile(for: date)
             self.activeSegment = self.validator.segment(at: date)
@@ -365,6 +676,7 @@ final class AppModel: ObservableObject {
             }
             self.dailyFieldDefinitions = fieldDefinitions
             self.dailyFieldValues = Dictionary(uniqueKeysWithValues: fieldValues.map { ($0.definitionID, $0.value) })
+            self.screenBreakSkipsUsed = skipCount
             self.reloadStreakSummaries()
             self.reloadDailyDashboardAnalytics()
         }
@@ -463,6 +775,22 @@ final class AppModel: ObservableObject {
             coreTasks: segment == nil ? [] : [CoreTask(title: ""), CoreTask(title: ""), CoreTask(title: "")],
             quickCapture: segment == nil,
             timeAssigned: segment != nil
+        )
+        registerTaskUndo(actionName: "Add Task", persistence: .none)
+        tomorrowTasks.append(task)
+        registerNewTask(task.id)
+        markTomorrowDirty()
+    }
+
+    func addTomorrowTask(startingAt start: Int, before end: Int) {
+        guard let slot = validator.firstUnusedSlot(in: tomorrowTasks, startingAt: start, before: end) else {
+            errorMessage = "No unused half-hour slot remains in this time range."
+            return
+        }
+        let task = PlanTask(
+            title: "New task", startMinute: slot, cycles: 1, mvp: "",
+            coreTasks: [CoreTask(title: ""), CoreTask(title: ""), CoreTask(title: "")],
+            quickCapture: false, timeAssigned: true
         )
         registerTaskUndo(actionName: "Add Task", persistence: .none)
         tomorrowTasks.append(task)
@@ -599,6 +927,29 @@ final class AppModel: ObservableObject {
         if autosave { scheduleAgendaTodayAutosave() }
     }
 
+    /// The screen-break detail editor intentionally exposes only execution
+    /// fields. Changes debounce into the ordinary Today save path so the
+    /// active Modified snapshot, Diff, SQLite row, and projections agree.
+    func updateBreakTask(_ updated: PlanTask) {
+        guard let index = tasks.firstIndex(where: { $0.id == updated.id }), tasks[index] != updated else { return }
+        tasks[index] = updated
+        if currentCheckIn?.taskID == updated.id {
+            currentCheckIn?.description = updated.description ?? ""
+            scheduleCheckInSave()
+        }
+        markPlanDirty()
+        breakTaskSaveTask?.cancel()
+        breakTaskSaveTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(650))
+            guard let self, !Task.isCancelled else { return }
+            for _ in 0..<8 where self.isSavingPlan {
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+            guard self.planIsDirty, !self.isSavingPlan else { return }
+            self.savePlan()
+        }
+    }
+
     func updateTomorrowTask(_ updated: PlanTask, autosave: Bool = false) {
         guard let index = tomorrowTasks.firstIndex(where: { $0.id == updated.id }), tomorrowTasks[index] != updated else { return }
         registerTaskUndo(actionName: "Edit Task", persistence: autosave ? .tomorrowAgenda : .none)
@@ -631,6 +982,27 @@ final class AppModel: ObservableObject {
             coreTasks: segment == nil ? [] : [CoreTask(title: ""), CoreTask(title: ""), CoreTask(title: "")],
             quickCapture: segment == nil,
             timeAssigned: segment != nil
+        )
+        registerTaskUndo(actionName: "Add Task", persistence: .none)
+        tasks.append(task)
+        registerNewTask(task.id)
+        markPlanDirty()
+    }
+
+    /// Adds a scheduled task to a non-gated display range, such as Midnight.
+    /// This range is intentionally separate from `PlanningSegment` so it does
+    /// not create or alter a planning-cycle requirement.
+    func addTask(startingAt start: Int, before end: Int) {
+        userRequestedEditing = true
+        isEditingPlan = true
+        guard let slot = validator.firstUnusedSlot(in: tasks, startingAt: start, before: end) else {
+            errorMessage = "No unused half-hour slot remains in this time range."
+            return
+        }
+        let task = PlanTask(
+            title: "New task", startMinute: slot, cycles: 1, mvp: "",
+            coreTasks: [CoreTask(title: ""), CoreTask(title: ""), CoreTask(title: "")],
+            quickCapture: false, timeAssigned: true
         )
         registerTaskUndo(actionName: "Add Task", persistence: .none)
         tasks.append(task)
@@ -1186,6 +1558,24 @@ final class AppModel: ObservableObject {
         // ticker must load the new day's plan instead of continuing to show
         // yesterday's tasks (and yesterday's reschedule context).
         if previousDay != currentDay, worker != nil {
+            // Clear day-scoped state immediately. This prevents the old day
+            // from remaining visible during the asynchronous database read
+            // and resets the planning gate against the new Dhaka date.
+            dayProfile = resolver.profile(for: date)
+            activeSegment = validator.segment(at: date)
+            tasks = []
+            baselineTasks = []
+            hasPersistedToday = false
+            initialSegments = []
+            planIsDirty = false
+            validationIssues = []
+            isArmed = false
+            isEditingPlan = true
+            userRequestedEditing = false
+            overlayPauseUntil = nil
+            attemptedFinalCaptureDay = nil
+            activeBreakID = nil
+            screenBreakSkipsUsed = 0
             reloadVault(force: true)
         }
 
@@ -1215,8 +1605,9 @@ final class AppModel: ObservableObject {
             overlayPauseUntil = nil
         }
 
-        // A scheduled Rest is a full-block screen guard. The overlay offers a
-        // one-minute temporary release, then restores itself until Rest ends.
+        // Only the two allowed live routine Rest windows are full-block screen
+        // guards. The overlay offers a one-minute temporary release, then
+        // restores itself until Rest ends.
         if activeRestTask != nil {
             activeBreakID = nil
             if overlayController.mode != .rest { overlayController.showRest(model: self) }
@@ -1246,9 +1637,10 @@ final class AppModel: ObservableObject {
         }
         activeBreakID = nil
 
-        // Planning gates apply from the morning routine through midnight.
-        // Night planning remains available after the fixed 20:00 routines.
-        guard minute >= 330 else {
+        // Planning gates apply from the morning routine through 23:00. The
+        // 18:00 save covers only the normal evening through 21:30; at 21:30 a
+        // separate late-night gate deliberately relocks until 23:00 is saved.
+        guard minute >= 330 && minute < PlanningSegment.lateNight.endMinute else {
             isArmed = false
             if overlayController.mode == .planningGate { overlayController.hide() }
             isBreakVisible = false
@@ -1287,20 +1679,29 @@ final class AppModel: ObservableObject {
 
     private func beginCheckIn(id: String) {
         let focusEnd = Calendar.current.date(byAdding: .minute, value: 25, to: snapshot.cycleStart) ?? snapshot.phaseStart
+        let task = currentTask
         currentCheckIn = CheckIn(
             id: id,
-            taskID: executionTask?.id,
-            taskTitle: currentTaskTitle,
+            taskID: task?.id,
+            taskTitle: task?.title ?? currentTaskTitle,
             focusStart: snapshot.cycleStart,
-            focusEnd: focusEnd
+            focusEnd: focusEnd,
+            description: task?.description ?? ""
         )
         saveCurrentCheckIn()
     }
 
     private func finalizeCurrentCheckIn() {
         guard var checkIn = currentCheckIn else { return }
+        if let task = checkIn.taskID.flatMap({ id in tasks.first(where: { $0.id == id }) }) {
+            checkIn.description = task.description ?? ""
+        }
         if checkIn.outcome != .interrupted {
-            checkIn.outcome = checkIn.whatDid.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .missed : .complete
+            if let taskID = checkIn.taskID, tasks.first(where: { $0.id == taskID })?.isComplete == true {
+                checkIn.outcome = .complete
+            } else {
+                checkIn.outcome = checkIn.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .missed : .partial
+            }
         }
         currentCheckIn = checkIn
         saveCurrentCheckIn()
@@ -1453,7 +1854,7 @@ final class AppModel: ObservableObject {
             now: now
         )
         let minute = clock.minuteOfDay(for: now)
-        if minute >= 330,
+        if minute >= 330 && minute < PlanningSegment.lateNight.endMinute,
            let availabilityIssue = validator.availabilityIssue(
                in: activeSegment, at: now, profile: dayProfile, tasks: candidate
            ) {
@@ -1485,7 +1886,9 @@ final class AppModel: ObservableObject {
             scheduledDate: tomorrowDate,
             now: now
         )
-        for segment in PlanningSegment.allCases {
+        // Tomorrow is saved only through 21:30. Late Night is intentionally
+        // initialized after 21:30 on the actual day.
+        for segment in PlanningSegment.preplannedCases {
             let actual = candidate.reduce(0) { $0 + $1.planningCycles(in: segment) }
             let required = tomorrowRequiredCycles(segment, tasks: candidate)
             if actual < required {
@@ -1608,20 +2011,6 @@ final class AppModel: ObservableObject {
 
     private func refreshLoginStatus() {
         launchAtLogin = SMAppService.mainApp.status == .enabled
-    }
-
-    private func ensureLaunchAtLogin() {
-        guard SMAppService.mainApp.status != .enabled else {
-            launchAtLogin = true
-            return
-        }
-        do {
-            try SMAppService.mainApp.register()
-            refreshLoginStatus()
-        } catch {
-            refreshLoginStatus()
-            errorMessage = "ReFocus could not enable launch at login: \(error.localizedDescription)"
-        }
     }
 
     private func reloadStreakSummaries() {

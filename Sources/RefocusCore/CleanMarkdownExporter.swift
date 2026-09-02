@@ -71,11 +71,11 @@ public struct CleanMarkdownExporter: Sendable {
         if !checkIns.isEmpty {
             lines.append(contentsOf: ["", "## Focus sessions"])
             for checkIn in checkIns.sorted(by: { $0.focusStart < $1.focusStart }) {
-                let did = checkIn.whatDid.trimmingCharacters(in: .whitespacesAndNewlines)
+                let description = checkIn.description.trimmingCharacters(in: .whitespacesAndNewlines)
                 lines.append("- \(time(checkIn.focusStart))–\(time(checkIn.focusEnd)) · \(checkIn.taskTitle) · \(checkIn.outcome.rawValue)")
-                if !did.isEmpty { lines.append("  - Did: \(did)") }
-                if !checkIn.better.isEmpty { lines.append("  - Better: \(checkIn.better)") }
-                if !checkIn.faster.isEmpty { lines.append("  - Faster: \(checkIn.faster)") }
+                if !description.isEmpty {
+                    lines.append("  - Description: \(description.replacingOccurrences(of: "\n", with: " / "))")
+                }
             }
         }
         _ = analysis // Human analysis belongs in journal/mon-D.md, not the machine log.

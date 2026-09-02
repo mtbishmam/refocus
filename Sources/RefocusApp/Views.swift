@@ -54,35 +54,45 @@ private struct MenuClockStatus: View {
 struct DashboardView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.colorScheme) private var colorScheme
-    @State private var selectedTab: DashboardTab = .today
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("Section", selection: $selectedTab) {
+            Picker("Section", selection: $model.selectedDashboardTab) {
                 Text("Agenda").tag(DashboardTab.agenda)
                 Text("Today").tag(DashboardTab.today)
                 Text("Tomorrow").tag(DashboardTab.tomorrow)
                 Text("Daily").tag(DashboardTab.streaks)
                 Text("Diff").tag(DashboardTab.diff)
+                Text("AI").tag(DashboardTab.ai)
                 Text("Settings").tag(DashboardTab.settings)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 590)
+            .frame(width: 680)
             .padding(.top, 16)
             .padding(.bottom, 12)
 
             Group {
-                switch selectedTab {
+                switch model.selectedDashboardTab {
                 case .agenda: AgendaView()
                 case .today: PlanEditorView()
                 case .tomorrow: TomorrowPlanView()
                 case .streaks: StreaksView()
                 case .diff: DiffView()
+                case .ai: AIChatView()
                 case .settings: SettingsView()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            HStack {
+                Spacer(minLength: 0)
+                AIComposer()
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 2)
+            .padding(.bottom, 8)
 
         }
         .background(dashboardBackground)
@@ -104,13 +114,518 @@ struct DashboardView: View {
     }
 }
 
-private enum DashboardTab: Hashable {
-    case agenda
-    case today
-    case tomorrow
-    case streaks
-    case diff
-    case settings
+private struct AIChatView: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 30) {
+                    if model.aiMessages.isEmpty {
+                        VStack(spacing: 12) {
+                            Image(systemName: "sparkles").font(.system(size: 34)).foregroundStyle(.blue)
+                            Text("Plan with ReFocus AI").font(.title.bold())
+                            Text("Create, move, edit, or delete tasks and update present or historical Daily metrics.")
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 90)
+                    }
+                    ForEach(model.aiMessages) { message in
+                        AIMessageView(message: message).id(message.id)
+                    }
+                }
+                .frame(maxWidth: 980)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.horizontal, 32)
+                .padding(.vertical, 26)
+            }
+            .onChange(of: model.aiMessages.count) { _, _ in
+                if let id = model.aiMessages.last?.id { withAnimation { proxy.scrollTo(id, anchor: .bottom) } }
+            }
+            .onChange(of: model.aiMessages.last?.text) { _, _ in
+                if let id = model.aiMessages.last?.id { proxy.scrollTo(id, anchor: .bottom) }
+            }
+        }
+    }
+}
+
+private struct AIMessageView: View {
+    let message: AIChatMessage
+
+    private var userContentWidth: CGFloat? {
+        guard message.role == .user else { return nil }
+        let font = NSFont.systemFont(ofSize: 16, weight: .regular)
+        let widestLine = message.text
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line in
+                (String(line) as NSString).size(withAttributes: [.font: font]).width
+            }
+            .max() ?? 0
+        // The bubble has 20 points of padding on each side, leaving a
+        // 406-point content area inside the 446-point total-width cap.
+        return min(406, max(24, ceil(widestLine)))
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            if message.role == .user { Spacer(minLength: 0) }
+            if message.role == .assistant {
+                Image(systemName: "sparkles")
+                    .frame(width: 34, height: 34)
+                    .background(Color.blue.opacity(0.13), in: Circle())
+                    .foregroundStyle(.blue)
+            }
+            VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 12) {
+                if !message.reasoningSummary.isEmpty {
+                    DisclosureGroup("Thinking") {
+                        Text(message.reasoningSummary)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .padding(.top, 4)
+                    }
+                    .font(.caption.bold())
+                } else if message.isStreaming && message.text.isEmpty {
+                    AIShimmerStatus(text: "Thinking")
+                }
+                ForEach(message.toolActivity, id: \.self) { activity in
+                    Label(activity, systemImage: activity.hasPrefix("Completed") ? "checkmark.circle.fill" : "gearshape.2")
+                        .font(.caption)
+                        .foregroundStyle(activity.hasPrefix("Completed") ? .green : .secondary)
+                }
+                if !message.text.isEmpty {
+                    if message.role == .user {
+                        Text(message.text)
+                            .font(.system(size: 16, weight: .regular))
+                            .lineSpacing(6)
+                            .textSelection(.enabled)
+                            .multilineTextAlignment(.leading)
+                            .frame(width: userContentWidth, alignment: .leading)
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 14)
+                            .background(
+                                Color.primary.opacity(0.052),
+                                in: RoundedRectangle(cornerRadius: 26, style: .continuous)
+                            )
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                                    .stroke(Color.primary.opacity(0.045), lineWidth: 1)
+                            }
+                            .shadow(color: Color.black.opacity(0.035), radius: 8, y: 2)
+                    } else {
+                        FormattedAIText(markdown: message.text)
+                    }
+                    Button {
+                        copyAIText(message.text)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .frame(width: 24, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .help("Copy this message")
+                }
+            }
+            .multilineTextAlignment(message.role == .user ? .trailing : .leading)
+            // Keep user messages compact like ChatGPT while allowing the
+            // assistant response to use the available reading width.
+            .frame(
+                maxWidth: message.role == .user ? 446 : 860,
+                alignment: message.role == .user ? .trailing : .leading
+            )
+            if message.role == .assistant { Spacer(minLength: 0) }
+        }
+        .frame(maxWidth: .infinity, alignment: message.role == .user ? .trailing : .leading)
+    }
+}
+
+private func copyAIText(_ text: String) {
+    let pasteboard = NSPasteboard.general
+    pasteboard.clearContents()
+    pasteboard.setString(text, forType: .string)
+}
+
+private struct FormattedAIText: View {
+    let markdown: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ForEach(MarkdownBlockParser.parse(markdown)) { block in
+                MarkdownBlockView(block: block)
+            }
+        }
+        .textSelection(.enabled)
+        .multilineTextAlignment(.leading)
+        .frame(alignment: .leading)
+    }
+}
+
+private struct MarkdownBlock: Identifiable {
+    enum Kind {
+        case paragraph
+        case heading
+        case bullets
+        case numbered
+        case quote
+        case code
+    }
+
+    let id: Int
+    let kind: Kind
+    let lines: [String]
+    let level: Int
+}
+
+private enum MarkdownBlockParser {
+    static func parse(_ markdown: String) -> [MarkdownBlock] {
+        let normalized = markdown.replacingOccurrences(of: "\r\n", with: "\n")
+        let lines = normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var blocks: [MarkdownBlock] = []
+        var index = 0
+
+        while index < lines.count {
+            let line = lines[index]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty {
+                index += 1
+                continue
+            }
+
+            if trimmed.hasPrefix("```") {
+                let language = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                index += 1
+                var codeLines: [String] = []
+                while index < lines.count {
+                    if lines[index].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                        index += 1
+                        break
+                    }
+                    codeLines.append(lines[index])
+                    index += 1
+                }
+                let displayedLines = language.isEmpty ? codeLines : ["\(language):"] + codeLines
+                blocks.append(MarkdownBlock(id: blocks.count, kind: .code, lines: displayedLines, level: 0))
+                continue
+            }
+
+            if let heading = headingText(trimmed) {
+                blocks.append(MarkdownBlock(id: blocks.count, kind: .heading, lines: [heading.text], level: heading.level))
+                index += 1
+                continue
+            }
+
+            if let firstItem = listItem(trimmed) {
+                let kind: MarkdownBlock.Kind = firstItem.number == nil ? .bullets : .numbered
+                var items: [String] = []
+                var item = firstItem
+                repeat {
+                    items.append(item.text)
+                    index += 1
+                    guard index < lines.count else { break }
+                    guard let next = listItem(lines[index].trimmingCharacters(in: .whitespaces)),
+                          (next.number == nil) == (firstItem.number == nil) else { break }
+                    item = next
+                } while index < lines.count
+                blocks.append(MarkdownBlock(id: blocks.count, kind: kind, lines: items, level: 0))
+                continue
+            }
+
+            if trimmed.hasPrefix(">") {
+                var quoteLines: [String] = []
+                while index < lines.count {
+                    let next = lines[index].trimmingCharacters(in: .whitespaces)
+                    guard next.hasPrefix(">") else { break }
+                    quoteLines.append(String(next.dropFirst()).trimmingCharacters(in: .whitespaces))
+                    index += 1
+                }
+                blocks.append(MarkdownBlock(id: blocks.count, kind: .quote, lines: [quoteLines.joined(separator: " ")], level: 0))
+                continue
+            }
+
+            var paragraphLines = [line.trimmingCharacters(in: .whitespaces)]
+            index += 1
+            while index < lines.count {
+                let next = lines[index]
+                let nextTrimmed = next.trimmingCharacters(in: .whitespaces)
+                guard !nextTrimmed.isEmpty,
+                      !nextTrimmed.hasPrefix("```") && headingText(nextTrimmed) == nil,
+                      listItem(nextTrimmed) == nil,
+                      !nextTrimmed.hasPrefix(">") else { break }
+                paragraphLines.append(nextTrimmed)
+                index += 1
+            }
+            blocks.append(MarkdownBlock(id: blocks.count, kind: .paragraph, lines: [paragraphLines.joined(separator: " ")], level: 0))
+        }
+
+        return blocks
+    }
+
+    private static func headingText(_ line: String) -> (level: Int, text: String)? {
+        let prefix = line.prefix { $0 == "#" }
+        guard !prefix.isEmpty, prefix.count <= 6 else { return nil }
+        let text = line.dropFirst(prefix.count).trimmingCharacters(in: .whitespaces)
+        return text.isEmpty ? nil : (prefix.count, text)
+    }
+
+    private static func listItem(_ line: String) -> (number: Int?, text: String)? {
+        if let marker = line.first, ["-", "*", "+"].contains(marker), line.dropFirst().first == " " {
+            return (nil, String(line.dropFirst()).trimmingCharacters(in: .whitespaces))
+        }
+        let digits = line.prefix { $0.isNumber }
+        guard !digits.isEmpty else { return nil }
+        let remainder = line.dropFirst(digits.count)
+        guard let marker = remainder.first, [".", ")"].contains(marker), remainder.dropFirst().first == " " else { return nil }
+        return (Int(digits), String(remainder.dropFirst()).trimmingCharacters(in: .whitespaces))
+    }
+}
+
+private struct MarkdownBlockView: View {
+    let block: MarkdownBlock
+
+    var body: some View {
+        switch block.kind {
+        case .paragraph:
+            inlineText(block.lines[0])
+                .font(.system(size: 16, weight: .regular))
+                .lineSpacing(6)
+        case .heading:
+            inlineText(block.lines[0])
+                .font(.system(size: block.level == 1 ? 20 : 17, weight: .semibold))
+                .padding(.top, 3)
+        case .bullets:
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(block.lines.enumerated()), id: \.offset) { _, line in
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Text("•").font(.system(size: 16, weight: .semibold))
+                        inlineText(line).font(.system(size: 16)).lineSpacing(5)
+                    }
+                }
+            }
+        case .numbered:
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(block.lines.enumerated()), id: \.offset) { index, line in
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Text("\(index + 1).").font(.system(size: 16).monospacedDigit())
+                        inlineText(line).font(.system(size: 16)).lineSpacing(5)
+                    }
+                }
+            }
+        case .quote:
+            HStack(alignment: .top, spacing: 10) {
+                Rectangle().fill(Color.secondary.opacity(0.5)).frame(width: 3)
+                inlineText(block.lines[0])
+                    .font(.system(size: 16))
+                    .lineSpacing(5)
+                    .foregroundStyle(.secondary)
+            }
+        case .code:
+            Text(block.lines.joined(separator: "\n"))
+                .font(.system(size: 14, design: .monospaced))
+                .textSelection(.enabled)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+    }
+
+    private func inlineText(_ value: String) -> Text {
+        guard let attributed = try? AttributedString(markdown: value, options: .init(interpretedSyntax: .full)) else {
+            return Text(value)
+        }
+        return Text(attributed)
+    }
+}
+
+private final class AIComposerTextView: NSTextView {
+    var onSend: (() -> Void)?
+    var placeholder = "" {
+        didSet {
+            if oldValue != placeholder {
+                needsDisplay = true
+            }
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard string.isEmpty, !placeholder.isEmpty else { return }
+
+        let origin = textContainerOrigin
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font ?? NSFont.systemFont(ofSize: 16),
+            .foregroundColor: NSColor.placeholderTextColor
+        ]
+        // A small gap leaves the insertion caret visibly before the first
+        // placeholder glyph while retaining NSTextView's native baseline.
+        (placeholder as NSString).draw(
+            at: NSPoint(x: origin.x + 5, y: origin.y),
+            withAttributes: attributes
+        )
+    }
+
+    override func keyDown(with event: NSEvent) {
+        let isReturn = event.keyCode == 36 || event.keyCode == 76
+        guard isReturn else {
+            super.keyDown(with: event)
+            return
+        }
+
+        if event.modifierFlags.contains(.shift) {
+            // Use NSTextView's selection instead of appending to the bound
+            // string so Shift+Return inserts exactly where the caret is.
+            insertText("\n", replacementRange: selectedRange())
+        } else {
+            onSend?()
+        }
+    }
+}
+
+private struct AIComposerInput: NSViewRepresentable {
+    @Binding var text: String
+    let placeholder: String
+    let onSend: () -> Void
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        let parent: AIComposerInput
+        weak var textView: AIComposerTextView?
+
+        init(parent: AIComposerInput) {
+            self.parent = parent
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView else { return }
+            textView.needsDisplay = true
+            if parent.text != textView.string {
+                parent.text = textView.string
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.hasVerticalScroller = false
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+
+        let textView = AIComposerTextView()
+        textView.delegate = context.coordinator
+        textView.onSend = onSend
+        textView.string = text
+        textView.placeholder = placeholder
+        textView.font = .systemFont(ofSize: 16)
+        textView.textColor = .labelColor
+        textView.insertionPointColor = .controlAccentColor
+        textView.backgroundColor = .clear
+        textView.drawsBackground = false
+        textView.isRichText = false
+        textView.allowsUndo = true
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        // A 16-point combined inset around a 20-point line fills the
+        // 36-point single-line editor evenly above and below.
+        textView.textContainerInset = NSSize(width: 0, height: 8)
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.lineBreakMode = .byWordWrapping
+        textView.textContainer?.maximumNumberOfLines = 8
+
+        scrollView.documentView = textView
+        context.coordinator.textView = textView
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? AIComposerTextView else { return }
+        textView.onSend = onSend
+        textView.placeholder = placeholder
+
+        guard textView.string != text else { return }
+        let selection = textView.selectedRange()
+        textView.string = text
+        let textLength = (textView.string as NSString).length
+        let location = min(selection.location, textLength)
+        textView.setSelectedRange(NSRange(location: location, length: 0))
+    }
+}
+
+private struct AIComposer: View {
+    @EnvironmentObject private var model: AppModel
+
+    private var inputHeight: CGFloat {
+        let explicitLines = max(
+            1,
+            model.aiDraft.split(separator: "\n", omittingEmptySubsequences: false).count
+        )
+        return min(160, max(36, CGFloat(explicitLines) * 20 + 12))
+    }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            AIComposerInput(
+                text: $model.aiDraft,
+                placeholder: "Ask ReFocus to plan or update anything…"
+            ) {
+                model.sendAIMessage()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: inputHeight)
+            if model.aiIsResponding {
+                Button { model.cancelAIResponse() } label: {
+                    Image(systemName: "stop.fill")
+                        .frame(width: 30, height: 30)
+                        .background(Color.primary, in: Circle())
+                        .foregroundStyle(Color(nsColor: .windowBackgroundColor))
+                }.buttonStyle(.plain)
+            } else {
+                Button { model.sendAIMessage() } label: {
+                    Image(systemName: "arrow.up")
+                        .font(.headline.bold())
+                        .frame(width: 30, height: 30)
+                        .background(model.aiDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Color.secondary.opacity(0.35) : Color.primary, in: Circle())
+                        .foregroundStyle(Color(nsColor: .windowBackgroundColor))
+                }
+                .buttonStyle(.plain)
+                .disabled(model.aiDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 9)
+        .frame(maxWidth: 900)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 30, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 30, style: .continuous).stroke(Color.primary.opacity(0.12)))
+        .shadow(color: .black.opacity(0.08), radius: 10, y: 3)
+    }
+}
+
+private struct AIShimmerStatus: View {
+    let text: String
+    @State private var phase = -1.0
+
+    var body: some View {
+        Text(text)
+            .font(.callout.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .overlay {
+                LinearGradient(colors: [.clear, .primary.opacity(0.9), .clear], startPoint: .leading, endPoint: .trailing)
+                    .frame(width: 70)
+                    .offset(x: phase * 150)
+                    .mask(Text(text).font(.callout.weight(.semibold)))
+            }
+            .onAppear {
+                withAnimation(.linear(duration: 1.25).repeatForever(autoreverses: false)) { phase = 1 }
+            }
+    }
 }
 
 private struct DiffView: View {
@@ -228,6 +743,9 @@ private struct DiffTaskRow: View {
             }.font(.caption)
             Text("\(task.kind.rawValue) · \(task.priority) · \(task.difficulty)").font(.caption2).foregroundStyle(.secondary)
             if let scheduledDate { Text("Scheduled: \(scheduledDate)").font(.caption2).foregroundStyle(.secondary) }
+            if let description = task.description, !description.isEmpty {
+                Text("Description: \(description)").font(.caption2).lineLimit(4)
+            }
             if !task.mvp.isEmpty { Text("MVP: \(task.mvp)").font(.caption2).lineLimit(2) }
             ForEach(task.coreTasks) { sub in Text("\(sub.isComplete ? "☑" : "☐") \(sub.title)").font(.caption2).lineLimit(1) }
         }.padding(7).background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
@@ -246,9 +764,45 @@ private func taskVisible(
 }
 
 private func planningSegment(for task: PlanTask) -> PlanningSegment {
+    // Midnight tasks belong to the same dated plan, but are displayed in the
+    // dedicated Midnight section rather than being mistaken for Morning work.
+    // They do not create another planning gate.
+    if task.hasScheduledTime && task.startMinute < PlanningSegment.morning.startMinute { return .lateNight }
     if task.startMinute < PlanningSegment.afternoon.startMinute { return .morning }
     if task.startMinute < PlanningSegment.evening.startMinute { return .afternoon }
-    return .evening
+    if task.startMinute < PlanningSegment.lateNight.startMinute { return .evening }
+    return .lateNight
+}
+
+private func isMidnightTask(_ task: PlanTask) -> Bool {
+    task.hasScheduledTime && task.startMinute < PlanningSegment.morning.startMinute
+}
+
+private struct MidnightBlockHeader: View {
+    let taskCount: Int
+    var addTask: (() -> Void)?
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Midnight Block").font(.headline)
+                Text("00:00–06:00 · \(taskCount) \(taskCount == 1 ? "task" : "tasks")")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            Spacer()
+            if let addTask {
+                Button(action: addTask) {
+                    Label("Add Task", systemImage: "plus")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 4)
+        .padding(.top, 5)
+    }
 }
 
 private struct PlanningBlockHeader: View {
@@ -256,7 +810,7 @@ private struct PlanningBlockHeader: View {
     let taskCount: Int
     var addTask: (() -> Void)?
 
-    private var title: String { segment == .evening ? "Night Block" : segment.title }
+    private var title: String { segment.title }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -391,8 +945,31 @@ struct PlanEditorView: View {
                         }
                     } else {
                         LazyVStack(spacing: 12) {
+                            let midnightTasks = visibleTasks.filter(isMidnightTask)
+                            if !midnightTasks.isEmpty {
+                                MidnightBlockHeader(taskCount: midnightTasks.count) {
+                                    model.addTask(startingAt: 0, before: PlanningSegment.morning.startMinute)
+                                }
+                                ForEach(midnightTasks) { task in
+                                    TaskEditorRow(task: taskBinding(for: task), cyclesChanged: {
+                                        model.normalizeCoreTasks(for: task.id)
+                                    }, delete: {
+                                        model.removeTask(id: task.id)
+                                    }, addSubtask: {
+                                        model.addSubtask(to: task.id)
+                                    }, removeSubtask: { subtaskID in
+                                        model.removeSubtask(taskID: task.id, subtaskID: subtaskID)
+                                    }, saveTemplate: {
+                                        model.saveTaskAsTemplate(task)
+                                    })
+                                    .id(task.id)
+                                    .padding(.horizontal, 16)
+                                    .background((task.displayColor ?? .none).swiftUIColor.opacity(task.displayColor == nil ? 0.055 : 0.13), in: RoundedRectangle(cornerRadius: 14))
+                                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.09)))
+                                }
+                            }
                             ForEach(PlanningSegment.allCases, id: \.self) { segment in
-                                let segmentTasks = visibleTasks.filter { planningSegment(for: $0) == segment }
+                                let segmentTasks = visibleTasks.filter { !isMidnightTask($0) && planningSegment(for: $0) == segment }
                                 PlanningBlockHeader(segment: segment, taskCount: segmentTasks.count) {
                                     model.addTask(in: segment)
                                 }
@@ -510,8 +1087,28 @@ struct TomorrowPlanView: View {
                     let visibleTasks = model.tomorrowTasks.filter {
                         taskVisible($0, showUser: showUserTasks, showPredefined: showPredefinedBlocks, showFixed: showFixedBlocks)
                     }
-                    ForEach(PlanningSegment.allCases, id: \.self) { segment in
-                        let segmentTasks = visibleTasks.filter { planningSegment(for: $0) == segment }
+                    let midnightTasks = visibleTasks.filter(isMidnightTask)
+                    if !midnightTasks.isEmpty {
+                        MidnightBlockHeader(taskCount: midnightTasks.count) {
+                            model.addTomorrowTask(startingAt: 0, before: PlanningSegment.morning.startMinute)
+                        }
+                        ForEach(midnightTasks) { task in
+                            TaskEditorRow(
+                                task: taskBinding(for: task),
+                                cyclesChanged: { model.normalizeTomorrowSubtasks(for: task.id) },
+                                delete: { model.removeTomorrowTask(id: task.id) },
+                                addSubtask: { model.addTomorrowSubtask(to: task.id) },
+                                removeSubtask: { model.removeTomorrowSubtask(taskID: task.id, subtaskID: $0) },
+                                saveTemplate: { model.saveTaskAsTemplate(task) }
+                            )
+                            .id(task.id)
+                            .padding(.horizontal, 16)
+                            .background((task.displayColor ?? .none).swiftUIColor.opacity(task.displayColor == nil ? 0.055 : 0.13), in: RoundedRectangle(cornerRadius: 14))
+                            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.09)))
+                        }
+                    }
+                    ForEach(PlanningSegment.preplannedCases, id: \.self) { segment in
+                        let segmentTasks = visibleTasks.filter { !isMidnightTask($0) && planningSegment(for: $0) == segment }
                         PlanningBlockHeader(segment: segment, taskCount: segmentTasks.count) {
                             model.addTomorrowTask(in: segment)
                         }
@@ -760,8 +1357,15 @@ private struct SavedPlanView: View {
                         showFixedBlocks = true
                     }
                 } else {
+                    let midnightTasks = visibleTasks.filter(isMidnightTask)
+                    if !midnightTasks.isEmpty {
+                        MidnightBlockHeader(taskCount: midnightTasks.count)
+                        ForEach(midnightTasks) { task in
+                            SavedTaskCard(task: task, isCurrent: task.id == model.executionTask?.id)
+                        }
+                    }
                     ForEach(PlanningSegment.allCases, id: \.self) { segment in
-                        let segmentTasks = visibleTasks.filter { planningSegment(for: $0) == segment }
+                        let segmentTasks = visibleTasks.filter { !isMidnightTask($0) && planningSegment(for: $0) == segment }
                         PlanningBlockHeader(segment: segment, taskCount: segmentTasks.count)
                         ForEach(segmentTasks) { task in
                             SavedTaskCard(task: task, isCurrent: task.id == model.executionTask?.id)
@@ -2006,6 +2610,29 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            Section("ReFocus AI") {
+                HStack {
+                    SecureField(
+                        model.openAIKeyConfigured ? "OpenAI API key is stored in Keychain" : "Paste OpenAI API key",
+                        text: $model.openAIKeyDraft
+                    )
+                    Button("Paste") { model.pasteOpenAIKey() }
+                }
+                LabeledContent("Model") {
+                    Text(model.openAIModel)
+                }
+                HStack {
+                    Button("Save AI Settings") { model.saveOpenAISettings() }
+                    if model.openAIKeyConfigured {
+                        Button("Remove API Key", role: .destructive) { model.removeOpenAIKey() }
+                    }
+                    Spacer()
+                    Text(model.aiStatus).font(.caption).foregroundStyle(.secondary)
+                }
+                Text("The key stays in macOS Keychain. ReFocus sends prompts directly to the OpenAI Responses API and shows supported reasoning summaries and tool activity.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section("Timer") {
                 Text("Focus: :00–:25 and :30–:55")
                 Text("Screen break: :25–:30 and :55–:00")
@@ -2030,7 +2657,7 @@ struct BreakOverlayView: View {
             VStack(spacing: 20) {
                 BreakClockHeader(model: model, clock: model.clockDisplay)
                 HStack(spacing: 0) {
-                    CheckInPanel()
+                    ScreenBreakAIChatPanel()
                     Divider().overlay(Color.white.opacity(0.2))
                     TodayPlanPanel()
                 }
@@ -2038,9 +2665,47 @@ struct BreakOverlayView: View {
             }
             .padding(.horizontal, 36)
             .padding(.bottom, 36)
-            .padding(.top, 92)
+            // Keep the header safely below the camera island without leaving
+            // the large unused band that previously pushed the work surface
+            // down the screen.
+            .padding(.top, 36)
         }
         .foregroundStyle(.white)
+    }
+}
+
+private struct ScreenBreakAIChatPanel: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Label("ReFocus AI", systemImage: "sparkles").font(.title2.bold())
+                Spacer()
+                if model.aiIsResponding { AIShimmerStatus(text: model.aiStatus) }
+            }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 16) {
+                        if model.aiMessages.isEmpty {
+                            Text("Ask AI to repair this plan, move tasks, create a new block, or update Daily metrics.")
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        ForEach(Array(model.aiMessages.suffix(10))) { message in
+                            AIMessageView(message: message).id(message.id)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .onChange(of: model.aiMessages.last?.text) { _, _ in
+                    if let id = model.aiMessages.last?.id { proxy.scrollTo(id, anchor: .bottom) }
+                }
+            }
+            AIComposer()
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
 
@@ -2048,11 +2713,38 @@ private struct BreakClockHeader: View {
     @ObservedObject var model: AppModel
     @ObservedObject var clock: ClockDisplay
 
+    private static let dateTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = WallClock.dhakaCalendar()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "Asia/Dhaka")
+        formatter.dateFormat = "EEE, MMM d, yyyy · h:mm:ss a"
+        return formatter
+    }()
+
     var body: some View {
         VStack(spacing: 4) {
-            Text("SCREEN BREAK").font(.caption.bold()).tracking(3).foregroundStyle(.orange)
+            Text("SCREEN BREAK")
+                .font(.system(size: 16, weight: .bold, design: .rounded))
+                .tracking(3)
+                .foregroundStyle(.orange)
+                .offset(y: 6)
             Text(model.countdownText).font(.system(size: 64, weight: .bold, design: .rounded)).monospacedDigit()
             Text(model.currentTaskTitle).font(.title2.bold())
+            Text(Self.dateTimeFormatter.string(from: model.now))
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.68))
+                .monospacedDigit()
+            Button {
+                model.skipCurrentScreenBreak()
+            } label: {
+                Text(model.screenBreakSkipsRemaining > 0
+                     ? "Skip this break · \(model.screenBreakSkipsRemaining) left today"
+                     : "Daily skip limit reached")
+            }
+            .buttonStyle(.bordered)
+            .disabled(model.screenBreakSkipsRemaining == 0)
+            .padding(.top, 4)
         }
     }
 }
@@ -2134,46 +2826,6 @@ struct RestGateOverlayView: View {
     }
 }
 
-private struct CheckInPanel: View {
-    @EnvironmentObject private var model: AppModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("Focus log").font(.title2.bold())
-            checkInField("What did you do?", text: binding(\.whatDid))
-            checkInField("What could you do better?", text: binding(\.better))
-            checkInField("What could you do faster?", text: binding(\.faster))
-            Spacer()
-            Text("Only the first answer is required. Everything autosaves to today’s Markdown log.")
-                .font(.caption).foregroundStyle(.secondary)
-        }
-        .padding(28)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-
-    private func checkInField(_ title: String, text: Binding<String>) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text(title).font(.headline)
-            TextEditor(text: text)
-                .scrollContentBackground(.hidden)
-                .padding(8)
-                .frame(minHeight: 90)
-                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-        }
-    }
-
-    private func binding(_ keyPath: WritableKeyPath<CheckIn, String>) -> Binding<String> {
-        Binding(
-            get: { model.currentCheckIn?[keyPath: keyPath] ?? "" },
-            set: { value in
-                guard model.currentCheckIn != nil else { return }
-                model.currentCheckIn?[keyPath: keyPath] = value
-                model.scheduleCheckInSave()
-            }
-        )
-    }
-}
-
 private struct TodayPlanPanel: View {
     @EnvironmentObject private var model: AppModel
     @State private var isEditing = false
@@ -2235,8 +2887,27 @@ private struct TodayPlanPanel: View {
                     Text("Work is locked. Complete and save a valid \(model.requiredCycleMinimum)-cycle Today plan first.")
                         .foregroundStyle(.secondary)
                 } else if isEditing {
+                    let midnightTasks = model.tasks.filter(isMidnightTask)
+                    if !midnightTasks.isEmpty {
+                        MidnightBlockHeader(taskCount: midnightTasks.count) {
+                            model.addTask(startingAt: 0, before: PlanningSegment.morning.startMinute)
+                        }
+                        ForEach(midnightTasks) { task in
+                            TaskEditorRow(
+                                task: taskBinding(for: task),
+                                cyclesChanged: { model.normalizeCoreTasks(for: task.id) },
+                                delete: { model.removeTask(id: task.id) },
+                                addSubtask: { model.addSubtask(to: task.id) },
+                                removeSubtask: { model.removeSubtask(taskID: task.id, subtaskID: $0) },
+                                saveTemplate: { model.saveTaskAsTemplate(task) }
+                            )
+                            .id(task.id)
+                            .padding(.horizontal, 14)
+                            .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 12))
+                        }
+                    }
                     ForEach(PlanningSegment.allCases, id: \.self) { segment in
-                        let segmentTasks = model.tasks.filter { planningSegment(for: $0) == segment }
+                        let segmentTasks = model.tasks.filter { !isMidnightTask($0) && planningSegment(for: $0) == segment }
                         PlanningBlockHeader(segment: segment, taskCount: segmentTasks.count) {
                             model.addTask(in: segment)
                         }
@@ -2255,44 +2926,30 @@ private struct TodayPlanPanel: View {
                         }
                     }
                 } else {
+                    let midnightTasks = model.executionTasks.filter(isMidnightTask)
+                    if !midnightTasks.isEmpty {
+                        MidnightBlockHeader(taskCount: midnightTasks.count)
+                        ForEach(midnightTasks) { task in
+                            BreakTaskRow(
+                                task: breakTaskBinding(for: task),
+                                isExpanded: !model.collapsedTaskIDs.contains(task.id),
+                                isCurrent: task.id == model.currentTask?.id,
+                                toggleExpanded: { model.toggleCollapsed(task.id) },
+                                toggleComplete: { model.toggleTaskCompletion(task.id) }
+                            )
+                        }
+                    }
                     ForEach(PlanningSegment.allCases, id: \.self) { segment in
-                        let segmentTasks = model.executionTasks.filter { planningSegment(for: $0) == segment }
+                        let segmentTasks = model.executionTasks.filter { !isMidnightTask($0) && planningSegment(for: $0) == segment }
                         PlanningBlockHeader(segment: segment, taskCount: segmentTasks.count)
                         ForEach(segmentTasks) { task in
-                            VStack(alignment: .leading, spacing: 8) {
-                            HStack(alignment: .center) {
-                                Button { model.toggleTaskCompletion(task.id) } label: {
-                                    Image(systemName: task.isComplete ? "checkmark.circle.fill" : "circle")
-                                }.buttonStyle(.plain)
-                                Text(task.title).font(.headline)
-                                Spacer()
-                                Text(MarkdownPlanCodec.time(task.startMinute) + "–" + MarkdownPlanCodec.time(task.endMinute))
-                                    .monospacedDigit().foregroundStyle(.secondary)
-                                Button { model.toggleCollapsed(task.id) } label: {
-                                    Image(systemName: model.collapsedTaskIDs.contains(task.id) ? "chevron.down" : "chevron.up")
-                                        .frame(width: 56, height: 44)
-                                        .contentShape(Rectangle())
-                                }.buttonStyle(.plain)
-                            }
-                            if !model.collapsedTaskIDs.contains(task.id) {
-                                Text("MVP → \(task.mvp)").font(.subheadline)
-                                ForEach(Array(task.coreTasks.enumerated()), id: \.element.id) { index, core in
-                                    if model.showCompletedSubtasks || !core.isComplete {
-                                        HStack {
-                                            Button { model.toggleSubtaskCompletion(taskID: task.id, subtaskID: core.id) } label: {
-                                                Image(systemName: core.isComplete ? "checkmark.square.fill" : "square")
-                                            }.buttonStyle(.plain)
-                                            Text("\(index + 1). \(core.title)")
-                                        }
-                                        .font(.caption)
-                                        .foregroundStyle(core.isComplete ? .green : .secondary)
-                                        .padding(.leading, 28)
-                                    }
-                                }
-                            }
-                        }
-                            .padding()
-                            .background(task.id == model.executionTask?.id ? Color.orange.opacity(0.2) : Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
+                            BreakTaskRow(
+                                task: breakTaskBinding(for: task),
+                                isExpanded: !model.collapsedTaskIDs.contains(task.id),
+                                isCurrent: task.id == model.currentTask?.id,
+                                toggleExpanded: { model.toggleCollapsed(task.id) },
+                                toggleComplete: { model.toggleTaskCompletion(task.id) }
+                            )
                         }
                     }
                 }
@@ -2310,5 +2967,112 @@ private struct TodayPlanPanel: View {
             get: { model.tasks.first(where: { $0.id == task.id }) ?? task },
             set: { model.updateTodayTask($0) }
         )
+    }
+
+    private func breakTaskBinding(for task: PlanTask) -> Binding<PlanTask> {
+        Binding(
+            get: { model.tasks.first(where: { $0.id == task.id }) ?? task },
+            set: { model.updateBreakTask($0) }
+        )
+    }
+}
+
+private struct BreakTaskRow: View {
+    @Binding var task: PlanTask
+    let isExpanded: Bool
+    let isCurrent: Bool
+    let toggleExpanded: () -> Void
+    let toggleComplete: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center) {
+                Button(action: toggleComplete) {
+                    Image(systemName: task.isComplete ? "checkmark.circle.fill" : "circle")
+                }
+                .buttonStyle(.plain)
+                Text(task.title).font(.headline)
+                Spacer()
+                Text("\(MarkdownPlanCodec.time(task.startMinute))–\(MarkdownPlanCodec.time(task.endMinute))")
+                    .monospacedDigit().foregroundStyle(.secondary)
+                Button(action: toggleExpanded) {
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .frame(width: 56, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 10) {
+                    breakField("MVP") {
+                        TextField("Shortest acceptable finish", text: $task.mvp, axis: .vertical)
+                            .textFieldStyle(.plain)
+                    }
+                    breakField("Description") {
+                        TextEditor(text: descriptionBinding)
+                            .scrollContentBackground(.hidden)
+                            .frame(minHeight: 72)
+                    }
+                    ForEach(0..<3, id: \.self) { index in
+                        HStack(spacing: 9) {
+                            Button {
+                                subtaskCompleteBinding(index).wrappedValue.toggle()
+                            } label: {
+                                Image(systemName: subtaskCompleteBinding(index).wrappedValue ? "checkmark.square.fill" : "square")
+                            }
+                            .buttonStyle(.plain)
+                            TextField("Subtask \(index + 1)", text: subtaskTitleBinding(index), axis: .vertical)
+                                .textFieldStyle(.plain)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+            }
+        }
+        .padding()
+        .background(isCurrent ? Color.orange.opacity(0.2) : Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func breakField<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title).font(.caption.bold()).foregroundStyle(.secondary)
+            content()
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
+    private var descriptionBinding: Binding<String> {
+        Binding(
+            get: { task.description ?? "" },
+            set: { task.description = $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+        )
+    }
+
+    private func subtaskTitleBinding(_ index: Int) -> Binding<String> {
+        Binding(
+            get: { task.coreTasks.indices.contains(index) ? task.coreTasks[index].title : "" },
+            set: { value in
+                ensureSubtask(index)
+                task.coreTasks[index].title = value
+            }
+        )
+    }
+
+    private func subtaskCompleteBinding(_ index: Int) -> Binding<Bool> {
+        Binding(
+            get: { task.coreTasks.indices.contains(index) ? task.coreTasks[index].isComplete : false },
+            set: { value in
+                ensureSubtask(index)
+                task.coreTasks[index].isComplete = value
+            }
+        )
+    }
+
+    private func ensureSubtask(_ index: Int) {
+        while task.coreTasks.count <= index { task.coreTasks.append(CoreTask(title: "")) }
     }
 }

@@ -598,9 +598,7 @@ public final class VaultRepository: @unchecked Sendable {
             "<!-- refocus:session id=\(checkIn.id) -->",
             "## \(formatter.string(from: checkIn.focusStart))–\(formatter.string(from: checkIn.focusEnd)) — \(checkIn.taskTitle)",
             "<!-- refocus:checkin task=\(taskID) outcome=\(checkIn.outcome.rawValue) -->",
-            "- What I did → \(checkIn.whatDid)",
-            "- Better → \(checkIn.better)",
-            "- Faster → \(checkIn.faster)",
+            "- Description → \(checkIn.description.replacingOccurrences(of: "\n", with: " / "))",
         ]
         if let reason = checkIn.emergencyReason, !reason.isEmpty { lines.append("- Emergency escape → \(reason)") }
         lines.append("<!-- /refocus:session id=\(checkIn.id) -->")

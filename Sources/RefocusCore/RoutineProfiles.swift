@@ -49,6 +49,15 @@ public enum FixedPlanTasks {
         RoutineWindow(1020, 1080, .protected, "Rest Block"),
     ]
 
+    /// Scheduled Rest is a screen guard only inside the two live routine
+    /// windows. Keep this check centralized so stale or user-edited routine
+    /// rows cannot accidentally turn an unrelated time into a Rest blocker.
+    public static func isAllowedScheduledRest(start: Int, end: Int) -> Bool {
+        defaultRestWindows.contains { window in
+            start >= window.startMinute && end <= window.endMinute
+        }
+    }
+
     public static func daily() -> [PlanTask] {
         [
             PlanTask(
@@ -105,7 +114,6 @@ public enum PredefinedRoutineBlocks {
                 block(date: date, key: "sta201-study", title: "STA201 Study", start: 615, end: 660, predefinedKind: .study, calendar: calendar),
                 university(date: date, key: "sta201", title: "STA201 Class", detail: "STA201-16-SFQR-09H-37C", start: 660, end: 750, calendar: calendar),
                 transition(date: date, key: "return-home", start: 750, end: 780, calendar: calendar),
-                rest(date: date, key: "rest-afternoon", start: 780, end: 840, calendar: calendar),
                 mashup(date: date, key: "mashup-afternoon", start: 840, end: 1140, calendar: calendar),
             ]
         case 1: // Sunday
@@ -219,7 +227,7 @@ public enum PredefinedRoutineBlocks {
 
     public static func retiredIDs(for date: Date, calendar: Calendar = WallClock.dhakaCalendar()) -> [UUID] {
         guard [5, 7].contains(calendar.component(.weekday, from: date)) else { return [] }
-        return ["rest-evening", "mashup-evening"].map { stableID(date: date, key: $0, calendar: calendar) }
+        return ["rest-afternoon", "rest-evening", "mashup-evening"].map { stableID(date: date, key: $0, calendar: calendar) }
     }
 
     public static func upgrade(_ existing: PlanTask, to definition: PlanTask) -> PlanTask {
@@ -367,7 +375,8 @@ public struct PlanValidator: Sendable {
         let minute = (components.hour ?? 0) * 60 + (components.minute ?? 0)
         if minute < 720 { return .morning }
         if minute < 1080 { return .afternoon }
-        return .evening
+        if minute < 1290 { return .evening }
+        return .lateNight
     }
 
     public func requiredCycles(
@@ -392,7 +401,8 @@ public struct PlanValidator: Sendable {
             restWindows = tasks.compactMap { task in
                 guard task.hasScheduledTime,
                       task.isRoutineBlock,
-                      task.predefinedKind == .rest else { return nil }
+                      task.predefinedKind == .rest,
+                      FixedPlanTasks.isAllowedScheduledRest(start: task.startMinute, end: task.endMinute) else { return nil }
                 return RoutineWindow(task.startMinute, task.endMinute, .protected, task.title)
             }
         } else {
@@ -417,9 +427,44 @@ public struct PlanValidator: Sendable {
         tasks: [PlanTask]? = nil,
         calendar: Calendar = WallClock.dhakaCalendar()
     ) -> PlanValidationIssue? {
-        requiredCycles(in: segment, at: date, profile: profile, tasks: tasks, calendar: calendar) == 0
-            ? .noAvailableCycles(segment: segment)
-            : nil
+        guard requiredCycles(in: segment, at: date, profile: profile, tasks: tasks, calendar: calendar) == 0 else {
+            return nil
+        }
+
+        // A protected routine window means that there are no *compliant*
+        // physical slots left. It must not erase work the user deliberately
+        // placed inside that window, though: that is an overridable routine
+        // exception and is surfaced by validate(...) as a warning. Without
+        // this distinction a university day becomes impossible to save as
+        // soon as the last compliant half-hour has elapsed.
+        if hasRemainingPlannedWork(in: segment, at: date, tasks: tasks, calendar: calendar) {
+            return nil
+        }
+        return .noAvailableCycles(segment: segment)
+    }
+
+    /// Whether the candidate contains work that still runs after the current
+    /// wall-clock cycle begins. This is intentionally separate from
+    /// requiredCycles: a plan may contain an explicit, warning-level routine
+    /// exception even when no protected-window-free slots remain.
+    public func hasRemainingPlannedWork(
+        in segment: PlanningSegment,
+        at date: Date,
+        tasks: [PlanTask]?,
+        calendar: Calendar = WallClock.dhakaCalendar()
+    ) -> Bool {
+        guard let tasks else { return false }
+        let components = calendar.dateComponents([.hour, .minute], from: date)
+        let minute = (components.hour ?? 0) * 60 + (components.minute ?? 0)
+        let currentCycleStart = (minute / 30) * 30
+        let remainingStart = max(segment.startMinute, currentCycleStart)
+
+        return tasks.contains { task in
+            task.hasScheduledTime
+                && task.countsTowardPlanning
+                && task.startMinute < segment.endMinute
+                && task.endMinute > remainingStart
+        }
     }
 
     public func validate(

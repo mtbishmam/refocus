@@ -20,7 +20,10 @@ note prevents cross-app context from being lost.
 - The user explicitly approved the database/cloud redesign on 2026-08-07.
   SQLite WAL is the native local source of truth, IndexedDB is the web cache,
   and Cloudflare D1 is durable cross-device truth. Do not add Electron, Tauri,
-  an embedded web runtime, an in-app terminal, or an AI model API.
+  an embedded web runtime, or an in-app terminal. The native opt-in ReFocus AI
+  assistant may call the OpenAI Responses API directly with a user-supplied API
+  key stored in macOS Keychain; never store that secret in SQLite, Markdown,
+  UserDefaults, source control, logs, or Cloudflare.
 - A universal PWA lives in `web/`; it must remain offline-first and fast. Its
   canonical Sites host is `refocus.mtbishmam.chatgpt.site`. Its mtbishmam-owned
   D1 was seeded and verified on 2026-08-08; runtime has no dependency on the
@@ -61,15 +64,16 @@ note prevents cross-app context from being lost.
 - Cloud-paired projection writes require the D1 export lease. A denied or failed
   lease must not write to iCloud.
 
-## Three planning gates
+## Four planning gates
 
-The day is independently planned and snapshotted in three super-blocks:
+The day is independently planned and snapshotted in four super-blocks:
 
 | Block | Window | Required cycles |
 |---|---:|---:|
 | Morning | 06:00–12:00 | `min(12, usable half-hour cycles remaining in this block)` |
 | Afternoon | 12:00–18:00 | `min(12, usable half-hour cycles remaining in this block)` |
-| Evening | 18:00–00:00 | `min(12, usable half-hour cycles remaining in this block)` |
+| Evening | 18:00–21:30 | `min(7, usable half-hour cycles remaining in this block)` |
+| Late Night | 21:30–23:00 | `min(3, usable half-hour cycles remaining in this block)` |
 
 - The normal 11:00–12:00 and 17:00–18:00 Rest tasks consume two physical
   cycles each, leaving the usual Morning/Afternoon requirement at 10. Because
@@ -90,15 +94,21 @@ The day is independently planned and snapshotted in three super-blocks:
   accepted for that date. Sort tasks by start time before validating; any
   unapproved collision remains red.
 - Planning is a hard gate, but Command-Q must always remain available.
-- During a screen break, the user may switch Today into the same structured
-  task editor, save a modification, and thereby refresh the active Modified
-  snapshot without rewriting its Initial snapshot.
+- During a screen break, expanding a task exposes only its MVP, Description,
+  and exactly three editable subtask slots. Those execution-field edits
+  autosave through Today and refresh the active Modified snapshot without
+  rewriting its Initial snapshot.
 - Morning and Afternoon still require an explicit save even when their
   predefined defaults are accepted unchanged. Diff may show an unsaved block's
   predefined routine as a labelled default Initial baseline, but that fallback
   has no capture timestamp, does not initialize the planning gate, and does not
   unlock work. If the user edits before the first save, that edited plan becomes
   the immutable Initial snapshot.
+- Tomorrow and an all-day predefined-plan confirmation initialize Morning,
+  Afternoon, and Evening only. Late Night is deliberately excluded so the hard
+  no-plan blocker returns at 21:30 and requires an explicit 21:30–23:00 save.
+  The planning gate ends at 23:00; tasks may still be recorded through the date
+  boundary without another planning-cycle quota.
 
 ## Task rules
 
@@ -106,6 +116,10 @@ The day is independently planned and snapshotted in three super-blocks:
 - Normal tasks use one to four cycles. Contest tasks use one to ten cycles.
 - Every Today/Tomorrow task has a concrete MVP as its sole completion
   definition and at least three named subtasks; more are allowed.
+- Task Description is the single execution narrative: what actually happened,
+  whether the work was done properly, what could improve, and what could be
+  faster. It replaces the former What-did/Better/Faster check-in questions in
+  screen breaks, Focus-session projections, Diff review, and `analyze_day`.
 - A task is historical when its scheduled date is before today in Asia/Dhaka,
   or when it is scheduled today and its complete interval has ended. Historical
   tasks may omit MVP and subtasks (and retain unnamed imported subtasks), while
@@ -131,7 +145,9 @@ The day is independently planned and snapshotted in three super-blocks:
 - User-planned tasks and focused work may continue after 21:30 through the
   midnight boundary. Work after midnight belongs to the next dated plan. The
   five-minute periodic screen-break blocker runs around the clock whenever
-  ReFocus is running. Scheduled one-hour Rest blockers and the persistent
+  ReFocus is running and may be skipped at most three times per Asia/Dhaka
+  calendar day. A skipped periodic break stays dismissed through that break's
+  end; the allowance resets after midnight. Scheduled one-hour Rest blockers and the persistent
   no-plan blocker each offer a one-minute temporary release before relocking.
 - Every day starts with these fixed evening defaults, each explicitly deletable
   for that date:
@@ -140,6 +156,32 @@ The day is independently planned and snapshotted in three super-blocks:
   - 21:00–21:30 — `ReVision`, with ReSolve, ReSync, and Routes, Goals and
     Milestones.
 - Only the 21:00–21:30 overlap between Plan Tomorrow and ReVision is permitted.
+
+## Native ReFocus AI
+
+- The AI tab and screen-break AI panel use the OpenAI Responses API with
+  streaming text, supported reasoning summaries, and visible tool progress.
+  Never expose or claim access to hidden chain-of-thought.
+- The assistant must read current SQLite-backed ReFocus context before changing
+  records. Its tools may create, edit, reschedule, complete, move, or delete
+  tasks and may edit current or historical Daily fields. Task deletion still
+  requires an explicit delete/remove/cancel instruction from the user.
+- Native AI task creation always supplies a custom, very terse MVP and exactly
+  three custom, very terse subtasks, using nearby saved tasks as style context.
+  AI quick tasks may replace only overlapping predefined routine blocks. They
+  must never silently remove fixed evening or existing user tasks.
+- Every Responses API turn and tool round receives a fresh Asia/Dhaka date,
+  time, phase, current-cycle start, next-cycle start, and current task. Older
+  chat turns must never override this live context after midnight.
+- Shorthand is executable: `cur -> did X` appends X to the Description of the
+  task occupying the current cycle (the just-ended focus cycle during its
+  screen break). `next -> 1 cyc/cycle -> Y, then 2 cyc/cycle -> Z` schedules Y
+  for the next half-hour cycle and Z for the following two cycles, continuing
+  sequentially for additional `then` clauses. `cyc` and `cycle` are synonyms.
+- The system prompt includes a bounded primer from the configured vault and
+  exposes targeted Markdown search. Prefer `ego/ikigai.md`, current
+  non-negotiables, goals, habits, universal truths, and gyoji; do not ingest the
+  entire vault into every request.
 
 ## Live routine authority
 

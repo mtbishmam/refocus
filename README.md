@@ -43,8 +43,36 @@ Morning (06:00–12:00) and Afternoon (12:00–18:00) each contain 12 physical
 half-hour cycles. A scheduled one-hour Rest task occupies two of those slots,
 so the normal gate requires 10 work cycles. Rest remains editable for each
 date: deleting it releases its slots and immediately raises that block's
-required plan to 12. Evening runs 18:00–00:00 with up to twelve cycles, so work
-and task scheduling remain available after 21:30.
+required plan to 12. Evening is saved first for 18:00–21:30 (up to seven
+cycles). At 21:30 the no-plan blocker deliberately returns for a separate
+21:30–23:00 Late Night save (up to three cycles). The planning quota ends at
+23:00, while work and task scheduling remain available through midnight.
+
+## Native AI assistant
+
+ReFocus includes an opt-in AI tab and a screen-break AI panel powered by the
+OpenAI Responses API. The API key is supplied by the user and stored only in
+macOS Keychain. Streaming answers include supported reasoning summaries and
+tool progress; hidden chain-of-thought is never displayed. Tool calls read and
+write through the same SQLite-backed task and Daily-field paths as the native
+UI and can search a bounded set of planning context in the configured Obsidian
+vault.
+
+During a screen break, each expanded work item is a compact execution editor:
+MVP, Description, and three subtasks only. Description is the one record of what
+happened and how execution could improve or become faster; Diff, focus logs, and
+day analysis all use it. Periodic breaks may be skipped three times per Dhaka
+day, and the overlay follows macOS full-screen Space changes.
+
+The ReFocus menu-bar icon is a retained AppKit status item with an active-Space
+floating panel, so its quick menu opens from any macOS Space even when the
+dashboard window lives in another one. Launch at login is controlled explicitly
+from Settings rather than enabled implicitly at startup.
+
+The assistant receives a fresh Dhaka date, time, cycle, and current task on
+every turn. It understands `cur -> did ...` as an append to the current task
+Description and sequential `next -> N cyc/cycle -> ...` planning. New AI tasks
+always receive one terse custom MVP and exactly three terse custom subtasks.
 
 ## Build and verify
 
@@ -115,4 +143,6 @@ evening block for that date.
 
 The screen-break overlay stays native and leaves Command-Q, Force Quit, logout,
 restart, and system security interfaces available. ReFocus contains no Electron,
-Tauri, embedded web runtime, in-app terminal, or AI model API.
+Tauri, embedded web runtime, or in-app terminal. The optional native assistant
+is the only direct model integration and requires the user's Keychain-backed
+OpenAI API key.

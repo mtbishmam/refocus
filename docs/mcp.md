@@ -84,10 +84,14 @@ user instruction. The new task synchronizes through D1 to native and web.
 Diff keeps the planning gate explicit. The first successful Save Plan in each
 block captures that exact displayed plan as immutable Initial. Morning and
 Afternoon therefore each need their own save even when the defaults are left
-unchanged; editing first and then saving captures the edited plan. If either
-block was never saved, Diff uses that date's predefined routine as a clearly
-labelled `default-not-saved` baseline. That fallback does not initialize the
-block or unlock work.
+unchanged; editing first and then saving captures the edited plan. Evening
+covers 18:00–21:30. Late Night is a separate 21:30–23:00 gate which is not
+initialized by Tomorrow/default confirmation and deliberately relocks at
+21:30. If Morning or Afternoon was never saved, Diff uses that date's
+predefined routine as a clearly labelled `default-not-saved` baseline. That
+fallback does not initialize the block or unlock work. Since Final is captured
+at 20:00, Late Night is normally not initialized in that immutable snapshot and
+must never be backfilled from later state.
 
 `analyze_day` must call `get_daily_dashboard` before asking cause questions. Its
 preflight always shows or asks for Weight, Calories, Expenses, Solved Problems,

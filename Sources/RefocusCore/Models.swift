@@ -35,12 +35,19 @@ public enum PlanningSegment: String, Codable, CaseIterable, Sendable {
     case morning
     case afternoon
     case evening
+    case lateNight = "late-night"
+
+    /// Tomorrow is planned through the normal 21:30 cutoff. Late-night work
+    /// deliberately remains a separate, same-day gate so it relocks at 21:30
+    /// instead of silently being accepted by the earlier save.
+    public static let preplannedCases: [PlanningSegment] = [.morning, .afternoon, .evening]
 
     public var title: String {
         switch self {
         case .morning: "Morning Block"
         case .afternoon: "Afternoon Block"
         case .evening: "Evening Block"
+        case .lateNight: "Late Night Block"
         }
     }
 
@@ -49,6 +56,7 @@ public enum PlanningSegment: String, Codable, CaseIterable, Sendable {
         case .morning: 360
         case .afternoon: 720
         case .evening: 1080
+        case .lateNight: 1290
         }
     }
 
@@ -56,14 +64,16 @@ public enum PlanningSegment: String, Codable, CaseIterable, Sendable {
         switch self {
         case .morning: 720
         case .afternoon: 1080
-        case .evening: 1440
+        case .evening: 1290
+        case .lateNight: 1380
         }
     }
 
     public var maximumCycles: Int {
         switch self {
         case .morning, .afternoon: 12
-        case .evening: 12
+        case .evening: 7
+        case .lateNight: 3
         }
     }
 
@@ -746,9 +756,10 @@ public struct CheckIn: Identifiable, Codable, Equatable, Sendable {
     public var taskTitle: String
     public var focusStart: Date
     public var focusEnd: Date
-    public var whatDid: String
-    public var better: String
-    public var faster: String
+    /// Snapshot of the task Description at the end of this focus cycle.
+    /// Description is now the single execution/reflection field; legacy
+    /// What-did/Better/Faster payloads are merged here while decoding.
+    public var description: String
     public var outcome: CheckInOutcome
     public var emergencyReason: String?
 
@@ -758,9 +769,7 @@ public struct CheckIn: Identifiable, Codable, Equatable, Sendable {
         taskTitle: String,
         focusStart: Date,
         focusEnd: Date,
-        whatDid: String = "",
-        better: String = "",
-        faster: String = "",
+        description: String = "",
         outcome: CheckInOutcome = .partial,
         emergencyReason: String? = nil
     ) {
@@ -769,11 +778,80 @@ public struct CheckIn: Identifiable, Codable, Equatable, Sendable {
         self.taskTitle = taskTitle
         self.focusStart = focusStart
         self.focusEnd = focusEnd
-        self.whatDid = whatDid
-        self.better = better
-        self.faster = faster
+        self.description = description
         self.outcome = outcome
         self.emergencyReason = emergencyReason
+    }
+
+    /// Source-compatible initializer for legacy imports and tests. New code
+    /// should write the task Description instead.
+    public init(
+        id: String,
+        taskID: UUID?,
+        taskTitle: String,
+        focusStart: Date,
+        focusEnd: Date,
+        whatDid: String,
+        better: String = "",
+        faster: String = "",
+        outcome: CheckInOutcome = .partial,
+        emergencyReason: String? = nil
+    ) {
+        self.init(
+            id: id, taskID: taskID, taskTitle: taskTitle,
+            focusStart: focusStart, focusEnd: focusEnd,
+            description: Self.mergedLegacyDescription(whatDid: whatDid, better: better, faster: faster),
+            outcome: outcome, emergencyReason: emergencyReason
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, taskID, taskTitle, focusStart, focusEnd, description
+        case whatDid, better, faster
+        case outcome, emergencyReason
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        taskID = try values.decodeIfPresent(UUID.self, forKey: .taskID)
+        taskTitle = try values.decode(String.self, forKey: .taskTitle)
+        focusStart = try values.decode(Date.self, forKey: .focusStart)
+        focusEnd = try values.decode(Date.self, forKey: .focusEnd)
+        outcome = try values.decodeIfPresent(CheckInOutcome.self, forKey: .outcome) ?? .partial
+        emergencyReason = try values.decodeIfPresent(String.self, forKey: .emergencyReason)
+        if let current = try values.decodeIfPresent(String.self, forKey: .description) {
+            description = current
+        } else {
+            description = Self.mergedLegacyDescription(
+                whatDid: try values.decodeIfPresent(String.self, forKey: .whatDid) ?? "",
+                better: try values.decodeIfPresent(String.self, forKey: .better) ?? "",
+                faster: try values.decodeIfPresent(String.self, forKey: .faster) ?? ""
+            )
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(id, forKey: .id)
+        try values.encodeIfPresent(taskID, forKey: .taskID)
+        try values.encode(taskTitle, forKey: .taskTitle)
+        try values.encode(focusStart, forKey: .focusStart)
+        try values.encode(focusEnd, forKey: .focusEnd)
+        try values.encode(description, forKey: .description)
+        try values.encode(outcome, forKey: .outcome)
+        try values.encodeIfPresent(emergencyReason, forKey: .emergencyReason)
+    }
+
+    private static func mergedLegacyDescription(whatDid: String, better: String, faster: String) -> String {
+        var lines: [String] = []
+        let did = whatDid.trimmingCharacters(in: .whitespacesAndNewlines)
+        let improved = better.trimmingCharacters(in: .whitespacesAndNewlines)
+        let quicker = faster.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !did.isEmpty { lines.append(did) }
+        if !improved.isEmpty { lines.append("Better: \(improved)") }
+        if !quicker.isEmpty { lines.append("Faster: \(quicker)") }
+        return lines.joined(separator: "\n")
     }
 }
 

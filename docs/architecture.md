@@ -15,7 +15,8 @@ under two seconds for online convergence under ordinary network conditions.
 
 | Component | Responsibility |
 |---|---|
-| Native macOS app | Planning gates, timer, blockers, fast editing, SQLite WAL |
+| Native macOS app | Normal macOS app with a retained active-Space AppKit status panel, planning gates, timer, blockers, fast editing, SQLite WAL |
+| Native ReFocus AI | Optional OpenAI Responses API chat; Keychain secret; SQLite-backed task/Daily tools; bounded vault context |
 | Universal PWA | iPhone/Ubuntu/browser editing, IndexedDB cache and outbox |
 | Cloudflare D1 | Durable cross-device entities, field clocks, mutations, leases |
 | Markdown projector | One-way `tasks.md` and clean daily logs for Obsidian |
@@ -29,15 +30,45 @@ connection. Hosted clients that cannot send both headers require a separate
 public MCP ingress (or a public Site with all data APIs still protected by the
 ReFocus bearer-token layer).
 
-SQLite tables hold tasks, day plans and immutable/modified snapshots, check-ins,
+SQLite tables hold tasks, day plans and immutable/modified snapshots, Description-backed check-ins,
 daily-field definitions and values, analyses, captures, tombstones, migration
-history, and the sync outbox. The main thread only updates observable state after
+history, per-day periodic-break skip records, and the sync outbox. The main thread only updates observable state after
 the local transaction; sync and projections are debounced background work.
 
 The D1 schema stores fields independently. Each field is resolved by its hybrid
 clock and device identifier, while mutation IDs make retries idempotent. Deletes
 are tombstones. Pull uses a monotonic change cursor and returns the latest merged
 entity state.
+
+The native AI surface is not part of persistence or synchronization. It streams
+through the OpenAI Responses API only when the user configures a Keychain-backed
+API key. Supported reasoning summaries and tool progress are display metadata;
+hidden chain-of-thought is never requested for display. Every mutation returns
+through the same `RefocusStore` transactions and sync outbox used by manual UI
+edits. The assistant receives selected `ego/` primer files plus targeted vault
+search instead of uploading the whole vault on every prompt.
+
+The task Description is the canonical execution/reflection narrative. The
+screen-break task expander edits only MVP, Description, and three subtask slots;
+those edits take the ordinary Today transaction path so Modified snapshots,
+Diff, focus-session logs, and day analysis see the same value. Legacy
+What-did/Better/Faster check-ins decode into one Description without discarding
+history. Periodic five-minute screen breaks can be skipped no more than three
+times per Asia/Dhaka day. Screen-saver-level panels join all Spaces, reassert
+themselves after active-Space changes, and remain above full-screen apps.
+
+Every native AI request carries fresh Asia/Dhaka wall-clock and cycle context.
+`cur -> did X` appends X to the current task Description. `next -> N cycles ->
+Task` starts at the next half-hour cycle and consecutive `then` clauses continue
+from the prior task's end. AI-created tasks include a terse custom MVP and
+exactly three terse custom subtasks.
+
+The menu-bar entry is a retained AppKit status item and floating panel rather
+than a SwiftUI `MenuBarExtra` window. The panel uses `moveToActiveSpace` and is
+positioned from the clicked status-bar button, keeping the quick menu anchored
+to whichever Space the user is currently viewing, independent of the
+dashboard window's last Space. Launch at login is user-controlled from
+Settings and is not enabled implicitly at startup.
 
 On the canonical personal Site, authenticated browser sessions from either of
 the user's ChatGPT accounts resolve to the durable owner attached to the first

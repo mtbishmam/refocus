@@ -13,6 +13,7 @@ final class BreakOverlayController {
     private var model: AppModel?
     private var savedPresentationOptions: NSApplication.PresentationOptions = []
     private var screenObserver: NSObjectProtocol?
+    private var spaceObserver: NSObjectProtocol?
     private(set) var mode: ReFocusOverlayMode?
 
     init() {
@@ -26,10 +27,22 @@ final class BreakOverlayController {
                 self.buildPanels(model: model, mode: mode)
             }
         }
+        spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, !self.panels.isEmpty, let model = self.model, let mode = self.mode else { return }
+                self.buildPanels(model: model, mode: mode)
+                self.bringPanelsToFront()
+            }
+        }
     }
 
     deinit {
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
+        if let spaceObserver { NSWorkspace.shared.notificationCenter.removeObserver(spaceObserver) }
     }
 
     func showPlanning(model: AppModel) {
@@ -51,15 +64,16 @@ final class BreakOverlayController {
     }
 
     private func show(model: AppModel, mode: ReFocusOverlayMode) {
-        if self.mode == mode, !panels.isEmpty { return }
+        if self.mode == mode, !panels.isEmpty {
+            bringPanelsToFront()
+            return
+        }
         if panels.isEmpty { savedPresentationOptions = NSApp.presentationOptions }
         self.model = model
         self.mode = mode
         NSApp.presentationOptions = [.hideDock, .hideMenuBar, .disableProcessSwitching]
         buildPanels(model: model, mode: mode)
-        NSApp.activate(ignoringOtherApps: true)
-        panels.first?.makeKeyAndOrderFront(nil)
-        for panel in panels.dropFirst() { panel.orderFrontRegardless() }
+        bringPanelsToFront()
     }
 
     func hide() {
@@ -82,7 +96,10 @@ final class BreakOverlayController {
                 defer: false,
                 screen: screen
             )
-            panel.level = .screenSaver
+            // Full-screen apps occupy their own Space. A level above the
+            // standard screen-saver tier plus all-Spaces/full-screen-auxiliary
+            // behavior keeps the blocker above those windows as Spaces change.
+            panel.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
             panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
             panel.backgroundColor = .black
             panel.isOpaque = true
@@ -118,6 +135,15 @@ final class BreakOverlayController {
             panel.orderFrontRegardless()
             return panel
         }
+    }
+
+    private func bringPanelsToFront() {
+        NSApp.activate(ignoringOtherApps: true)
+        for panel in panels {
+            panel.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
+            panel.orderFrontRegardless()
+        }
+        panels.first?.makeKeyAndOrderFront(nil)
     }
 }
 
