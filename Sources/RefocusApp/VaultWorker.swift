@@ -385,6 +385,7 @@ actor VaultWorker {
         let cycles = max(1, min(10, arguments.cycles))
         let requestedTitle = arguments.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let preserveUntimed = explicitlyRequestsUntimed(prompt)
+        let allowOverride = explicitlyRequestsOverride(prompt)
 
         if FixedPlanTasks.isRestAlias(requestedTitle) {
             guard let minute = requestedMinute,
@@ -410,6 +411,18 @@ actor VaultWorker {
         let existing = try store.tasks(on: date)
         var minute = requestedMinute
         var interpretation: String?
+        if let requestedMinute, !allowOverride,
+           let restWindow = FixedPlanTasks.restWindow(overlapping: requestedMinute, end: requestedMinute + cycles * 30) {
+            guard let replacement = automaticStartTime(
+                cycles: cycles,
+                after: restWindow.endMinute,
+                existing: existing
+            ) else {
+                throw RefocusStoreError.corrupt("Could not move this task after protected Rest without crossing midnight.")
+            }
+            minute = replacement
+            interpretation = "Moved this task from (MarkdownPlanCodec.time(requestedMinute)) to (MarkdownPlanCodec.time(replacement)) after protected Rest."
+        }
         if minute == nil && !preserveUntimed && hasPlanningIntent(prompt),
            let anchor = latestExplicitUserEnd(in: existing) {
             guard let automaticallyAllocated = automaticStartTime(
@@ -453,6 +466,16 @@ actor VaultWorker {
                 merged.startMinute = automaticallyAllocated
                 merged.timeAssigned = nil
             }
+            if allowOverride { merged.routineOverride = true }
+            if !allowOverride && !merged.routineOverride {
+                let restInterpretation = try moveTaskOutOfProtectedRest(
+                    &merged,
+                    existing: existing.filter { $0.id != match.id }
+                )
+                if let restInterpretation {
+                    interpretation = [interpretation, restInterpretation].compactMap { $0 }.joined(separator: " ")
+                }
+            }
             merged.quickCapture = true
             try validateAIWrite(merged, on: date, replacing: match.id)
             try store.replaceAITask(id: match.id, with: merged, on: date)
@@ -484,6 +507,7 @@ actor VaultWorker {
             difficulty: arguments.difficulty ?? "Moderate",
             mvp: arguments.mvp?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? arguments.mvp! : fallback.mvp,
             coreTasks: Array(subtaskTitles.prefix(3)).map { CoreTask(title: $0) },
+            routineOverride: allowOverride,
             displayColor: TaskDisplayColor(rawValue: arguments.color ?? "none") ?? .none,
             quickCapture: true,
             timeAssigned: minute != nil
@@ -511,6 +535,19 @@ actor VaultWorker {
             .contains(where: lower.contains)
     }
 
+    private func explicitlyRequestsOverride(_ prompt: String) -> Bool {
+        let lower = prompt.lowercased()
+        let denialPhrases = [
+            "do not override", "don't override", "without overriding", "no override",
+            "do not bypass", "don't bypass", "without bypassing"
+        ]
+        guard !denialPhrases.contains(where: lower.contains) else { return false }
+        let overrideMarkers = ["override", "overrule", "bypass", "ignore", "force"]
+        guard overrideMarkers.contains(where: lower.contains) else { return false }
+        let protectedScope = ["rest", "sleep", "protected", "anything", "window", "period"]
+        return protectedScope.contains(where: lower.contains)
+    }
+
     private func latestExplicitUserEnd(in tasks: [PlanTask]) -> Int? {
         tasks.filter { $0.hasScheduledTime && !$0.isRoutineBlock }
             .map(\.endMinute)
@@ -532,6 +569,23 @@ actor VaultWorker {
             cursor += 30
         }
         return nil
+    }
+
+    private func moveTaskOutOfProtectedRest(_ task: inout PlanTask, existing: [PlanTask]) throws -> String? {
+        guard task.hasScheduledTime,
+              let restWindow = FixedPlanTasks.restWindow(overlapping: task.startMinute, end: task.endMinute)
+        else { return nil }
+        let oldStart = task.startMinute
+        guard let replacement = automaticStartTime(
+            cycles: task.cycles,
+            after: restWindow.endMinute,
+            existing: existing
+        ) else {
+            throw RefocusStoreError.corrupt("Could not move (task.title) after protected Rest without crossing midnight.")
+        }
+        task.startMinute = replacement
+        task.timeAssigned = nil
+        return "Moved (quoted(task.title)) from (MarkdownPlanCodec.time(oldStart)) to (MarkdownPlanCodec.time(replacement)) after protected Rest."
     }
 
     private func closestExistingTask(title: String, in tasks: [PlanTask]) -> PlanTask? {
@@ -591,7 +645,7 @@ actor VaultWorker {
         )
     }
 
-    func updateAITask(_ arguments: AIUpdateTaskArguments) throws -> AgendaTask {
+    func updateAITask(_ arguments: AIUpdateTaskArguments, prompt: String) throws -> AITaskWriteResult {
         guard let id = UUID(uuidString: arguments.taskID), var entry = try store.taskEntry(id: id) else {
             throw RefocusStoreError.corrupt("task to update was not found")
         }
@@ -621,6 +675,15 @@ actor VaultWorker {
         if let subtasks = arguments.subtasks {
             entry.task.coreTasks = subtasks.map { CoreTask(title: $0.title, isComplete: $0.completed) }
         }
+        let allowOverride = explicitlyRequestsOverride(prompt)
+        if allowOverride { entry.task.routineOverride = true }
+        var interpretation: String?
+        if !allowOverride && !entry.task.routineOverride {
+            interpretation = try moveTaskOutOfProtectedRest(
+                &entry.task,
+                existing: try store.tasks(on: entry.date).filter { $0.id != id }
+            )
+        }
         entry.task.quickCapture = true
         try validateAIWrite(entry.task, on: entry.date, replacing: id)
         try store.replaceAITask(id: id, with: entry.task, on: entry.date)
@@ -629,10 +692,10 @@ actor VaultWorker {
               calendar.isDate(verified.date, inSameDayAs: entry.date) else {
             throw RefocusStoreError.corrupt("updated task failed durable read-back verification")
         }
-        return verified
+        return AITaskWriteResult(entry: verified, interpretation: interpretation)
     }
 
-    func rescheduleAITask(_ arguments: AIRescheduleTaskArguments) throws -> AgendaTask {
+    func rescheduleAITask(_ arguments: AIRescheduleTaskArguments, prompt: String) throws -> AITaskWriteResult {
         guard let id = UUID(uuidString: arguments.taskID), var entry = try store.taskEntry(id: id) else {
             throw RefocusStoreError.corrupt("task to reschedule was not found")
         }
@@ -646,6 +709,15 @@ actor VaultWorker {
                 entry.task.timeAssigned = nil
             }
         }
+        let allowOverride = explicitlyRequestsOverride(prompt)
+        if allowOverride { entry.task.routineOverride = true }
+        var interpretation: String?
+        if !allowOverride && !entry.task.routineOverride {
+            interpretation = try moveTaskOutOfProtectedRest(
+                &entry.task,
+                existing: try store.tasks(on: entry.date).filter { $0.id != id }
+            )
+        }
         try validateAIWrite(entry.task, on: entry.date, replacing: id)
         try store.replaceAITask(id: id, with: entry.task, on: entry.date)
         scheduleBackgroundWork(days: [entry.date])
@@ -655,7 +727,7 @@ actor VaultWorker {
               calendar.isDate(verified.date, inSameDayAs: entry.date) else {
             throw RefocusStoreError.corrupt("rescheduled task failed durable read-back verification")
         }
-        return verified
+        return AITaskWriteResult(entry: verified, interpretation: interpretation)
     }
 
     func setAIFieldValue(definitionID: String, value: String, dateText: String) throws -> DailyFieldValue {
@@ -689,7 +761,7 @@ actor VaultWorker {
             !FixedPlanTasks.isAllowedScheduledRest(start: task.startMinute, end: task.endMinute) {
             throw RefocusStoreError.corrupt("Protected Rest blocks must remain at 05:00–06:00, 11:00–12:00, 17:00–18:00, or 23:00–00:00.")
         }
-        if !task.isRoutineBlock && task.hasScheduledTime,
+        if !task.isRoutineBlock && !task.routineOverride && task.hasScheduledTime,
            let restWindow = FixedPlanTasks.restWindow(overlapping: task.startMinute, end: task.endMinute) {
             throw RefocusStoreError.corrupt("\(task.title) cannot be scheduled during protected Rest \(MarkdownPlanCodec.time(restWindow.startMinute))–\(MarkdownPlanCodec.time(restWindow.endMinute)).")
         }
@@ -704,6 +776,7 @@ actor VaultWorker {
         let candidate = existing.filter { current in
             if current.id == taskID { return false }
             if task.hasScheduledTime && current.isRoutineBlock
+                && current.predefinedKind != .rest
                 && current.startMinute < task.endMinute && current.endMinute > task.startMinute {
                 return false
             }
