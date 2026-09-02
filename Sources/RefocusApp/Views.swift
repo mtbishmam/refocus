@@ -71,30 +71,41 @@ struct DashboardView: View {
             .frame(width: 680)
             .padding(.top, 16)
             .padding(.bottom, 12)
+            .onChange(of: model.selectedDashboardTab) { _, _ in
+                withAnimation(.snappy(duration: 0.32)) {
+                    model.dashboardTabDidChange()
+                }
+            }
 
             Group {
-                switch model.selectedDashboardTab {
-                case .agenda: AgendaView()
-                case .today: PlanEditorView()
-                case .tomorrow: TomorrowPlanView()
-                case .streaks: StreaksView()
-                case .diff: DiffView()
-                case .ai: AIChatView()
-                case .settings: SettingsView()
+                if model.aiSplitPresented && model.selectedDashboardTab != .ai {
+                    HStack(spacing: 0) {
+                        DashboardAIChatPanel()
+                            .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
+                        Divider()
+                        dashboardContent(for: model.selectedDashboardTab)
+                            .frame(minWidth: 430, maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                    .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .center)))
+                } else {
+                    dashboardContent(for: model.selectedDashboardTab)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            HStack {
-                Spacer(minLength: 0)
-                AIComposer()
-                Spacer(minLength: 0)
+            if !model.aiSplitPresented || model.selectedDashboardTab == .ai {
+                HStack {
+                    Spacer(minLength: 0)
+                    AIComposer()
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 2)
+                .padding(.bottom, 8)
             }
-            .padding(.horizontal, 20)
-            .padding(.top, 2)
-            .padding(.bottom, 8)
 
         }
+        .animation(.snappy(duration: 0.32), value: model.aiSplitPresented)
         .background(dashboardBackground)
         .frame(minWidth: 860, minHeight: 620)
         .alert("ReFocus", isPresented: Binding(
@@ -111,6 +122,42 @@ struct DashboardView: View {
         colorScheme == .dark
             ? Color(red: 0.075, green: 0.08, blue: 0.10)
             : Color(nsColor: .windowBackgroundColor)
+    }
+
+    @ViewBuilder
+    private func dashboardContent(for tab: DashboardTab) -> some View {
+        switch tab {
+        case .agenda: AgendaView()
+        case .today: PlanEditorView()
+        case .tomorrow: TomorrowPlanView()
+        case .streaks: StreaksView()
+        case .diff: DiffView()
+        case .ai: AIChatView()
+        case .settings: SettingsView()
+        }
+    }
+}
+
+private struct DashboardAIChatPanel: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Label("ReFocus AI", systemImage: "sparkles")
+                    .font(.headline.bold())
+                Spacer()
+                if model.aiIsResponding { AIShimmerStatus(text: model.aiStatus) }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
+            Divider()
+            AIChatView()
+            AIComposer()
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -605,6 +652,12 @@ private struct AIComposer: View {
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 30, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 30, style: .continuous).stroke(Color.primary.opacity(0.12)))
         .shadow(color: .black.opacity(0.08), radius: 10, y: 3)
+        .onChange(of: model.aiDraft) { _, newValue in
+            guard !newValue.isEmpty else { return }
+            withAnimation(.snappy(duration: 0.32)) {
+                model.presentAISplitForTyping()
+            }
+        }
     }
 }
 

@@ -28,7 +28,19 @@ private struct AIContextPayload: Codable {
     var tasks: [AITaskRecord]
     var agenda: [AITaskRecord]
     var dailyFields: [DailyFieldDefinition]
-    var recentDailyValues: [DailyFieldValue]
+    var dailyValues: [DailyFieldValue]
+}
+
+private struct AITargetedHistoryPayload: Codable {
+    var reason: String
+    var taskDescriptions: [AITaskRecord]
+    var dailyValues: [DailyFieldValue]
+}
+
+struct AIRequestContext: Sendable {
+    var operatingManual: String
+    var liveContext: String
+    var targetedHistory: String?
 }
 
 actor VaultWorker {
@@ -215,8 +227,7 @@ actor VaultWorker {
         let upper = calendar.date(byAdding: .day, value: 365, to: date) ?? date
         let agenda = try store.agenda(asOf: date).filter { $0.date >= lower && $0.date <= upper }
         let definitions = try store.fieldDefinitions()
-        let historyStart = calendar.date(byAdding: .day, value: -45, to: date) ?? date
-        let values = try store.fieldValues(from: historyStart, through: date)
+        let values = try store.fieldValues(from: date, through: date)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
@@ -242,9 +253,80 @@ actor VaultWorker {
             tasks: dayTasks.map { AITaskRecord(date: dayKey(date), task: $0) },
             agenda: agenda.map { AITaskRecord(date: dayKey($0.date), task: $0.task) },
             dailyFields: definitions,
-            recentDailyValues: values
+            dailyValues: values
         )
         return String(data: try encoder.encode(payload), encoding: .utf8) ?? "{}"
+    }
+
+    func loadAIRequestContext(prompt: String, on date: Date) throws -> AIRequestContext {
+        let operatingManual = try refreshAIContextProjection()
+        let liveContext = try loadAIContext(on: date)
+        return AIRequestContext(
+            operatingManual: operatingManual,
+            liveContext: liveContext,
+            targetedHistory: try targetedAIHistory(for: prompt, on: date)
+        )
+    }
+
+    private func refreshAIContextProjection() throws -> String {
+        let relativePaths = [
+            "ego/ikigai.md", "ego/non-negotiables.md", "ego/goals.md",
+            "ego/habits.md", "ego/universal-truths.md", "ego/gyoji.md",
+            "agents/context/reapps.md",
+        ]
+        let sources = relativePaths.compactMap { relativePath -> ReFocusAIContextSource? in
+            let url = vaultURL.appendingPathComponent(relativePath)
+            guard let contents = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+            return ReFocusAIContextSource(path: relativePath, contents: contents)
+        }
+        let contextURL = vaultURL.appendingPathComponent("agents/context/refocus-ai.md")
+        let existing = try? String(contentsOf: contextURL, encoding: .utf8)
+        guard ReFocusAIContextProjection.needsRefresh(existing, sources: sources) else {
+            return existing ?? ""
+        }
+        let document = ReFocusAIContextProjection.render(
+            sources: sources,
+            corrections: ReFocusAIContextProjection.preservedCorrections(from: existing)
+        )
+        try FileManager.default.createDirectory(
+            at: contextURL.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try document.write(to: contextURL, atomically: true, encoding: .utf8)
+        return document
+    }
+
+    private func targetedAIHistory(for prompt: String, on date: Date) throws -> String? {
+        let lower = prompt.lowercased()
+        let historyTerms = [
+            "history", "previous", "recent", "last ", "before", "what did", "did ",
+            "better", "faster", "description", "metric", "weight", "calorie",
+            "expense", "solved", "cp hour", "trend", "past",
+        ]
+        guard historyTerms.contains(where: lower.contains) else { return nil }
+
+        let start = calendar.date(byAdding: .day, value: -14, to: date) ?? date
+        var descriptions: [AITaskRecord] = []
+        var cursor = start
+        while cursor <= date, descriptions.count < 30 {
+            let entries = try store.tasks(on: cursor).filter {
+                !($0.description?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            }
+            descriptions.append(contentsOf: entries.prefix(max(0, 30 - descriptions.count)).map {
+                AITaskRecord(date: dayKey(cursor), task: $0)
+            })
+            cursor = calendar.date(byAdding: .day, value: 1, to: cursor) ?? date.addingTimeInterval(1)
+        }
+        let metricStart = calendar.date(byAdding: .day, value: -45, to: date) ?? date
+        let values = try store.fieldValues(from: metricStart, through: date)
+        let payload = AITargetedHistoryPayload(
+            reason: "The current prompt requested recent execution or Daily history.",
+            taskDescriptions: descriptions,
+            dailyValues: values
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return String(data: try encoder.encode(payload), encoding: .utf8)
     }
 
     private func localTime(_ date: Date) -> String {
@@ -254,23 +336,6 @@ actor VaultWorker {
         formatter.timeZone = calendar.timeZone
         formatter.dateFormat = "HH:mm:ss"
         return formatter.string(from: date)
-    }
-
-    func loadAIVaultPrimer() -> String {
-        let relativePaths = [
-            "ego/ikigai.md", "ego/non-negotiables.md", "ego/goals.md",
-            "ego/habits.md", "ego/universal-truths.md", "ego/gyoji.md",
-        ]
-        var remaining = 48_000
-        var sections: [String] = []
-        for relativePath in relativePaths where remaining > 0 {
-            let url = vaultURL.appendingPathComponent(relativePath)
-            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
-            let excerpt = String(text.prefix(min(remaining, 12_000)))
-            sections.append("## \(relativePath)\n\(excerpt)")
-            remaining -= excerpt.count
-        }
-        return sections.joined(separator: "\n\n")
     }
 
     func searchVaultForAI(_ query: String) -> String {
@@ -329,9 +394,13 @@ actor VaultWorker {
             quickCapture: true,
             timeAssigned: minute != nil
         )
+        try validateAIWrite(task, on: date, replacing: nil)
         try store.upsertAIQuickTask(task, on: date)
         scheduleBackgroundWork(days: [date])
-        return AgendaTask(date: date, task: task)
+        guard let verified = try store.taskEntry(id: task.id) else {
+            throw RefocusStoreError.corrupt("created task failed durable read-back verification")
+        }
+        return verified
     }
 
     func appendAITaskDescription(taskID: String, text: String) throws -> AgendaTask {
@@ -344,7 +413,10 @@ actor VaultWorker {
         entry.task.description = existing.isEmpty ? addition : existing + "\n" + addition
         try store.replaceAITask(id: id, with: entry.task, on: entry.date)
         scheduleBackgroundWork(days: [entry.date])
-        return entry
+        guard let verified = try store.taskEntry(id: id), verified.task.description == entry.task.description else {
+            throw RefocusStoreError.corrupt("task Description failed durable read-back verification")
+        }
+        return verified
     }
 
     private func compactTaskDetails(title: String) -> (mvp: String, subtasks: [String]) {
@@ -386,9 +458,14 @@ actor VaultWorker {
             entry.task.coreTasks = subtasks.map { CoreTask(title: $0.title, isComplete: $0.completed) }
         }
         entry.task.quickCapture = true
+        try validateAIWrite(entry.task, on: entry.date, replacing: id)
         try store.replaceAITask(id: id, with: entry.task, on: entry.date)
         scheduleBackgroundWork(days: [entry.date])
-        return entry
+        guard let verified = try store.taskEntry(id: id), verified.task == entry.task,
+              calendar.isDate(verified.date, inSameDayAs: entry.date) else {
+            throw RefocusStoreError.corrupt("updated task failed durable read-back verification")
+        }
+        return verified
     }
 
     func rescheduleAITask(_ arguments: AIRescheduleTaskArguments) throws -> AgendaTask {
@@ -405,18 +482,77 @@ actor VaultWorker {
                 entry.task.timeAssigned = nil
             }
         }
+        try validateAIWrite(entry.task, on: entry.date, replacing: id)
         try store.replaceAITask(id: id, with: entry.task, on: entry.date)
         scheduleBackgroundWork(days: [entry.date])
-        return entry
+        guard let verified = try store.taskEntry(id: id),
+              verified.task.startMinute == entry.task.startMinute,
+              verified.task.timeAssigned == entry.task.timeAssigned,
+              calendar.isDate(verified.date, inSameDayAs: entry.date) else {
+            throw RefocusStoreError.corrupt("rescheduled task failed durable read-back verification")
+        }
+        return verified
     }
 
-    func setAIFieldValue(definitionID: String, value: String, dateText: String) throws {
+    func setAIFieldValue(definitionID: String, value: String, dateText: String) throws -> DailyFieldValue {
         let date = try parseAIDate(dateText)
         guard try store.fieldDefinitions().contains(where: { $0.id == definitionID }) else {
             throw RefocusStoreError.corrupt("daily field was not found")
         }
         try store.setFieldValue(definitionID: definitionID, value: value, date: date)
         scheduleBackgroundWork(days: [date])
+        guard let verified = try store.fieldValues(from: date, through: date).first(where: {
+            $0.definitionID == definitionID && $0.value == value
+        }) else {
+            throw RefocusStoreError.corrupt("Daily field failed durable read-back verification")
+        }
+        return verified
+    }
+
+    func deleteAITaskAndVerify(_ taskID: UUID) throws {
+        guard try store.taskEntry(id: taskID) != nil else {
+            throw RefocusStoreError.corrupt("task to delete was not found")
+        }
+        try store.deleteTask(id: taskID)
+        guard try store.taskEntry(id: taskID) == nil else {
+            throw RefocusStoreError.corrupt("deleted task remained after durable read-back verification")
+        }
+        scheduleBackgroundWork(days: [])
+    }
+
+    private func validateAIWrite(_ task: PlanTask, on date: Date, replacing taskID: UUID?) throws {
+        let validator = PlanValidator()
+        let profile = RoutineProfileResolver(calendar: calendar).profile(for: date)
+        let existing = try store.tasks(on: date)
+        let baseline = validator.validate(
+            tasks: existing, profile: profile, minimumCycles: 0,
+            requireFixedTasks: false, requireTaskDetails: true,
+            scheduledDate: date, now: Date(), calendar: calendar
+        ).filter { $0.severity == .error }.map(\.description)
+        let candidate = existing.filter { current in
+            if current.id == taskID { return false }
+            if task.hasScheduledTime && current.isRoutineBlock
+                && current.startMinute < task.endMinute && current.endMinute > task.startMinute {
+                return false
+            }
+            return true
+        } + [task]
+        let resulting = validator.validate(
+            tasks: candidate, profile: profile, minimumCycles: 0,
+            requireFixedTasks: false, requireTaskDetails: true,
+            scheduledDate: date, now: Date(), calendar: calendar
+        ).filter { $0.severity == .error }.map(\.description)
+        var remainingBaseline = baseline
+        let introduced = resulting.filter { issue in
+            if let index = remainingBaseline.firstIndex(of: issue) {
+                remainingBaseline.remove(at: index)
+                return false
+            }
+            return true
+        }
+        guard introduced.isEmpty else {
+            throw RefocusStoreError.corrupt("planner rejected the change: \(introduced.joined(separator: " "))")
+        }
     }
 
     private func parseAIDate(_ value: String) throws -> Date {

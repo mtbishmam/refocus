@@ -73,6 +73,7 @@ final class AppModel: ObservableObject {
     @Published var cloudSyncLastSuccess: Date?
     @Published var cloudSyncIssue: String?
     @Published var selectedDashboardTab: DashboardTab = .today
+    @Published var aiSplitPresented = false
     @Published var aiDraft = ""
     @Published var aiMessages: [AIChatMessage] = []
     @Published var aiIsResponding = false
@@ -90,6 +91,7 @@ final class AppModel: ObservableObject {
     private var reloadGeneration = 0
     private var cloudSyncTicker: Task<Void, Never>?
     private var aiResponseTask: Task<Void, Never>?
+    private var aiContextWasLoadedForRequest = false
     private var saveTask: Task<Void, Never>?
     private var breakTaskSaveTask: Task<Void, Never>?
     private var agendaSaveTask: Task<Void, Never>?
@@ -180,6 +182,17 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func presentAISplitForTyping() {
+        guard selectedDashboardTab != .ai, !aiDraft.isEmpty else { return }
+        aiSplitPresented = true
+    }
+
+    func dashboardTabDidChange() {
+        if selectedDashboardTab == .ai {
+            aiSplitPresented = false
+        }
+    }
+
     func sendAIMessage(_ suppliedPrompt: String? = nil) {
         // Wake/sleep and a long-running process must never leave an AI prompt
         // anchored to yesterday. Refresh the Dhaka clock before interpreting
@@ -198,19 +211,21 @@ final class AppModel: ObservableObject {
         }
         let history = aiMessages.filter { !$0.isStreaming && !$0.text.isEmpty }
         aiDraft = ""
-        selectedDashboardTab = .ai
+        if selectedDashboardTab != .ai { aiSplitPresented = true }
         aiMessages.append(AIChatMessage(role: .user, text: prompt))
         let assistantID = UUID()
         aiMessages.append(AIChatMessage(id: assistantID, role: .assistant, text: "", isStreaming: true))
         aiIsResponding = true
         aiStatus = "Thinking"
+        aiContextWasLoadedForRequest = false
 
         aiResponseTask?.cancel()
         aiResponseTask = Task { [weak self] in
             guard let self, let worker = self.worker else { return }
-            let primer = await worker.loadAIVaultPrimer()
-            let instructions = self.aiInstructions(vaultPrimer: primer)
             do {
+                let requestContext = try await worker.loadAIRequestContext(prompt: prompt, on: self.now)
+                self.aiContextWasLoadedForRequest = true
+                let instructions = self.aiInstructions(context: requestContext)
                 try await self.openAIClient.respond(
                     history: history,
                     prompt: prompt,
@@ -246,6 +261,7 @@ final class AppModel: ObservableObject {
         }
         aiIsResponding = false
         aiStatus = status
+        aiContextWasLoadedForRequest = false
         aiResponseTask = nil
     }
 
@@ -275,14 +291,19 @@ final class AppModel: ObservableObject {
         case "get_refocus_context":
             let object = (try? JSONSerialization.jsonObject(with: arguments) as? [String: Any]) ?? [:]
             let date = try aiDate(from: object["date"] as? String)
-            return try await worker.loadAIContext(on: date)
+            let result = try await worker.loadAIContext(on: date)
+            aiContextWasLoadedForRequest = true
+            return result
         case "create_task":
+            guard aiContextWasLoadedForRequest else { return aiMissingFreshContextResult() }
             let entry = try await worker.createAITask(decoder.decode(AICreateTaskArguments.self, from: arguments))
             return aiTaskResult(entry, action: "created")
         case "update_task":
+            guard aiContextWasLoadedForRequest else { return aiMissingFreshContextResult() }
             let entry = try await worker.updateAITask(decoder.decode(AIUpdateTaskArguments.self, from: arguments))
             return aiTaskResult(entry, action: "updated")
         case "append_task_description":
+            guard aiContextWasLoadedForRequest else { return aiMissingFreshContextResult() }
             let object = try JSONSerialization.jsonObject(with: arguments) as? [String: Any]
             guard let taskID = object?["task_id"] as? String, let text = object?["text"] as? String else {
                 throw OpenAIChatError.api("append_task_description requires task_id and text")
@@ -290,9 +311,11 @@ final class AppModel: ObservableObject {
             let entry = try await worker.appendAITaskDescription(taskID: taskID, text: text)
             return aiTaskResult(entry, action: "description_appended")
         case "reschedule_task":
+            guard aiContextWasLoadedForRequest else { return aiMissingFreshContextResult() }
             let entry = try await worker.rescheduleAITask(decoder.decode(AIRescheduleTaskArguments.self, from: arguments))
             return aiTaskResult(entry, action: "rescheduled")
         case "delete_task":
+            guard aiContextWasLoadedForRequest else { return aiMissingFreshContextResult() }
             let lower = userPrompt.lowercased()
             guard ["delete", "remove", "cancel"].contains(where: lower.contains) else {
                 return "{\"ok\":false,\"error\":\"Deletion requires an explicit delete, remove, or cancel instruction in the current prompt.\"}"
@@ -301,17 +324,24 @@ final class AppModel: ObservableObject {
             guard let rawID = object?["task_id"] as? String, let id = UUID(uuidString: rawID) else {
                 throw OpenAIChatError.api("delete_task requires a valid task_id")
             }
-            try await worker.deleteTask(id)
-            return "{\"ok\":true,\"action\":\"deleted\",\"task_id\":\"\(id.uuidString.lowercased())\"}"
+            try await worker.deleteAITaskAndVerify(id)
+            return aiJSON([
+                "ok": true, "verified": true, "action": "deleted",
+                "task_id": id.uuidString.lowercased(),
+            ])
         case "set_daily_metric":
+            guard aiContextWasLoadedForRequest else { return aiMissingFreshContextResult() }
             let object = try JSONSerialization.jsonObject(with: arguments) as? [String: Any]
             guard let date = object?["date"] as? String,
                   let fieldID = object?["field_id"] as? String,
                   let value = object?["value"] as? String else {
                 throw OpenAIChatError.api("set_daily_metric requires date, field_id, and value")
             }
-            try await worker.setAIFieldValue(definitionID: fieldID, value: value, dateText: date)
-            return "{\"ok\":true,\"action\":\"daily_field_updated\"}"
+            let verified = try await worker.setAIFieldValue(definitionID: fieldID, value: value, dateText: date)
+            return aiJSON([
+                "ok": true, "verified": true, "action": "daily_field_updated",
+                "field_id": verified.definitionID, "date": verified.date, "value": verified.value,
+            ])
         case "search_vault":
             let object = try JSONSerialization.jsonObject(with: arguments) as? [String: Any]
             return await worker.searchVaultForAI(object?["query"] as? String ?? "")
@@ -323,7 +353,22 @@ final class AppModel: ObservableObject {
     private func aiTaskResult(_ entry: AgendaTask, action: String) -> String {
         let date = MarkdownPlanCodec.isoDate(entry.date, calendar: WallClock.dhakaCalendar())
         let time = entry.task.hasScheduledTime ? MarkdownPlanCodec.time(entry.task.startMinute) : "untimed"
-        return "{\"ok\":true,\"action\":\"\(action)\",\"task_id\":\"\(entry.id.uuidString.lowercased())\",\"date\":\"\(date)\",\"time\":\"\(time)\"}"
+        return aiJSON([
+            "ok": true, "verified": true, "action": action,
+            "task_id": entry.id.uuidString.lowercased(), "title": entry.task.title,
+            "date": date, "time": time, "cycles": entry.task.cycles,
+        ])
+    }
+
+    private func aiMissingFreshContextResult() -> String {
+        aiJSON(["ok": false, "verified": false, "error": "Read fresh ReFocus context before mutating records."])
+    }
+
+    private func aiJSON(_ object: [String: Any]) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else {
+            return "{\"ok\":false,\"verified\":false,\"error\":\"Could not encode tool result.\"}"
+        }
+        return String(data: data, encoding: .utf8) ?? "{}"
     }
 
     private func aiDate(from value: String?) throws -> Date {
@@ -335,7 +380,7 @@ final class AppModel: ObservableObject {
         return date
     }
 
-    private func aiInstructions(vaultPrimer: String) -> String {
+    private func aiInstructions(context: AIRequestContext) -> String {
         let localFormatter = DateFormatter()
         localFormatter.calendar = WallClock.dhakaCalendar()
         localFormatter.locale = Locale(identifier: "en_US_POSIX")
@@ -345,24 +390,24 @@ final class AppModel: ObservableObject {
         let cycleStart = MarkdownPlanCodec.time(clock.minuteOfDay(for: snapshot.cycleStart))
         let nextCycleDate = WallClock.dhakaCalendar().date(byAdding: .minute, value: 30, to: snapshot.cycleStart) ?? snapshot.phaseEnd
         let nextCycleStart = MarkdownPlanCodec.time(clock.minuteOfDay(for: nextCycleDate))
+        let history = context.targetedHistory.map {
+            "Targeted recent history selected for this prompt:\n\($0)"
+        } ?? "No targeted history was needed for this prompt."
         return """
         You are ReFocus AI, the fast planning assistant inside the native ReFocus app.
         Live Asia/Dhaka date and time for this turn: \(localNow). Current phase: \(snapshot.phase.rawValue). Current cycle starts at \(cycleStart); the next cycle starts at \(nextCycleStart). This live value overrides dates or times inherited from older chat turns.
 
-        Use get_refocus_context before changing tasks or Daily data. Stable task IDs from that read are mandatory for update, reschedule, and delete. Every created task must have a custom, very terse MVP and exactly three custom, very terse subtasks; mirror the shorthand style of nearby existing entries. Timed quick tasks may replace overlapping predefined routine rows, but never silently remove user tasks or fixed evening tasks. Only delete when the current user prompt explicitly asks to delete, remove, or cancel. After writes, state exactly what changed. Never claim a write succeeded unless its tool returned ok=true.
-
-        ReFocus shorthand is executable, not a clarification request:
-        - `cur -> did X` means append X to Description of the task occupying the current cycle. During a screen break at HH:25-HH:29 or HH:55-HH:59, current means the focus cycle that just ended; use currentTask from get_refocus_context and append_task_description.
-        - `next -> 1 cyc/cycle -> Y, then 2 cyc/cycle -> Z` means create Y for one consecutive half-hour cycle beginning at nextCycleStart, then Z for the next two consecutive half-hour cycles. Continue sequentially for more `then` clauses. Use the live currentDate, rolling to the next date if a computed start crosses midnight.
-        - `cyc` and `cycle` both mean one 30-minute ReFocus cycle.
-        Do not ask which date or current block when live context supplies it.
-
-        Planning rules: Morning 06:00-12:00, Afternoon 12:00-18:00, Evening 18:00-21:30, and a separate Late Night gate 21:30-23:00. The first three may be planned in advance; Late Night must be saved after 21:30. Use half-hour times. Prefer untimed Agenda capture when the user gives a date but no time. Search the vault only when the supplied primer and live ReFocus context do not answer the question.
+        Follow this priority: direct current user instruction > dated or Special Event rule > live Ikigai routine > ReFocus AI operating manual > defaults. The application has already injected a fresh SQLite snapshot for this request, and get_refocus_context can refresh or select another date. Stable task IDs are mandatory for existing-record mutations. The native tools validate writes and read them back; never claim success unless the result contains both ok=true and verified=true.
 
         Show concise progress summaries and supported tool activity. Do not expose or invent private chain-of-thought. A supported reasoning summary may explain the approach at a high level.
 
-        Canonical vault primer:
-        \(vaultPrimer)
+        Fresh SQLite-backed live context for this request:
+        \(context.liveContext)
+
+        \(history)
+
+        Generated static ReFocus AI operating manual:
+        \(context.operatingManual)
         """
     }
 
