@@ -300,14 +300,66 @@ private struct FormattedAIText: View {
     let markdown: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            ForEach(MarkdownBlockParser.parse(markdown)) { block in
-                MarkdownBlockView(block: block)
-            }
-        }
+        // One Text surface is intentional: macOS can extend a mouse selection
+        // across the full response only when paragraphs and list rows share a
+        // single text-storage object.
+        Text(attributedResponse)
+            .font(.system(size: 16, weight: .regular))
+            .lineSpacing(6)
         .textSelection(.enabled)
         .multilineTextAlignment(.leading)
-        .frame(alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var attributedResponse: AttributedString {
+        let blocks = MarkdownBlockParser.parse(markdown)
+        var result = AttributedString()
+        for (index, block) in blocks.enumerated() {
+            var rendered = attributedBlock(block)
+            if index < blocks.count - 1 { rendered += AttributedString("\n\n") }
+            result += rendered
+        }
+        return result
+    }
+
+    private func attributedBlock(_ block: MarkdownBlock) -> AttributedString {
+        switch block.kind {
+        case .paragraph:
+            return inline(block.lines[0])
+        case .heading:
+            var text = inline(block.lines[0])
+            text.font = .system(size: block.level == 1 ? 20 : 17, weight: .semibold)
+            return text
+        case .bullets:
+            return joinedList(block.lines, numbered: false)
+        case .numbered:
+            return joinedList(block.lines, numbered: true)
+        case .quote:
+            var text = AttributedString("▍ ") + inline(block.lines[0])
+            text.foregroundColor = .secondary
+            return text
+        case .code:
+            var text = AttributedString(block.lines.joined(separator: "\n"))
+            text.font = .system(size: 14, design: .monospaced)
+            return text
+        }
+    }
+
+    private func joinedList(_ lines: [String], numbered: Bool) -> AttributedString {
+        var result = AttributedString()
+        for (index, line) in lines.enumerated() {
+            let marker = numbered ? "\(index + 1). " : "• "
+            result += AttributedString(marker) + inline(line)
+            if index < lines.count - 1 { result += AttributedString("\n") }
+        }
+        return result
+    }
+
+    private func inline(_ value: String) -> AttributedString {
+        (try? AttributedString(
+            markdown: value,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        )) ?? AttributedString(value)
     }
 }
 
