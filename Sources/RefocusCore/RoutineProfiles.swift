@@ -561,7 +561,10 @@ public struct PlanValidator: Sendable {
             }
             guard task.hasScheduledTime else { continue }
             if task.endMinute > 1440 { issues.append(.afterDayBoundary(task: displayTitle)) }
-            if !task.isRoutineBlock && !task.routineOverride {
+            let isLegacyRestAlias = !task.isRoutineBlock
+                && FixedPlanTasks.isRestAlias(task.title)
+                && FixedPlanTasks.isAllowedScheduledRest(start: task.startMinute, end: task.endMinute)
+            if !task.isRoutineBlock && !task.routineOverride && !isLegacyRestAlias {
                 if let restWindow = FixedPlanTasks.restWindow(overlapping: task.startMinute, end: task.endMinute) {
                     issues.append(.restConflict(
                         task: displayTitle,
@@ -590,9 +593,15 @@ public struct PlanValidator: Sendable {
             let allowedEveningOverlap = Set([pair.0.fixedRole, pair.1.fixedRole]) == Set([.planTomorrow, .revision])
                 && max(pair.0.startMinute, pair.1.startMinute) >= 1260
                 && min(pair.0.endMinute, pair.1.endMinute) <= 1290
+            let firstIsRest = pair.0.predefinedKind == .rest
+                || (FixedPlanTasks.isRestAlias(pair.0.title)
+                    && FixedPlanTasks.isAllowedScheduledRest(start: pair.0.startMinute, end: pair.0.endMinute))
+            let secondIsRest = pair.1.predefinedKind == .rest
+                || (FixedPlanTasks.isRestAlias(pair.1.title)
+                    && FixedPlanTasks.isAllowedScheduledRest(start: pair.1.startMinute, end: pair.1.endMinute))
             let allowedRestOverride =
-                (pair.0.predefinedKind == .rest && pair.1.routineOverride)
-                || (pair.1.predefinedKind == .rest && pair.0.routineOverride)
+                (firstIsRest && pair.1.routineOverride)
+                || (secondIsRest && pair.0.routineOverride)
             if !allowedEveningOverlap && !allowedRestOverride {
                 issues.append(.overlap(first: pair.0.title, second: pair.1.title))
             }

@@ -386,6 +386,7 @@ actor VaultWorker {
         let requestedTitle = arguments.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let preserveUntimed = explicitlyRequestsUntimed(prompt)
         let allowOverride = explicitlyRequestsOverride(prompt)
+        let planningIntent = hasPlanningIntent(prompt)
 
         if FixedPlanTasks.isRestAlias(requestedTitle) {
             guard let minute = requestedMinute,
@@ -409,6 +410,8 @@ actor VaultWorker {
         }
 
         let existing = try store.tasks(on: date)
+        let match = planningIntent ? closestExistingTask(title: requestedTitle, in: existing) : nil
+        let schedulingExisting = existing.filter { $0.id != match?.id }
         var minute = requestedMinute
         var interpretation: String?
         if let requestedMinute, !allowOverride,
@@ -416,19 +419,19 @@ actor VaultWorker {
             guard let replacement = automaticStartTime(
                 cycles: cycles,
                 after: restWindow.endMinute,
-                existing: existing
+                existing: schedulingExisting
             ) else {
                 throw RefocusStoreError.corrupt("Could not move this task after protected Rest without crossing midnight.")
             }
             minute = replacement
-            interpretation = "Moved this task from (MarkdownPlanCodec.time(requestedMinute)) to (MarkdownPlanCodec.time(replacement)) after protected Rest."
+            interpretation = "Moved this task from \(MarkdownPlanCodec.time(requestedMinute)) to \(MarkdownPlanCodec.time(replacement)) after protected Rest."
         }
-        if minute == nil && !preserveUntimed && hasPlanningIntent(prompt),
-           let anchor = latestExplicitUserEnd(in: existing) {
+        if minute == nil && !preserveUntimed && planningIntent,
+           let anchor = latestExplicitUserEnd(in: schedulingExisting) {
             guard let automaticallyAllocated = automaticStartTime(
                 cycles: cycles,
                 after: anchor,
-                existing: existing
+                existing: schedulingExisting
             ) else {
                 throw RefocusStoreError.corrupt("Could not allocate this task after the last explicitly timed task without entering a protected Rest window or crossing midnight.")
             }
@@ -436,7 +439,7 @@ actor VaultWorker {
             interpretation = "Allocated this previously untimed task after the last explicitly timed task at \(MarkdownPlanCodec.time(automaticallyAllocated))."
         }
 
-        if let match = closestExistingTask(title: requestedTitle, in: existing), hasPlanningIntent(prompt) {
+        if let match {
             var merged = match
             let originalTitle = match.title
             merged.description = arguments.description ?? merged.description
@@ -575,17 +578,21 @@ actor VaultWorker {
         guard task.hasScheduledTime,
               let restWindow = FixedPlanTasks.restWindow(overlapping: task.startMinute, end: task.endMinute)
         else { return nil }
+        if FixedPlanTasks.isRestAlias(task.title),
+           FixedPlanTasks.isAllowedScheduledRest(start: task.startMinute, end: task.endMinute) {
+            return nil
+        }
         let oldStart = task.startMinute
         guard let replacement = automaticStartTime(
             cycles: task.cycles,
             after: restWindow.endMinute,
             existing: existing
         ) else {
-            throw RefocusStoreError.corrupt("Could not move (task.title) after protected Rest without crossing midnight.")
+            throw RefocusStoreError.corrupt("Could not move \(task.title) after protected Rest without crossing midnight.")
         }
         task.startMinute = replacement
         task.timeAssigned = nil
-        return "Moved (quoted(task.title)) from (MarkdownPlanCodec.time(oldStart)) to (MarkdownPlanCodec.time(replacement)) after protected Rest."
+        return "Moved \(quoted(task.title)) from \(MarkdownPlanCodec.time(oldStart)) to \(MarkdownPlanCodec.time(replacement)) after protected Rest."
     }
 
     private func closestExistingTask(title: String, in tasks: [PlanTask]) -> PlanTask? {

@@ -509,7 +509,16 @@ public struct PlanTask: Identifiable, Codable, Equatable, Sendable {
     public var hasScheduledTime: Bool { timeAssigned != false }
     public var isRoutineBlock: Bool { routineBlock == true }
     public var countsTowardPlanning: Bool {
-        guard isRoutineBlock else { return true }
+        if !isRoutineBlock {
+            // Legacy/manual "Break" captures are still Rest when they occupy
+            // one of the four exact protected windows.
+            if hasScheduledTime,
+               FixedPlanTasks.isRestAlias(title),
+               FixedPlanTasks.isAllowedScheduledRest(start: startMinute, end: endMinute) {
+                return false
+            }
+            return true
+        }
         return predefinedKind == .mashup || predefinedKind == .upsolve
     }
 

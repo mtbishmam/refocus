@@ -247,7 +247,7 @@ do {
         let task = PlanTask(
             title: "Rest collision", startMinute: 660, cycles: 1, mvp: "Done",
             coreTasks: [CoreTask(title: "One"), CoreTask(title: "Two"), CoreTask(title: "Three")],
-            routineOverride: true
+            routineOverride: false
         )
         let defaults = PredefinedRoutineBlocks.daily(for: planDate, calendar: calendar)
         let issues = PlanValidator().validate(tasks: [task] + defaults + FixedPlanTasks.daily(), profile: profile, minimumCycles: 0)
@@ -330,10 +330,25 @@ do {
         try expect(!FixedPlanTasks.isAllowedScheduledRest(start: 780, end: 840), "13:00–14:00 Rest incorrectly remained a screen guard")
         try expect(!FixedPlanTasks.isAllowedScheduledRest(start: 990, end: 1050), "16:30–17:30 Rest incorrectly crossed into the screen-guard window")
         let profile = RoutineProfileResolver(calendar: calendar).profile(for: try date("2026-08-05", format: "yyyy-MM-dd"))
-        let workDuringRest = PlanTask(title: "Work during Rest", startMinute: 1020, cycles: 1, mvp: "Done", coreTasks: [CoreTask(title: "One"), CoreTask(title: "Two"), CoreTask(title: "Three")], routineOverride: true)
+        let workDuringRest = PlanTask(title: "Work during Rest", startMinute: 1020, cycles: 1, mvp: "Done", coreTasks: [CoreTask(title: "One"), CoreTask(title: "Two"), CoreTask(title: "Three")])
         try expect(PlanValidator().validate(tasks: [workDuringRest], profile: profile, minimumCycles: 0).contains {
             if case .restConflict = $0 { return true }; return false
-        }, "Work was allowed to override protected Rest")
+        }, "Work without an explicit override was allowed during protected Rest")
+        let explicitOverride = PlanTask(title: "Work with override", startMinute: 1020, cycles: 1, mvp: "Done", coreTasks: [CoreTask(title: "One"), CoreTask(title: "Two"), CoreTask(title: "Three")], routineOverride: true)
+        let rest = PlanTask(title: "Rest", startMinute: 1020, cycles: 2, routineBlock: true, predefinedKind: .rest)
+        let overrideIssues = PlanValidator().validate(tasks: [explicitOverride, rest], profile: profile, minimumCycles: 0)
+        try expect(!overrideIssues.contains {
+            if case .restConflict = $0 { return true }; return false
+        }, "An explicit override still produced a Rest conflict")
+        try expect(!overrideIssues.contains {
+            if case .overlap = $0 { return true }; return false
+        }, "An explicit override still produced a Rest overlap")
+        let legacyBreak = PlanTask(title: "Break", startMinute: 300, cycles: 2, mvp: "Rest", coreTasks: [CoreTask(title: "One"), CoreTask(title: "Two"), CoreTask(title: "Three")])
+        let breakIssues = PlanValidator().validate(tasks: [legacyBreak], profile: profile, minimumCycles: 0)
+        try expect(!breakIssues.contains {
+            if case .restConflict = $0 { return true }; return false
+        }, "A legacy Break capture inside an allowed Rest window was still rejected")
+        try expect(!legacyBreak.countsTowardPlanning, "A legacy Break capture still counted as work")
     }
     try check("Slot placement skips early Rest even without a persisted Rest row") {
         try expect(PlanValidator().firstUnusedSlot(in: [], startingAt: 300, before: 360) == nil, "05:00–06:00 was treated as an available work slot")

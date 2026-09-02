@@ -172,11 +172,17 @@ The day is independently planned and snapshotted in four super-blocks:
   three custom, very terse subtasks, using nearby saved tasks as style context.
   AI quick tasks may replace only overlapping predefined routine blocks. They
   must never silently remove fixed evening or existing user tasks.
-- AI must preserve Rest at 05:00–06:00, 11:00–12:00, 17:00–18:00, and
-  23:00–00:00. A task named "break" is interpreted as Rest. If a partial plan leaves a task without
-  a time, assign it after the last explicitly timed task while skipping occupied
-  slots and Rest. Similar task names are matched to existing tasks before a new
-  record is created, and any X → Y interpretation is reported to the user.
+- AI must preserve Rest by default at 05:00–06:00, 11:00–12:00, 17:00–18:00,
+  and 23:00–00:00. A task named "break" is interpreted as Rest. Work that
+  overlaps Rest is moved after it and reported. Only an explicit current-prompt
+  instruction to override, overrule, bypass, ignore, or force through Rest or a
+  protected window may place work there; the Rest row remains visible and the
+  override is reported. Do not infer an override, and do not use one to hide
+  work-task collisions or cross midnight. If a partial plan leaves a task
+  without a time, assign it after the last explicitly timed task while skipping
+  occupied slots and Rest. Similar task names are matched to existing tasks
+  before a new record is created, and any X → Y interpretation is reported to
+  the user.
 - Every Responses API turn and tool round receives a fresh Asia/Dhaka date,
   time, phase, current-cycle start, next-cycle start, and current task. Older
   chat turns must never override this live context after midnight.

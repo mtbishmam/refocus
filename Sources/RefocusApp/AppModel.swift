@@ -304,8 +304,11 @@ final class AppModel: ObservableObject {
         case "update_task":
             guard aiContextWasLoadedForRequest else { return aiMissingFreshContextResult() }
             try await refreshAIContextBeforeMutation(using: worker)
-            let entry = try await worker.updateAITask(decoder.decode(AIUpdateTaskArguments.self, from: arguments))
-            return aiTaskResult(entry, action: "updated")
+            let result = try await worker.updateAITask(
+                decoder.decode(AIUpdateTaskArguments.self, from: arguments),
+                prompt: userPrompt
+            )
+            return aiTaskResult(result.entry, action: "updated", interpretation: result.interpretation)
         case "append_task_description":
             guard aiContextWasLoadedForRequest else { return aiMissingFreshContextResult() }
             try await refreshAIContextBeforeMutation(using: worker)
@@ -318,8 +321,11 @@ final class AppModel: ObservableObject {
         case "reschedule_task":
             guard aiContextWasLoadedForRequest else { return aiMissingFreshContextResult() }
             try await refreshAIContextBeforeMutation(using: worker)
-            let entry = try await worker.rescheduleAITask(decoder.decode(AIRescheduleTaskArguments.self, from: arguments))
-            return aiTaskResult(entry, action: "rescheduled")
+            let result = try await worker.rescheduleAITask(
+                decoder.decode(AIRescheduleTaskArguments.self, from: arguments),
+                prompt: userPrompt
+            )
+            return aiTaskResult(result.entry, action: "rescheduled", interpretation: result.interpretation)
         case "delete_task":
             guard aiContextWasLoadedForRequest else { return aiMissingFreshContextResult() }
             let lower = userPrompt.lowercased()
@@ -417,7 +423,7 @@ final class AppModel: ObservableObject {
 
         Follow this priority: direct current user instruction > dated or Special Event rule > live Ikigai routine > ReFocus AI operating manual > defaults. The application has already injected a fresh SQLite snapshot for this request, and get_refocus_context can refresh or select another date. Stable task IDs are mandatory for existing-record mutations. The native tools validate writes and read them back; never claim success unless the result contains both ok=true and verified=true.
 
-        Reserve Rest absolutely at 05:00–06:00, 11:00–12:00, 17:00–18:00, and 23:00–00:00 Asia/Dhaka. Never schedule work in those windows. Interpret a user-written "break" as Rest. If a requested task time conflicts with Rest, move it to the first valid slot after Rest and tell the user what changed.
+        Reserve Rest by default at 05:00–06:00, 11:00–12:00, 17:00–18:00, and 23:00–00:00 Asia/Dhaka. Interpret a user-written "break" as Rest. If a requested work task conflicts with Rest, move it to the first valid slot after Rest and tell the user what changed. Only the current prompt's explicit instruction to override, overrule, bypass, ignore, or force through Rest/protected windows may place that task inside the protected window; then preserve the Rest row and report the override. Do not infer an override from a merely timed task, and do not use an override to hide collisions between work tasks or to cross midnight.
 
         When the user gives a partial plan, parse all explicitly timed lines first. Match requested task names against existing tasks by course, number, subject, and close wording; prefer updating/rescheduling the closest existing task over creating a duplicate. If you interpret X as existing task Y, explicitly report that mapping. Any task included in the plan without a time should be assigned sequentially after the last explicitly timed task, skipping occupied slots and protected Rest windows. Leave a task untimed only when the user explicitly asks for an untimed Agenda capture.
 

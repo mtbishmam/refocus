@@ -319,7 +319,7 @@ actor OpenAIResponsesClient {
         function("get_refocus_context", "Read dated tasks, Agenda tasks, Daily metrics, and habit values. Call this before mutating records.", [
             "date": string("Date in YYYY-MM-DD. Defaults to today in Asia/Dhaka."),
         ], required: []),
-        function("create_task", "Create a quick task. Supply one terse custom MVP and exactly three terse title-specific subtasks. A timed task may replace only an overlapping non-Rest predefined routine; protected Rest windows are never replaced. In a partial plan, match close existing task names before creating duplicates and allocate omitted times after the last explicitly timed task.", [
+        function("create_task", "Create a quick task. Supply one terse custom MVP and exactly three terse title-specific subtasks. Rest means 05:00–06:00, 11:00–12:00, 17:00–18:00, and 23:00–00:00 Asia/Dhaka; a timed work task is moved to the first valid slot after Rest by default. Only an explicit override/overrule/bypass/ignore/force instruction in the current user prompt may schedule work inside Rest; preserve the Rest row and report that override. A timed task may replace only an overlapping non-Rest predefined routine. In a partial plan, match close existing task names before creating duplicates and allocate omitted times after the last explicitly timed task.", [
             "date": string("Scheduled date in YYYY-MM-DD."),
             "title": string("Concrete task title."),
             "description": string("Optional notes or instructions."),
@@ -332,7 +332,7 @@ actor OpenAIResponsesClient {
             "mvp": string("Very short, task-specific completion definition."),
             "subtasks": array(of: string("Very short, task-specific subtask; provide exactly three.")),
         ], required: ["date", "title", "cycles", "mvp", "subtasks"]),
-        function("update_task", "Edit any field of an existing task while preserving its stable ID.", [
+        function("update_task", "Edit any field of an existing task while preserving its stable ID. If the resulting work task overlaps protected Rest, move it after Rest unless the current user prompt explicitly says to override, overrule, bypass, ignore, or force through Rest; report any automatic move or explicit override.", [
             "task_id": string("Task UUID returned by get_refocus_context."),
             "date": nullableString("Optional replacement date YYYY-MM-DD."),
             "title": nullableString("Optional replacement title."),
@@ -349,7 +349,7 @@ actor OpenAIResponsesClient {
                 "title": string("Subtask title."), "completed": boolean("Completion state."),
             ], "required": ["title", "completed"], "additionalProperties": false]],
         ], required: ["task_id"]),
-        function("reschedule_task", "Move a task to another date and optionally assign a new time.", [
+        function("reschedule_task", "Move a task to another date and optionally assign a new time. Protected Rest is respected by default: move work after Rest and report it. Only an explicit override/overrule/bypass/ignore/force instruction in the current prompt may place work inside Rest; preserve the Rest row and report the override.", [
             "task_id": string("Task UUID returned by get_refocus_context."),
             "date": string("Destination date YYYY-MM-DD."),
             "start_time": nullableString("Optional HH:mm; empty keeps it untimed."),
