@@ -2030,7 +2030,12 @@ final class AppModel: ObservableObject {
         // The database owns live state. iCloud Markdown is output-only, so
         // projection writes must never trigger a broad vault reload.
         watchers = []
-        if let worker { Task { await worker.refreshProjections() } }
+        if let worker {
+            Task {
+                await worker.refreshProjections()
+                try? await worker.prepareAIContextProjection()
+            }
+        }
         reloadVault()
         startCloudSyncLoop()
     }

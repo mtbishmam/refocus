@@ -268,6 +268,10 @@ actor VaultWorker {
         )
     }
 
+    func prepareAIContextProjection() throws {
+        _ = try refreshAIContextProjection()
+    }
+
     private func refreshAIContextProjection() throws -> String {
         let relativePaths = [
             "ego/ikigai.md", "ego/non-negotiables.md", "ego/goals.md",
