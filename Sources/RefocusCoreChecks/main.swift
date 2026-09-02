@@ -71,6 +71,32 @@ do {
         try expect(screenBreak.phase == .screenBreak, "19:55 did not enter screen break")
         try expect(time(screenBreak.phaseEnd) == "20:00", "19:55 break should end at 20:00")
     }
+    try check("Live Dhaka cycles roll into the new date at midnight") {
+        let clock = WallClock(calendar: calendar)
+        let beforeMidnight = clock.snapshot(at: try date("2026-09-02 23:57:00"))
+        try expect(beforeMidnight.phase == .screenBreak, "23:57 should be the final screen break")
+        let nextCycle = calendar.date(byAdding: .minute, value: 30, to: beforeMidnight.cycleStart)
+        try expect(nextCycle.map { calendar.component(.day, from: $0) } == 3, "Next cycle did not roll into September 3")
+        try expect(time(nextCycle ?? beforeMidnight.phaseEnd) == "00:00", "Midnight next-cycle time was not 00:00")
+    }
+    try check("Generated AI context refreshes sources and preserves corrections") {
+        let firstSources = [ReFocusAIContextSource(path: "ego/ikigai.md", contents: "Goal A")]
+        let first = ReFocusAIContextProjection.render(
+            sources: firstSources, compiledAt: try date("2026-09-02 10:00:00"),
+            corrections: "When current means live, use the live cycle."
+        )
+        try expect(!ReFocusAIContextProjection.needsRefresh(first, sources: firstSources), "Fresh context projection looked stale")
+        let changed = [ReFocusAIContextSource(path: "ego/ikigai.md", contents: "Goal B")]
+        try expect(ReFocusAIContextProjection.needsRefresh(first, sources: changed), "Changed source did not invalidate AI context")
+        try expect(
+            ReFocusAIContextProjection.preservedCorrections(from: first) == "When current means live, use the live cycle.",
+            "Approved AI correction was not preserved"
+        )
+        try expect(first.contains("`cur -> did X`"), "Current-cycle shorthand is absent from the operating manual")
+        try expect(first.contains("`next -> 1 cyc/cycle -> Y"), "Next-cycle shorthand is absent from the operating manual")
+        try expect(first.contains("fresh SQLite context"), "Static policy does not require fresh live context")
+        try expect(first.contains("Delete only when"), "Explicit deletion safety is absent")
+    }
     try check("Monday uses Standard Routine") {
         let profile = RoutineProfileResolver(calendar: calendar).profile(for: try date("2026-08-03", format: "yyyy-MM-dd"))
         try expect(profile.kind == .standard, "Monday was not standard")
@@ -623,6 +649,24 @@ do {
         try expect(!remainingOriginal.contains(where: { $0.id == aiTask.id }), "Moved AI task remained on its source date")
         let moved = try require(store.tasks(on: movedDay).first(where: { $0.id == aiTask.id }), "Moved AI task disappeared")
         try expect(moved.title == "AI plan revised" && moved.startMinute == 1260, "AI update lost its stable ID or edited fields")
+    }
+    try check("AI deletion and historical Daily values survive durable read-back") {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-ai-verification-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let store = try RefocusStore(databaseURL: temporary.appendingPathComponent("refocus.sqlite3"), calendar: calendar)
+        try store.importLegacy(today: nil, tomorrow: nil, agenda: [], templates: [], streaks: [])
+        let historicalDay = try date("2026-08-30", format: "yyyy-MM-dd")
+        let task = PlanTask(title: "Delete me", startMinute: 600, cycles: 1, quickCapture: true)
+        try store.upsertAIQuickTask(task, on: historicalDay)
+        let createdEntry = try store.taskEntry(id: task.id)
+        try expect(createdEntry != nil, "AI task was not durably created")
+        try store.deleteTask(id: task.id)
+        let deletedEntry = try store.taskEntry(id: task.id)
+        try expect(deletedEntry == nil, "Deleted task survived durable read-back")
+        try store.setFieldValue(definitionID: "weight", value: "78.4", date: historicalDay)
+        let values = try store.fieldValues(from: historicalDay, through: historicalDay)
+        try expect(values.contains { $0.definitionID == "weight" && $0.value == "78.4" }, "Historical Daily metric failed read-back")
     }
     try check("Historical tasks may omit MVP and subtasks while active tasks remain strict") {
         let validator = PlanValidator()
