@@ -14,7 +14,7 @@ public struct ReFocusAIContextSource: Sendable, Equatable {
 /// Mutable facts such as the current clock, tasks, and metrics deliberately do
 /// not belong here; those are injected from SQLite for every request.
 public enum ReFocusAIContextProjection {
-    public static let version = 5
+    public static let version = 6
     public static let correctionsStart = "<!-- REFOCUS AI CORRECTIONS START -->"
     public static let correctionsEnd = "<!-- REFOCUS AI CORRECTIONS END -->"
 
@@ -93,7 +93,7 @@ public enum ReFocusAIContextProjection {
         - Resolve relative dates and times from the current Asia/Dhaka clock supplied with this request. Never inherit "today", "current", or "next" from an older response.
         - Read fresh SQLite-backed ReFocus context before every mutation. Stable task IDs from that read are required for editing, rescheduling, completion, Description updates, and deletion.
         - Validate proposed task writes through the same planner rules as the UI. Timed quick tasks may replace only overlapping editable predefined routines; never silently replace fixed evening tasks or user tasks.
-        - Protect Rest by default at 05:00-06:00, 11:00-12:00, 17:00-18:00, and 23:00-00:00 Asia/Dhaka. Interpret a task named "break" as Rest and preserve the Rest block. Move work that overlaps Rest to the first valid slot after Rest and report the change. Only an explicit instruction in the current prompt to override, overrule, bypass, ignore, or force through Rest/protected windows may place work there; preserve the Rest row and report the override. Never infer an override from a merely timed task, and do not use one to hide work-task collisions or cross midnight.
+        - Protect Rest by default at 05:00-06:00, 11:00-12:00, 17:00-18:00, and 23:00-00:00 Asia/Dhaka. Interpret a task named "break" as Rest and preserve the Rest block. Apply Rest and protected-window enforcement only to the current or future interval; completed intervals are historical evidence and must not block later planning or create stale warnings. Move future work that overlaps Rest to the first valid slot after Rest and report the change. Only an explicit instruction in the current prompt to override, overrule, bypass, ignore, or force through Rest/protected windows may place future work there; preserve the Rest row and report the override. Never infer an override from a merely timed task, and do not use one to hide work-task collisions or cross midnight.
         - When a user gives a partial plan, parse explicitly timed lines first. Match close task names using course, number, subject, and wording; update or reschedule the closest existing task instead of creating a duplicate. Report every interpretation such as X -> Y.
         - Assign tasks included in a plan without an explicit time sequentially after the last explicitly timed task, skipping occupied slots, Rest, and the midnight boundary. Leave a task untimed only when the user explicitly requests an untimed Agenda capture.
         - Delete only when the current user prompt explicitly says delete, remove, or cancel.
@@ -115,7 +115,7 @@ public enum ReFocusAIContextProjection {
         - Evening: 18:00-21:30.
         - Late Night: 21:30-23:00 and saved explicitly after 21:30.
         - Work may be recorded through midnight; after midnight it belongs to the new Asia/Dhaka date.
-        - Protected Rest: 05:00-06:00, 11:00-12:00, 17:00-18:00, and 23:00-00:00. A requested "break" is this Rest block, not work. Work is moved after Rest unless the current prompt explicitly authorizes an override.
+        - Protected Rest: 05:00-06:00, 11:00-12:00, 17:00-18:00, and 23:00-00:00. A requested "break" is this Rest block, not work. Only current/future work is moved after Rest or required to explicitly override it; a completed task never keeps a past Rest window active.
         - In a plan, assign a missing time after the last explicit task; use an untimed Agenda capture only when the user explicitly asks for one.
 
         ## Terse task examples

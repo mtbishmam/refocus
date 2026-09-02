@@ -350,6 +350,30 @@ do {
         }, "A legacy Break capture inside an allowed Rest window was still rejected")
         try expect(!legacyBreak.countsTowardPlanning, "A legacy Break capture still counted as work")
     }
+    try check("Completed tasks no longer block future planning") {
+        let planDate = try date("2026-08-05", format: "yyyy-MM-dd")
+        let profile = RoutineProfileResolver(calendar: calendar).profile(for: planDate)
+        let pastSleep = PlanTask(title: "Sleep", startMinute: 480, cycles: 10, mvp: "Sleep")
+        let pastGraph = PlanTask(title: "CSE220 Ass 6 (Graph)", startMinute: 1020, cycles: 2, mvp: "Finish")
+        let eveningNow = try date("2026-08-05 20:00:00")
+        let pastIssues = PlanValidator().validate(
+            tasks: [pastSleep, pastGraph], profile: profile, minimumCycles: 1,
+            requireFixedTasks: false, requireTaskDetails: false,
+            scheduledDate: planDate, now: eveningNow, calendar: calendar
+        )
+        try expect(pastIssues.contains(.insufficientCycles(actual: 0, required: 1)), "Past work still counted toward the active planning gate")
+        try expect(!pastIssues.contains { if case .restConflict = $0 { return true }; return false }, "Past work still produced a protected Rest error")
+        try expect(!pastIssues.contains { if case .overlap = $0 { return true }; return false }, "Past work still produced an overlap error")
+
+        let morningNow = try date("2026-08-05 08:00:00")
+        let futureWork = PlanTask(title: "Future work", startMinute: 660, cycles: 1, mvp: "Finish")
+        let futureIssues = PlanValidator().validate(
+            tasks: [futureWork], profile: profile, minimumCycles: 0,
+            requireFixedTasks: false, requireTaskDetails: false,
+            scheduledDate: planDate, now: morningNow, calendar: calendar
+        )
+        try expect(futureIssues.contains { if case .restConflict = $0 { return true }; return false }, "Future work no longer respected protected Rest")
+    }
     try check("Slot placement skips early Rest even without a persisted Rest row") {
         try expect(PlanValidator().firstUnusedSlot(in: [], startingAt: 300, before: 360) == nil, "05:00–06:00 was treated as an available work slot")
     }

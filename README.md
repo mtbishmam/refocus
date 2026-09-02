@@ -82,7 +82,7 @@ when its curated vault sources change; current tasks and Daily values remain
 fresh SQLite context, with recent history injected only when relevant. Native
 AI writes are planner-validated and reported successful only after durable
 read-back verification. The assistant preserves the four protected Rest
-windows by default, interprets "break" as Rest, moves overlapping work after
+windows by default, interprets "break" as Rest, moves current/future overlapping work after
 Rest, matches close task names before creating duplicates, and allocates
 untimed tasks after the last explicitly timed task in a partial plan. An
 explicit current-prompt override/overrule/bypass instruction may place work in

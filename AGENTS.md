@@ -125,7 +125,9 @@ The day is independently planned and snapshotted in four super-blocks:
 - A task is historical when its scheduled date is before today in Asia/Dhaka,
   or when it is scheduled today and its complete interval has ended. Historical
   tasks may omit MVP and subtasks (and retain unnamed imported subtasks), while
-  timing, duration, collision, Rest, and cutoff validation remains active.
+  timing, duration, and malformed-data validation remains available for record
+  integrity, but completed intervals are excluded from planning totals and do
+  not trigger Rest/protected-window or collision blockers for later work.
 - Scheduled Agenda tasks may omit MVP and subtasks. They must satisfy the full
   task rules when promoted into Tomorrow or Today.
 - Explicit write-scoped MCP `create_task` calls create quick tasks that may
@@ -174,7 +176,9 @@ The day is independently planned and snapshotted in four super-blocks:
   must never silently remove fixed evening or existing user tasks.
 - AI must preserve Rest by default at 05:00–06:00, 11:00–12:00, 17:00–18:00,
   and 23:00–00:00. A task named "break" is interpreted as Rest. Work that
-  overlaps Rest is moved after it and reported. Only an explicit current-prompt
+  overlaps a current or future Rest window is moved after it and reported;
+  completed intervals are historical evidence and never keep a later plan
+  blocked. Only an explicit current-prompt
   instruction to override, overrule, bypass, ignore, or force through Rest or a
   protected window may place work there; the Rest row remains visible and the
   override is reported. Do not infer an override, and do not use one to hide
