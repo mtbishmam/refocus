@@ -268,7 +268,10 @@ do {
         let sundayBlocks = PredefinedRoutineBlocks.daily(for: sunday, calendar: calendar)
         try expect(saturdayBlocks.contains { $0.title == "CSE111/220 Study" && $0.startMinute == 570 && $0.endMinute == 615 }, "Saturday 09:30–10:15 study block missing")
         try expect(saturdayBlocks.contains { $0.title == "Return Home / Transition" && $0.startMinute == 750 && $0.endMinute == 780 }, "Saturday return-home block missing")
-        try expect(!saturdayBlocks.contains { $0.predefinedKind == .rest }, "Saturday retained an out-of-window Rest block")
+        try expect(saturdayBlocks.contains { $0.predefinedKey == "rest-night" && $0.startMinute == 1380 && $0.endMinute == 1440 }, "Saturday omitted the 23:00–00:00 Rest block")
+        try expect(saturdayBlocks.filter { $0.predefinedKind == .rest }.allSatisfy {
+            FixedPlanTasks.isAllowedScheduledRest(start: $0.startMinute, end: $0.endMinute)
+        }, "Saturday retained an out-of-window Rest block")
         let saturdayMashup = saturdayBlocks.first { $0.title == "5H Mashup" }
         let sundayMashup = sundayBlocks.first { $0.title == "5H Mashup" }
         try expect(saturdayMashup?.startMinute == 840 && saturdayMashup?.endMinute == 1140, "Saturday 14:00–19:00 mashup missing")
@@ -318,11 +321,22 @@ do {
             "Native routine IDs drifted from the web ID algorithm"
         )
     }
-    try check("Scheduled Rest screen guards are limited to the two live windows") {
+    try check("Scheduled Rest screen guards are limited to the four live windows") {
+        try expect(FixedPlanTasks.isAllowedScheduledRest(start: 300, end: 360), "05:00–06:00 Rest was not allowed")
         try expect(FixedPlanTasks.isAllowedScheduledRest(start: 660, end: 720), "11:00–12:00 Rest was not allowed")
         try expect(FixedPlanTasks.isAllowedScheduledRest(start: 1050, end: 1080), "17:30–18:00 Rest was not allowed")
+        try expect(FixedPlanTasks.isAllowedScheduledRest(start: 1380, end: 1440), "23:00–00:00 Rest was not allowed")
+        try expect(!FixedPlanTasks.isAllowedScheduledRest(start: 270, end: 330), "04:30–05:30 Rest incorrectly crossed into the early guard window")
         try expect(!FixedPlanTasks.isAllowedScheduledRest(start: 780, end: 840), "13:00–14:00 Rest incorrectly remained a screen guard")
         try expect(!FixedPlanTasks.isAllowedScheduledRest(start: 990, end: 1050), "16:30–17:30 Rest incorrectly crossed into the screen-guard window")
+        let profile = RoutineProfileResolver(calendar: calendar).profile(for: try date("2026-08-05", format: "yyyy-MM-dd"))
+        let workDuringRest = PlanTask(title: "Work during Rest", startMinute: 1020, cycles: 1, mvp: "Done", coreTasks: [CoreTask(title: "One"), CoreTask(title: "Two"), CoreTask(title: "Three")], routineOverride: true)
+        try expect(PlanValidator().validate(tasks: [workDuringRest], profile: profile, minimumCycles: 0).contains {
+            if case .restConflict = $0 { return true }; return false
+        }, "Work was allowed to override protected Rest")
+    }
+    try check("Slot placement skips early Rest even without a persisted Rest row") {
+        try expect(PlanValidator().firstUnusedSlot(in: [], startingAt: 300, before: 360) == nil, "05:00–06:00 was treated as an available work slot")
     }
     try check("Stored predefined MVP descriptions migrate across every date") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-predefined-description-\(UUID().uuidString)")
@@ -625,8 +639,8 @@ do {
         let originalDay = try date("2026-08-29", format: "yyyy-MM-dd")
         let movedDay = try date("2026-08-30", format: "yyyy-MM-dd")
         let routine = PlanTask(
-            title: "Rest", startMinute: 1080, cycles: 2, routineBlock: true,
-            displayColor: .green, predefinedKind: .rest, predefinedKey: "rest-evening"
+            title: "Upsolve", startMinute: 1080, cycles: 2, routineBlock: true,
+            displayColor: .green, predefinedKind: .upsolve, predefinedKey: "upsolve-evening"
         )
         let user = PlanTask(title: "Existing user task", startMinute: 1110, cycles: 1, quickCapture: true)
         let fixed = PlanTask(title: "Fixed task", startMinute: 1080, cycles: 1, fixedRole: .dayAnalysis)

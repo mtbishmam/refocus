@@ -59,7 +59,11 @@ language. The assistant receives targeted vault search instead of uploading the
 whole vault on every prompt.
 
 The task Description is the canonical execution/reflection narrative. The
-screen-break task expander edits only MVP, Description, and three subtask slots;
+screen-break task expander edits only the task name, MVP, Description, and three
+subtask slots; the active task is always expanded. The four protected Rest
+windows are 05:00–06:00, 11:00–12:00, 17:00–18:00, and 23:00–00:00 Asia/Dhaka. AI planning
+preserves them, interprets "break" as Rest, matches close task names before
+creating duplicates, and allocates omitted times after the last explicit task;
 those edits take the ordinary Today transaction path so Modified snapshots,
 Diff, focus-session logs, and day analysis see the same value. Legacy
 What-did/Better/Faster check-ins decode into one Description without discarding

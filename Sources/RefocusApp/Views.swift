@@ -79,12 +79,16 @@ struct DashboardView: View {
 
             Group {
                 if model.aiSplitPresented && model.selectedDashboardTab != .ai {
-                    HStack(spacing: 0) {
-                        DashboardAIChatPanel()
-                            .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
-                        Divider()
-                        dashboardContent(for: model.selectedDashboardTab)
-                            .frame(minWidth: 430, maxWidth: .infinity, maxHeight: .infinity)
+                    GeometryReader { proxy in
+                        let aiWidth = proxy.size.width * 0.5
+                        HStack(spacing: 0) {
+                            DashboardAIChatPanel()
+                                .frame(width: aiWidth)
+                                .frame(maxHeight: .infinity)
+                            Divider()
+                            dashboardContent(for: model.selectedDashboardTab)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
                     }
                     .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .center)))
                 } else {
@@ -148,6 +152,18 @@ private struct DashboardAIChatPanel: View {
                     .font(.headline.bold())
                 Spacer()
                 if model.aiIsResponding { AIShimmerStatus(text: model.aiStatus) }
+                Button {
+                    withAnimation(.snappy(duration: 0.32)) {
+                        model.closeAISplit()
+                    }
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.callout.weight(.semibold))
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Close ReFocus AI")
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 10)
@@ -704,12 +720,6 @@ private struct AIComposer: View {
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 30, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 30, style: .continuous).stroke(Color.primary.opacity(0.12)))
         .shadow(color: .black.opacity(0.08), radius: 10, y: 3)
-        .onChange(of: model.aiDraft) { _, newValue in
-            guard !newValue.isEmpty else { return }
-            withAnimation(.snappy(duration: 0.32)) {
-                model.presentAISplitForTyping()
-            }
-        }
     }
 }
 
@@ -3035,11 +3045,14 @@ private struct TodayPlanPanel: View {
                     if !midnightTasks.isEmpty {
                         MidnightBlockHeader(taskCount: midnightTasks.count)
                         ForEach(midnightTasks) { task in
+                            let isCurrent = task.id == model.currentTask?.id
                             BreakTaskRow(
                                 task: breakTaskBinding(for: task),
-                                isExpanded: !model.collapsedTaskIDs.contains(task.id),
-                                isCurrent: task.id == model.currentTask?.id,
-                                toggleExpanded: { model.toggleCollapsed(task.id) },
+                                isExpanded: isCurrent || !model.collapsedTaskIDs.contains(task.id),
+                                isCurrent: isCurrent,
+                                toggleExpanded: {
+                                    if !isCurrent { model.toggleCollapsed(task.id) }
+                                },
                                 toggleComplete: { model.toggleTaskCompletion(task.id) }
                             )
                         }
@@ -3048,11 +3061,14 @@ private struct TodayPlanPanel: View {
                         let segmentTasks = model.executionTasks.filter { !isMidnightTask($0) && planningSegment(for: $0) == segment }
                         PlanningBlockHeader(segment: segment, taskCount: segmentTasks.count)
                         ForEach(segmentTasks) { task in
+                            let isCurrent = task.id == model.currentTask?.id
                             BreakTaskRow(
                                 task: breakTaskBinding(for: task),
-                                isExpanded: !model.collapsedTaskIDs.contains(task.id),
-                                isCurrent: task.id == model.currentTask?.id,
-                                toggleExpanded: { model.toggleCollapsed(task.id) },
+                                isExpanded: isCurrent || !model.collapsedTaskIDs.contains(task.id),
+                                isCurrent: isCurrent,
+                                toggleExpanded: {
+                                    if !isCurrent { model.toggleCollapsed(task.id) }
+                                },
                                 toggleComplete: { model.toggleTaskCompletion(task.id) }
                             )
                         }
@@ -3109,6 +3125,10 @@ private struct BreakTaskRow: View {
             }
             if isExpanded {
                 VStack(alignment: .leading, spacing: 10) {
+                    breakField("Task name") {
+                        TextField("Task name", text: $task.title, axis: .vertical)
+                            .textFieldStyle(.plain)
+                    }
                     breakField("MVP") {
                         TextField("Shortest acceptable finish", text: $task.mvp, axis: .vertical)
                             .textFieldStyle(.plain)

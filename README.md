@@ -43,7 +43,10 @@ Morning (06:00–12:00) and Afternoon (12:00–18:00) each contain 12 physical
 half-hour cycles. A scheduled one-hour Rest task occupies two of those slots,
 so the normal gate requires 10 work cycles. Rest remains editable for each
 date: deleting it releases its slots and immediately raises that block's
-required plan to 12. Evening is saved first for 18:00–21:30 (up to seven
+required plan to 12. The protected Rest windows are 05:00–06:00, 11:00–12:00,
+17:00–18:00, and 23:00–00:00 in Asia/Dhaka; the early and last windows are
+outside the planning quota.
+Evening is saved first for 18:00–21:30 (up to seven
 cycles). At 21:30 the no-plan blocker deliberately returns for a separate
 21:30–23:00 Late Night save (up to three cycles). The planning quota ends at
 23:00, while work and task scheduling remain available through midnight.
@@ -59,10 +62,11 @@ UI and can search a bounded set of planning context in the configured Obsidian
 vault.
 
 During a screen break, each expanded work item is a compact execution editor:
-MVP, Description, and three subtasks only. Description is the one record of what
-happened and how execution could improve or become faster; Diff, focus logs, and
-day analysis all use it. Periodic breaks may be skipped three times per Dhaka
-day, and the overlay follows macOS full-screen Space changes.
+task name, MVP, Description, and three subtasks only. The current task is always
+expanded. Description is the one record of what happened and how execution
+could improve or become faster; Diff, focus logs, and day analysis all use it.
+Periodic breaks may be skipped three times per Dhaka day, and the overlay
+follows macOS full-screen Space changes.
 
 The ReFocus menu-bar icon is a retained AppKit status item with an active-Space
 floating panel, so its quick menu opens from any macOS Space even when the
@@ -77,9 +81,14 @@ The static policy portion is regenerated at `agents/context/refocus-ai.md`
 when its curated vault sources change; current tasks and Daily values remain
 fresh SQLite context, with recent history injected only when relevant. Native
 AI writes are planner-validated and reported successful only after durable
-read-back verification. Starting to type from any non-AI dashboard tab opens a
-smooth AI-left/work-right split without hiding the selected tab, and response
-text supports mouse selection across the entire multi-paragraph message.
+read-back verification. The assistant preserves the four protected Rest
+windows, interprets "break" as Rest, matches close task names before creating
+duplicates, and allocates untimed tasks after the last explicitly timed task
+in a partial plan. Submitting a prompt from any non-AI dashboard tab opens
+a smooth 50/50 AI-left/work-right split without hiding the selected tab;
+the split can be closed independently and its conversation remains in the AI
+tab. Response text supports mouse selection across the entire multi-paragraph
+message.
 
 ## Build and verify
 

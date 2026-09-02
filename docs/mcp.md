@@ -60,8 +60,10 @@ Tools:
   or cycle count is optional: without a start, the task remains unscheduled in
   Agenda and appears automatically in that date's Today view. MCP quick tasks
   do not require an MVP or three subtasks. Any
-  overlapping predefined routine blocks are durably replaced for that date;
-  fixed evening tasks and existing user tasks are never silently deleted.
+  overlapping non-Rest predefined routine blocks are durably replaced for that
+  date; the protected 05:00–06:00, 11:00–12:00, 17:00–18:00, and 23:00–00:00 Rest windows
+  cannot be replaced by work. A task named `break` is interpreted as Rest.
+  Fixed evening tasks and existing user tasks are never silently deleted.
 - `delete_task` — tombstone one explicitly selected task by the stable
   `task_id` returned by an ID-enabled read. Optional expected date, title, and
   start fields make the deletion fail safely if the task changed after it was

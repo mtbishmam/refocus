@@ -319,11 +319,11 @@ actor OpenAIResponsesClient {
         function("get_refocus_context", "Read dated tasks, Agenda tasks, Daily metrics, and habit values. Call this before mutating records.", [
             "date": string("Date in YYYY-MM-DD. Defaults to today in Asia/Dhaka."),
         ], required: []),
-        function("create_task", "Create a quick task. Supply one terse custom MVP and exactly three terse title-specific subtasks. A timed task replaces only overlapping predefined routine blocks.", [
+        function("create_task", "Create a quick task. Supply one terse custom MVP and exactly three terse title-specific subtasks. A timed task may replace only an overlapping non-Rest predefined routine; protected Rest windows are never replaced. In a partial plan, match close existing task names before creating duplicates and allocate omitted times after the last explicitly timed task.", [
             "date": string("Scheduled date in YYYY-MM-DD."),
             "title": string("Concrete task title."),
             "description": string("Optional notes or instructions."),
-            "start_time": nullableString("Optional HH:mm in Asia/Dhaka. Omit for an untimed Agenda task."),
+            "start_time": nullableString("Optional HH:mm in Asia/Dhaka. In a partial plan, omit only when the task should be allocated after the last explicitly timed task; use an untimed Agenda task only when the user explicitly asks for one."),
             "cycles": integer("Number of half-hour cycles, 1-10."),
             "kind": enumString(["normal", "contest"]),
             "priority": enumString(["Do/Die", "High", "Medium", "Low"]),

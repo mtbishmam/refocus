@@ -76,9 +76,11 @@ The day is independently planned and snapshotted in four super-blocks:
 | Late Night | 21:30–23:00 | `min(3, usable half-hour cycles remaining in this block)` |
 
 - The normal 11:00–12:00 and 17:00–18:00 Rest tasks consume two physical
-  cycles each, leaving the usual Morning/Afternoon requirement at 10. Because
-  Rest is editable per date, deleting one immediately releases those two slots
-  and raises that block's required plan to 12 cycles.
+  cycles each, leaving the usual Morning/Afternoon requirement at 10. The
+  05:00–06:00 and 23:00–00:00 windows are protected guard periods outside the
+  planning quota. Because Rest is editable per date, deleting one
+  immediately releases its two physical slots and raises that block's required
+  plan to 12 cycles where applicable.
 
 - Floor the current time to its active wall-clock cycle. At 07:13 the current
   cycle begins at 07:00.
@@ -94,10 +96,10 @@ The day is independently planned and snapshotted in four super-blocks:
   accepted for that date. Sort tasks by start time before validating; any
   unapproved collision remains red.
 - Planning is a hard gate, but Command-Q must always remain available.
-- During a screen break, expanding a task exposes only its MVP, Description,
-  and exactly three editable subtask slots. Those execution-field edits
-  autosave through Today and refresh the active Modified snapshot without
-  rewriting its Initial snapshot.
+- During a screen break, expanding a task exposes only its editable name, MVP,
+  Description, and exactly three editable subtask slots. The current task is
+  always expanded. Those execution-field edits autosave through Today and
+  refresh the active Modified snapshot without rewriting its Initial snapshot.
 - Morning and Afternoon still require an explicit save even when their
   predefined defaults are accepted unchanged. Diff may show an unsaved block's
   predefined routine as a labelled default Initial baseline, but that fallback
@@ -131,7 +133,7 @@ The day is independently planned and snapshotted in four super-blocks:
   Agenda tasks, which appear automatically in that date's Today view, or
   scheduled tasks. Scheduled tasks retain all timing,
   duration, collision, and cutoff rules. An MCP quick task durably replaces
-  overlapping predefined routine blocks for that date, but never silently
+  overlapping non-Rest predefined routine blocks for that date, but never silently
   deletes fixed evening tasks or existing user tasks.
 - Explicit write-scoped MCP `delete_task` and `delete_tasks` calls may remove
   tasks only after an ID-enabled `get_day` or `get_agenda` read and an explicit
@@ -170,16 +172,31 @@ The day is independently planned and snapshotted in four super-blocks:
   three custom, very terse subtasks, using nearby saved tasks as style context.
   AI quick tasks may replace only overlapping predefined routine blocks. They
   must never silently remove fixed evening or existing user tasks.
+- AI must preserve Rest at 05:00–06:00, 11:00–12:00, 17:00–18:00, and
+  23:00–00:00. A task named "break" is interpreted as Rest. If a partial plan leaves a task without
+  a time, assign it after the last explicitly timed task while skipping occupied
+  slots and Rest. Similar task names are matched to existing tasks before a new
+  record is created, and any X → Y interpretation is reported to the user.
 - Every Responses API turn and tool round receives a fresh Asia/Dhaka date,
   time, phase, current-cycle start, next-cycle start, and current task. Older
   chat turns must never override this live context after midnight.
+- AI context has three layers: the generated static policy projection at
+  `agents/context/refocus-ai.md`, a fresh SQLite snapshot on every request and
+  before every mutation, and bounded task/metric history only when the prompt
+  needs it. Mutable facts must never come from the Markdown policy projection.
+  Regeneration preserves its marked approved-corrections section.
+- Native AI task writes use the ordinary planner validator and must pass a
+  durable SQLite read-back before the tool returns `verified: true`. The AI
+  must not report a write as successful without both `ok: true` and
+  `verified: true`.
 - Shorthand is executable: `cur -> did X` appends X to the Description of the
   task occupying the current cycle (the just-ended focus cycle during its
   screen break). `next -> 1 cyc/cycle -> Y, then 2 cyc/cycle -> Z` schedules Y
   for the next half-hour cycle and Z for the following two cycles, continuing
   sequentially for additional `then` clauses. `cyc` and `cycle` are synonyms.
-- The system prompt includes a bounded primer from the configured vault and
-  exposes targeted Markdown search. Prefer `ego/ikigai.md`, current
+- The generated policy projection includes bounded material from the
+  configured vault and exposes targeted Markdown search. Prefer
+  `ego/ikigai.md`, current
   non-negotiables, goals, habits, universal truths, and gyoji; do not ingest the
   entire vault into every request.
 
@@ -198,6 +215,8 @@ Current recurring profiles:
 - Sunday/Tuesday: keep the 06:00–11:00 contest, enforce Rest 11:00–12:00,
   protect University/transition until 17:00, enforce Rest 17:00–18:00, then
   resume the evening routine.
+- Every profile preserves the 23:00–00:00 Rest window; it is outside the
+  planning quota but remains a screen guard.
 - Friday: omit the normal contest and use the 09:00–13:00 SSC contest.
 
 Precedence: explicit dated instruction, live Special Event, recurring

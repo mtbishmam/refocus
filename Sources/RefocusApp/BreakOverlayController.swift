@@ -14,6 +14,7 @@ final class BreakOverlayController {
     private var savedPresentationOptions: NSApplication.PresentationOptions = []
     private var screenObserver: NSObjectProtocol?
     private var spaceObserver: NSObjectProtocol?
+    private var applicationObserver: NSObjectProtocol?
     private(set) var mode: ReFocusOverlayMode?
 
     init() {
@@ -35,14 +36,26 @@ final class BreakOverlayController {
             Task { @MainActor in
                 guard let self, !self.panels.isEmpty, let model = self.model, let mode = self.mode else { return }
                 self.buildPanels(model: model, mode: mode)
-                self.bringPanelsToFront()
+                self.reassertPanelsAcrossSpaces()
             }
+        }
+        applicationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            // Entering full screen or activating another app can reorder its
+            // Space after the break has already begun. Reassert without
+            // activating ReFocus, which would pull the user back to the
+            // dashboard's Space instead of covering the current one.
+            Task { @MainActor in self?.reassertPanelsAcrossSpaces() }
         }
     }
 
     deinit {
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
         if let spaceObserver { NSWorkspace.shared.notificationCenter.removeObserver(spaceObserver) }
+        if let applicationObserver { NSWorkspace.shared.notificationCenter.removeObserver(applicationObserver) }
     }
 
     func showPlanning(model: AppModel) {
@@ -91,7 +104,10 @@ final class BreakOverlayController {
         panels = orderedScreens.map { screen in
             let panel = KeyablePanel(
                 contentRect: screen.frame,
-                styleMask: [.borderless],
+                // A non-activating panel can be ordered above another app's
+                // full-screen Space without macOS switching back to the Space
+                // that owns ReFocus's ordinary dashboard window.
+                styleMask: [.borderless, .nonactivatingPanel],
                 backing: .buffered,
                 defer: false,
                 screen: screen
@@ -107,6 +123,9 @@ final class BreakOverlayController {
             panel.hidesOnDeactivate = false
             panel.canHide = false
             panel.isMovable = false
+            panel.isFloatingPanel = true
+            panel.becomesKeyOnlyIfNeeded = true
+            panel.animationBehavior = .none
             panel.isReleasedWhenClosed = false
             let isPrimary = screen == primaryScreen
             let content: AnyView
@@ -138,16 +157,32 @@ final class BreakOverlayController {
     }
 
     private func bringPanelsToFront() {
-        NSApp.activate(ignoringOtherApps: true)
         for panel in panels {
             panel.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
             panel.orderFrontRegardless()
         }
-        panels.first?.makeKeyAndOrderFront(nil)
+        // Do not call NSApp.activate here. A regular app activation can leave
+        // the user's full-screen Space before the all-Spaces panel is shown.
+        // The non-activating panel becomes key only when the user interacts
+        // with its editor or controls.
+        if NSApp.isActive { panels.first?.makeKeyAndOrderFront(nil) }
+    }
+
+    private func reassertPanelsAcrossSpaces() {
+        guard !panels.isEmpty else { return }
+        bringPanelsToFront()
+        // macOS completes a full-screen Space reorder asynchronously. Two
+        // short, non-blocking pulses keep the blocker above the destination
+        // app after that transition settles.
+        for delay in [0.12, 0.45] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                Task { @MainActor in self?.bringPanelsToFront() }
+            }
+        }
     }
 }
 
 private final class KeyablePanel: NSPanel {
     override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
+    override var canBecomeMain: Bool { false }
 }

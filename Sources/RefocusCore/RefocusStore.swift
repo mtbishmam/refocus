@@ -432,14 +432,15 @@ public final class RefocusStore: @unchecked Sendable {
     }
 
     /// Creates or replaces a quick task from the native AI surface. Overlap
-    /// only removes editable predefined routine rows; fixed evening and user
-    /// tasks are never silently deleted.
+    /// only removes editable non-Rest predefined routine rows; the four Rest
+    /// windows are protected and cannot be silently replaced.
     public func upsertAIQuickTask(_ task: PlanTask, on date: Date) throws {
         try transaction {
             try ensureDayPlan(date: date)
             if task.hasScheduledTime {
                 for existing in try tasks(on: date) where existing.id != task.id
                     && existing.isRoutineBlock
+                    && existing.predefinedKind != .rest
                     && existing.startMinute < task.endMinute
                     && existing.endMinute > task.startMinute {
                     try tombstoneTask(id: existing.id.uuidString.lowercased())
@@ -463,6 +464,7 @@ public final class RefocusStore: @unchecked Sendable {
             if task.hasScheduledTime {
                 for candidate in try tasks(on: date) where candidate.id != id
                     && candidate.isRoutineBlock
+                    && candidate.predefinedKind != .rest
                     && candidate.startMinute < task.endMinute
                     && candidate.endMinute > task.startMinute {
                     try tombstoneTask(id: candidate.id.uuidString.lowercased())

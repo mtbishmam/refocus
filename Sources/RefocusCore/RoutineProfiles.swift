@@ -45,17 +45,33 @@ public enum FixedPlanTasks {
     public static let revisionName = "ReVision"
 
     public static let defaultRestWindows = [
+        RoutineWindow(300, 360, .protected, "Rest Block"),
         RoutineWindow(660, 720, .protected, "Rest Block"),
         RoutineWindow(1020, 1080, .protected, "Rest Block"),
+        RoutineWindow(1380, 1440, .protected, "Rest Block"),
     ]
 
-    /// Scheduled Rest is a screen guard only inside the two live routine
+    /// Scheduled Rest is a screen guard only inside the four live routine
     /// windows. Keep this check centralized so stale or user-edited routine
     /// rows cannot accidentally turn an unrelated time into a Rest blocker.
     public static func isAllowedScheduledRest(start: Int, end: Int) -> Bool {
         defaultRestWindows.contains { window in
             start >= window.startMinute && end <= window.endMinute
         }
+    }
+
+    public static func restWindow(overlapping start: Int, end: Int) -> RoutineWindow? {
+        defaultRestWindows.first { $0.overlaps(start: start, end: end) }
+    }
+
+    public static func isRestAlias(_ title: String) -> Bool {
+        let normalized = title
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return normalized == "break"
+            || normalized == "break block"
+            || normalized == "rest"
+            || normalized == "rest block"
     }
 
     public static func daily() -> [PlanTask] {
@@ -125,6 +141,7 @@ public enum PredefinedRoutineBlocks {
         default:
             blocks += standardWorkday(date: date, calendar: calendar)
         }
+        blocks.append(rest(date: date, key: "rest-night", start: 1380, end: 1440, calendar: calendar))
         return blocks.sorted { $0.startMinute < $1.startMinute }
     }
 
@@ -349,6 +366,10 @@ public struct PlanValidator: Sendable {
         var cursor = max(0, (minute / 30) * 30)
         let scheduled = tasks.filter(\.hasScheduledTime)
         while cursor + 30 <= endMinute {
+            if let rest = FixedPlanTasks.restWindow(overlapping: cursor, end: cursor + 30) {
+                cursor = rest.endMinute
+                continue
+            }
             let occupied = scheduled.contains { task in
                 task.startMinute < cursor + 30 && task.endMinute > cursor
             }
@@ -540,6 +561,15 @@ public struct PlanValidator: Sendable {
             }
             guard task.hasScheduledTime else { continue }
             if task.endMinute > 1440 { issues.append(.afterDayBoundary(task: displayTitle)) }
+            if !task.isRoutineBlock {
+                if let restWindow = FixedPlanTasks.restWindow(overlapping: task.startMinute, end: task.endMinute) {
+                    issues.append(.restConflict(
+                        task: displayTitle,
+                        startMinute: restWindow.startMinute,
+                        endMinute: restWindow.endMinute
+                    ))
+                }
+            }
             if !task.routineOverride && !task.isRoutineBlock {
                 for window in profile.protectedWindows where window.overlaps(start: task.startMinute, end: task.endMinute) {
                     issues.append(.routineConflict(

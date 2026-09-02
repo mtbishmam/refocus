@@ -912,6 +912,7 @@ public enum PlanValidationIssue: Equatable, Sendable, CustomStringConvertible {
     case tooFewSubtasks(task: String)
     case emptyCoreTask(task: String)
     case overlap(first: String, second: String)
+    case restConflict(task: String, startMinute: Int, endMinute: Int)
     case routineConflict(taskID: UUID, task: String, reason: String, startMinute: Int, endMinute: Int)
     case afterDayBoundary(task: String)
     case missingFixedTask(name: String)
@@ -919,6 +920,7 @@ public enum PlanValidationIssue: Equatable, Sendable, CustomStringConvertible {
 
     public var severity: ValidationSeverity {
         switch self {
+        case .restConflict: .error
         case .routineConflict: .warning
         default: .error
         }
@@ -941,6 +943,8 @@ public enum PlanValidationIssue: Equatable, Sendable, CustomStringConvertible {
         case .tooFewSubtasks(let task): return "\(task) needs at least three subtasks."
         case .emptyCoreTask(let task): return "\(task) cannot contain an unnamed subtask."
         case .overlap(let first, let second): return "\(first) overlaps \(second)."
+        case .restConflict(let task, let start, let end):
+            return "\(task) cannot be scheduled during protected Rest \(Self.time(start))–\(Self.time(end))."
         case .routineConflict(_, let task, let reason, let start, let end):
             return "\(task) overlaps \(Self.time(start))–\(Self.time(end)), protected for \(reason)."
         case .afterDayBoundary(let task): return "\(task) runs past midnight; continue it on the next date."

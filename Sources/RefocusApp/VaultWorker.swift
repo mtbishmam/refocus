@@ -43,6 +43,11 @@ struct AIRequestContext: Sendable {
     var targetedHistory: String?
 }
 
+struct AITaskWriteResult: Sendable {
+    var entry: AgendaTask
+    var interpretation: String?
+}
+
 actor VaultWorker {
     private let store: RefocusStore
     private let projection: ProjectionWriter
@@ -372,11 +377,96 @@ actor VaultWorker {
         return String(data: data, encoding: .utf8) ?? "[]"
     }
 
-    func createAITask(_ arguments: AICreateTaskArguments) throws -> AgendaTask {
+    func createAITask(_ arguments: AICreateTaskArguments, prompt: String) throws -> AITaskWriteResult {
         let date = try parseAIDate(arguments.date)
-        let minute = try parseAITime(arguments.startTime)
+        _ = try store.ensurePredefinedRoutineBlocks(on: date)
+        let requestedMinute = try parseAITime(arguments.startTime)
         let requestedKind = TaskKind(rawValue: arguments.kind ?? "normal") ?? .normal
         let cycles = max(1, min(10, arguments.cycles))
+        let requestedTitle = arguments.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let preserveUntimed = explicitlyRequestsUntimed(prompt)
+
+        if FixedPlanTasks.isRestAlias(requestedTitle) {
+            guard let minute = requestedMinute,
+                  let restWindow = FixedPlanTasks.restWindow(overlapping: minute, end: minute + cycles * 30),
+                  minute >= restWindow.startMinute,
+                  minute + cycles * 30 <= restWindow.endMinute else {
+                throw RefocusStoreError.corrupt("Break means Rest. Schedule it inside 05:00–06:00, 11:00–12:00, 17:00–18:00, or 23:00–00:00.")
+            }
+            let existing = try store.tasks(on: date).first {
+                $0.isRoutineBlock && $0.predefinedKind == .rest
+                    && $0.startMinute == restWindow.startMinute
+                    && $0.endMinute == restWindow.endMinute
+            }
+            if let existing {
+                return AITaskWriteResult(
+                    entry: AgendaTask(date: date, task: existing),
+                    interpretation: "Interpreted \(quoted(requestedTitle)) as the protected Rest block \(MarkdownPlanCodec.time(restWindow.startMinute))–\(MarkdownPlanCodec.time(restWindow.endMinute)) and kept it in place."
+                )
+            }
+            throw RefocusStoreError.corrupt("The requested Rest block is not available for this date; add or restore the protected Rest block first.")
+        }
+
+        let existing = try store.tasks(on: date)
+        var minute = requestedMinute
+        var interpretation: String?
+        if minute == nil && !preserveUntimed && hasPlanningIntent(prompt),
+           let anchor = latestExplicitUserEnd(in: existing) {
+            guard let automaticallyAllocated = automaticStartTime(
+                cycles: cycles,
+                after: anchor,
+                existing: existing
+            ) else {
+                throw RefocusStoreError.corrupt("Could not allocate this task after the last explicitly timed task without entering a protected Rest window or crossing midnight.")
+            }
+            minute = automaticallyAllocated
+            interpretation = "Allocated this previously untimed task after the last explicitly timed task at \(MarkdownPlanCodec.time(automaticallyAllocated))."
+        }
+
+        if let match = closestExistingTask(title: requestedTitle, in: existing), hasPlanningIntent(prompt) {
+            var merged = match
+            let originalTitle = match.title
+            merged.description = arguments.description ?? merged.description
+            if let mvp = arguments.mvp, !mvp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { merged.mvp = mvp }
+            if let subtasks = arguments.subtasks, !subtasks.isEmpty {
+                merged.coreTasks = Array(subtasks.prefix(3)).map { CoreTask(title: $0) }
+            }
+            if let priority = arguments.priority { merged.priority = priority }
+            if let difficulty = arguments.difficulty { merged.difficulty = difficulty }
+            if let color = arguments.color, let value = TaskDisplayColor(rawValue: color) {
+                merged.displayColor = value == .none ? nil : value
+            }
+            merged.cycles = cycles
+            merged.kind = cycles > 4 ? .contest : requestedKind
+            if let minute {
+                merged.startMinute = minute
+                merged.timeAssigned = nil
+            } else if !merged.hasScheduledTime && !preserveUntimed,
+                      let anchor = latestExplicitUserEnd(in: existing.filter { $0.id != match.id }) {
+                guard let automaticallyAllocated = automaticStartTime(
+                    cycles: cycles,
+                    after: anchor,
+                    existing: existing.filter { $0.id != match.id }
+                ) else {
+                    throw RefocusStoreError.corrupt("Could not allocate this matched task after the last explicitly timed task without entering a protected Rest window or crossing midnight.")
+                }
+                merged.startMinute = automaticallyAllocated
+                merged.timeAssigned = nil
+            }
+            merged.quickCapture = true
+            try validateAIWrite(merged, on: date, replacing: match.id)
+            try store.replaceAITask(id: match.id, with: merged, on: date)
+            scheduleBackgroundWork(days: [date])
+            guard let verified = try store.taskEntry(id: match.id), verified.task == merged else {
+                throw RefocusStoreError.corrupt("matched task failed durable read-back verification")
+            }
+            let mapping = "Interpreted \(quoted(requestedTitle)) as existing task \(quoted(originalTitle)) and merged the requested details into it."
+            return AITaskWriteResult(
+                entry: verified,
+                interpretation: [mapping, interpretation].compactMap { $0 }.joined(separator: " ")
+            )
+        }
+
         let fallback = compactTaskDetails(title: arguments.title)
         var subtaskTitles = (arguments.subtasks ?? []).map {
             $0.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -404,7 +494,77 @@ actor VaultWorker {
         guard let verified = try store.taskEntry(id: task.id) else {
             throw RefocusStoreError.corrupt("created task failed durable read-back verification")
         }
-        return verified
+        return AITaskWriteResult(entry: verified, interpretation: interpretation)
+    }
+
+    private func quoted(_ value: String) -> String { "\"\(value)\"" }
+
+    private func hasPlanningIntent(_ prompt: String) -> Bool {
+        let lower = prompt.lowercased()
+        return ["plan", "schedule", "task", "tasks", "give", "put", "move", "reschedule", "assign", "->"]
+            .contains(where: lower.contains)
+    }
+
+    private func explicitlyRequestsUntimed(_ prompt: String) -> Bool {
+        let lower = prompt.lowercased()
+        return ["untimed", "without a time", "no time", "agenda only", "leave it in agenda"]
+            .contains(where: lower.contains)
+    }
+
+    private func latestExplicitUserEnd(in tasks: [PlanTask]) -> Int? {
+        tasks.filter { $0.hasScheduledTime && !$0.isRoutineBlock }
+            .map(\.endMinute)
+            .max()
+    }
+
+    private func automaticStartTime(cycles: Int, after anchor: Int?, existing: [PlanTask]) -> Int? {
+        guard let anchor else { return nil }
+        var cursor = max(0, anchor)
+        while cursor + cycles * 30 <= 1440 {
+            if let rest = FixedPlanTasks.restWindow(overlapping: cursor, end: cursor + cycles * 30) {
+                cursor = rest.endMinute
+                continue
+            }
+            let occupied = existing.contains {
+                $0.hasScheduledTime && $0.startMinute < cursor + cycles * 30 && $0.endMinute > cursor
+            }
+            if !occupied { return cursor }
+            cursor += 30
+        }
+        return nil
+    }
+
+    private func closestExistingTask(title: String, in tasks: [PlanTask]) -> PlanTask? {
+        let requested = taskTokens(title)
+        guard requested.count >= 2 else { return nil }
+        let candidates = tasks.filter { !$0.isRoutineBlock && !$0.isComplete }.compactMap { task -> (PlanTask, Int, Double)? in
+            let tokens = taskTokens(task.title)
+            let shared = requested.intersection(tokens).count
+            let sharedNumbers = requested.intersection(tokens).filter { $0.allSatisfy(\.isNumber) }.count
+            let score = Double(shared) / Double(requested.union(tokens).count)
+            guard shared >= 2 || sharedNumbers >= 2 else { return nil }
+            guard score >= 0.5 || sharedNumbers >= 2 else { return nil }
+            return (task, shared + sharedNumbers, score + Double(sharedNumbers) * 0.05)
+        }
+        return candidates.sorted {
+            if $0.1 != $1.1 { return $0.1 > $1.1 }
+            return $0.2 > $1.2
+        }.first?.0
+    }
+
+    private func taskTokens(_ title: String) -> Set<String> {
+        let raw = title.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
+        var tokens = Set(raw)
+        for token in raw where token.count > 1 {
+            var letters = ""
+            var digits = ""
+            for character in token {
+                if character.isNumber { digits.append(character) } else { letters.append(character) }
+            }
+            if !letters.isEmpty { tokens.insert(letters) }
+            if !digits.isEmpty { tokens.insert(digits) }
+        }
+        return tokens
     }
 
     func appendAITaskDescription(taskID: String, text: String) throws -> AgendaTask {
@@ -525,6 +685,14 @@ actor VaultWorker {
     }
 
     private func validateAIWrite(_ task: PlanTask, on date: Date, replacing taskID: UUID?) throws {
+        if task.isRoutineBlock && task.predefinedKind == .rest &&
+            !FixedPlanTasks.isAllowedScheduledRest(start: task.startMinute, end: task.endMinute) {
+            throw RefocusStoreError.corrupt("Protected Rest blocks must remain at 05:00–06:00, 11:00–12:00, 17:00–18:00, or 23:00–00:00.")
+        }
+        if !task.isRoutineBlock && task.hasScheduledTime,
+           let restWindow = FixedPlanTasks.restWindow(overlapping: task.startMinute, end: task.endMinute) {
+            throw RefocusStoreError.corrupt("\(task.title) cannot be scheduled during protected Rest \(MarkdownPlanCodec.time(restWindow.startMinute))–\(MarkdownPlanCodec.time(restWindow.endMinute)).")
+        }
         let validator = PlanValidator()
         let profile = RoutineProfileResolver(calendar: calendar).profile(for: date)
         let existing = try store.tasks(on: date)

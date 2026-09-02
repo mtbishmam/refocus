@@ -182,9 +182,8 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func presentAISplitForTyping() {
-        guard selectedDashboardTab != .ai, !aiDraft.isEmpty else { return }
-        aiSplitPresented = true
+    func closeAISplit() {
+        aiSplitPresented = false
     }
 
     func dashboardTabDidChange() {
@@ -296,14 +295,20 @@ final class AppModel: ObservableObject {
             return result
         case "create_task":
             guard aiContextWasLoadedForRequest else { return aiMissingFreshContextResult() }
-            let entry = try await worker.createAITask(decoder.decode(AICreateTaskArguments.self, from: arguments))
-            return aiTaskResult(entry, action: "created")
+            try await refreshAIContextBeforeMutation(using: worker)
+            let result = try await worker.createAITask(
+                decoder.decode(AICreateTaskArguments.self, from: arguments),
+                prompt: userPrompt
+            )
+            return aiTaskResult(result.entry, action: result.interpretation == nil ? "created" : "created_or_merged", interpretation: result.interpretation)
         case "update_task":
             guard aiContextWasLoadedForRequest else { return aiMissingFreshContextResult() }
+            try await refreshAIContextBeforeMutation(using: worker)
             let entry = try await worker.updateAITask(decoder.decode(AIUpdateTaskArguments.self, from: arguments))
             return aiTaskResult(entry, action: "updated")
         case "append_task_description":
             guard aiContextWasLoadedForRequest else { return aiMissingFreshContextResult() }
+            try await refreshAIContextBeforeMutation(using: worker)
             let object = try JSONSerialization.jsonObject(with: arguments) as? [String: Any]
             guard let taskID = object?["task_id"] as? String, let text = object?["text"] as? String else {
                 throw OpenAIChatError.api("append_task_description requires task_id and text")
@@ -312,6 +317,7 @@ final class AppModel: ObservableObject {
             return aiTaskResult(entry, action: "description_appended")
         case "reschedule_task":
             guard aiContextWasLoadedForRequest else { return aiMissingFreshContextResult() }
+            try await refreshAIContextBeforeMutation(using: worker)
             let entry = try await worker.rescheduleAITask(decoder.decode(AIRescheduleTaskArguments.self, from: arguments))
             return aiTaskResult(entry, action: "rescheduled")
         case "delete_task":
@@ -320,6 +326,7 @@ final class AppModel: ObservableObject {
             guard ["delete", "remove", "cancel"].contains(where: lower.contains) else {
                 return "{\"ok\":false,\"error\":\"Deletion requires an explicit delete, remove, or cancel instruction in the current prompt.\"}"
             }
+            try await refreshAIContextBeforeMutation(using: worker)
             let object = try JSONSerialization.jsonObject(with: arguments) as? [String: Any]
             guard let rawID = object?["task_id"] as? String, let id = UUID(uuidString: rawID) else {
                 throw OpenAIChatError.api("delete_task requires a valid task_id")
@@ -331,6 +338,7 @@ final class AppModel: ObservableObject {
             ])
         case "set_daily_metric":
             guard aiContextWasLoadedForRequest else { return aiMissingFreshContextResult() }
+            try await refreshAIContextBeforeMutation(using: worker)
             let object = try JSONSerialization.jsonObject(with: arguments) as? [String: Any]
             guard let date = object?["date"] as? String,
                   let fieldID = object?["field_id"] as? String,
@@ -350,18 +358,28 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func aiTaskResult(_ entry: AgendaTask, action: String) -> String {
+    private func aiTaskResult(_ entry: AgendaTask, action: String, interpretation: String? = nil) -> String {
         let date = MarkdownPlanCodec.isoDate(entry.date, calendar: WallClock.dhakaCalendar())
         let time = entry.task.hasScheduledTime ? MarkdownPlanCodec.time(entry.task.startMinute) : "untimed"
-        return aiJSON([
+        var result: [String: Any] = [
             "ok": true, "verified": true, "action": action,
             "task_id": entry.id.uuidString.lowercased(), "title": entry.task.title,
             "date": date, "time": time, "cycles": entry.task.cycles,
-        ])
+        ]
+        if let interpretation { result["interpretation"] = interpretation }
+        return aiJSON(result)
     }
 
     private func aiMissingFreshContextResult() -> String {
         aiJSON(["ok": false, "verified": false, "error": "Read fresh ReFocus context before mutating records."])
+    }
+
+    private func refreshAIContextBeforeMutation(using worker: VaultWorker) async throws {
+        // Enforce freshness in code instead of relying only on model behavior.
+        // This runs for every individual write, including consecutive tool
+        // calls in one response, so a prior mutation cannot leave stale state.
+        _ = try await worker.loadAIContext(on: now)
+        aiContextWasLoadedForRequest = true
     }
 
     private func aiJSON(_ object: [String: Any]) -> String {
@@ -398,6 +416,10 @@ final class AppModel: ObservableObject {
         Live Asia/Dhaka date and time for this turn: \(localNow). Current phase: \(snapshot.phase.rawValue). Current cycle starts at \(cycleStart); the next cycle starts at \(nextCycleStart). This live value overrides dates or times inherited from older chat turns.
 
         Follow this priority: direct current user instruction > dated or Special Event rule > live Ikigai routine > ReFocus AI operating manual > defaults. The application has already injected a fresh SQLite snapshot for this request, and get_refocus_context can refresh or select another date. Stable task IDs are mandatory for existing-record mutations. The native tools validate writes and read them back; never claim success unless the result contains both ok=true and verified=true.
+
+        Reserve Rest absolutely at 05:00–06:00, 11:00–12:00, 17:00–18:00, and 23:00–00:00 Asia/Dhaka. Never schedule work in those windows. Interpret a user-written "break" as Rest. If a requested task time conflicts with Rest, move it to the first valid slot after Rest and tell the user what changed.
+
+        When the user gives a partial plan, parse all explicitly timed lines first. Match requested task names against existing tasks by course, number, subject, and close wording; prefer updating/rescheduling the closest existing task over creating a duplicate. If you interpret X as existing task Y, explicitly report that mapping. Any task included in the plan without a time should be assigned sequentially after the last explicitly timed task, skipping occupied slots and protected Rest windows. Leave a task untimed only when the user explicitly asks for an untimed Agenda capture.
 
         Show concise progress summaries and supported tool activity. Do not expose or invent private chain-of-thought. A supported reasoning summary may explain the approach at a high level.
 
@@ -449,12 +471,23 @@ final class AppModel: ObservableObject {
 
     var activeRestTask: PlanTask? {
         let minute = clock.minuteOfDay(for: now)
-        return executionTasks.first {
+        if let scheduled = executionTasks.first(where: {
             $0.isRoutineBlock
                 && $0.predefinedKind == .rest
                 && FixedPlanTasks.isAllowedScheduledRest(start: $0.startMinute, end: $0.endMinute)
                 && $0.contains(minuteOfDay: minute)
-        }
+        }) { return scheduled }
+        guard let window = FixedPlanTasks.defaultRestWindows.first(where: {
+            minute >= $0.startMinute && minute < $0.endMinute
+        }) else { return nil }
+        // The 05:00–06:00 guard overlaps the legacy 05:30 Morning Routine
+        // row, so it is represented as a non-persisted guard rather than a
+        // second overlapping task in Today.
+        return PlanTask(
+            title: "Rest", startMinute: window.startMinute,
+            cycles: max(1, (window.endMinute - window.startMinute) / 30),
+            routineBlock: true, predefinedKind: .rest
+        )
     }
 
     var countdownText: String {
@@ -972,9 +1005,9 @@ final class AppModel: ObservableObject {
         if autosave { scheduleAgendaTodayAutosave() }
     }
 
-    /// The screen-break detail editor intentionally exposes only execution
-    /// fields. Changes debounce into the ordinary Today save path so the
-    /// active Modified snapshot, Diff, SQLite row, and projections agree.
+    /// The screen-break detail editor exposes the editable task name and its
+    /// execution fields. Changes debounce into the ordinary Today save path so
+    /// the active Modified snapshot, Diff, SQLite row, and projections agree.
     func updateBreakTask(_ updated: PlanTask) {
         guard let index = tasks.firstIndex(where: { $0.id == updated.id }), tasks[index] != updated else { return }
         tasks[index] = updated
@@ -1650,7 +1683,7 @@ final class AppModel: ObservableObject {
             overlayPauseUntil = nil
         }
 
-        // Only the two allowed live routine Rest windows are full-block screen
+        // Only the four allowed live routine Rest windows are full-block screen
         // guards. The overlay offers a one-minute temporary release, then
         // restores itself until Rest ends.
         if activeRestTask != nil {
@@ -1669,6 +1702,9 @@ final class AppModel: ObservableObject {
             if activeBreakID != breakID || overlayController.mode != .screenBreak {
                 activeBreakID = breakID
                 beginCheckIn(id: breakID)
+                if let currentTaskID = currentTask?.id {
+                    collapsedTaskIDs.remove(currentTaskID)
+                }
                 isBreakVisible = true
                 overlayController.showBreak(model: self)
             }

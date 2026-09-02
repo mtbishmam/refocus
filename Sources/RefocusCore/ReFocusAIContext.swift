@@ -14,7 +14,7 @@ public struct ReFocusAIContextSource: Sendable, Equatable {
 /// Mutable facts such as the current clock, tasks, and metrics deliberately do
 /// not belong here; those are injected from SQLite for every request.
 public enum ReFocusAIContextProjection {
-    public static let version = 1
+    public static let version = 4
     public static let correctionsStart = "<!-- REFOCUS AI CORRECTIONS START -->"
     public static let correctionsEnd = "<!-- REFOCUS AI CORRECTIONS END -->"
 
@@ -93,6 +93,9 @@ public enum ReFocusAIContextProjection {
         - Resolve relative dates and times from the current Asia/Dhaka clock supplied with this request. Never inherit "today", "current", or "next" from an older response.
         - Read fresh SQLite-backed ReFocus context before every mutation. Stable task IDs from that read are required for editing, rescheduling, completion, Description updates, and deletion.
         - Validate proposed task writes through the same planner rules as the UI. Timed quick tasks may replace only overlapping editable predefined routines; never silently replace fixed evening tasks or user tasks.
+        - Protect Rest absolutely at 05:00-06:00, 11:00-12:00, 17:00-18:00, and 23:00-00:00 Asia/Dhaka. Never place work in those windows. Interpret a task named "break" as Rest and preserve the Rest block.
+        - When a user gives a partial plan, parse explicitly timed lines first. Match close task names using course, number, subject, and wording; update or reschedule the closest existing task instead of creating a duplicate. Report every interpretation such as X -> Y.
+        - Assign tasks included in a plan without an explicit time sequentially after the last explicitly timed task, skipping occupied slots, Rest, and the midnight boundary. Leave a task untimed only when the user explicitly requests an untimed Agenda capture.
         - Delete only when the current user prompt explicitly says delete, remove, or cancel.
         - Treat Description as the execution record: what happened, whether the task was done properly, how it could be better, and how it could be faster. Features such as Diff must refer to Description rather than legacy check-in questions.
         - Give every created task a custom, very terse MVP and exactly three custom, very terse subtasks, following the style of nearby tasks.
@@ -112,7 +115,14 @@ public enum ReFocusAIContextProjection {
         - Evening: 18:00-21:30.
         - Late Night: 21:30-23:00 and saved explicitly after 21:30.
         - Work may be recorded through midnight; after midnight it belongs to the new Asia/Dhaka date.
-        - Prefer an untimed Agenda capture when a date is known but no time was supplied.
+        - Protected Rest: 05:00-06:00, 11:00-12:00, 17:00-18:00, and 23:00-00:00. A requested "break" is this Rest block, not work.
+        - In a plan, assign a missing time after the last explicit task; use an untimed Agenda capture only when the user explicitly asks for one.
+
+        ## Terse task examples
+
+        - Task: `CSE111 polymorphism trace`; MVP: `Trace + verify`; subtasks: `Open Q`, `Trace table`, `Check output`.
+        - Task: `STA201 regression`; MVP: `Finish set`; subtasks: `Read formulas`, `Solve`, `Check`.
+        - Description after execution: `Solved Q1-4; Q3 slow. Better: mark givens. Faster: reuse table.`
 
         ## Approved corrections
 
