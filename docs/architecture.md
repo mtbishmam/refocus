@@ -43,10 +43,20 @@ entity state.
 The native AI surface is not part of persistence or synchronization. It streams
 through the OpenAI Responses API only when the user configures a Keychain-backed
 API key. Supported reasoning summaries and tool progress are display metadata;
-hidden chain-of-thought is never requested for display. Every mutation returns
-through the same `RefocusStore` transactions and sync outbox used by manual UI
-edits. The assistant receives selected `ego/` primer files plus targeted vault
-search instead of uploading the whole vault on every prompt.
+hidden chain-of-thought is never requested for display. Its context has three
+layers: a generated static policy projection at `agents/context/refocus-ai.md`,
+a fresh SQLite snapshot injected on every request, and bounded task/metric
+history selected only when the current prompt needs it. Source fingerprints
+refresh the static projection when its curated vault notes change, while a
+marked approved-corrections section survives regeneration. Mutable facts never
+come from the Markdown policy layer.
+
+Every mutation passes the ordinary planner validation, writes through the same
+`RefocusStore` transaction and sync outbox as a manual edit, then receives a
+durable SQLite read-back. Tool results expose `verified: true` only after that
+read-back matches; deletion additionally requires explicit delete/remove/cancel
+language. The assistant receives targeted vault search instead of uploading the
+whole vault on every prompt.
 
 The task Description is the canonical execution/reflection narrative. The
 screen-break task expander edits only MVP, Description, and three subtask slots;
@@ -62,6 +72,13 @@ Every native AI request carries fresh Asia/Dhaka wall-clock and cycle context.
 Task` starts at the next half-hour cycle and consecutive `then` clauses continue
 from the prior task's end. AI-created tasks include a terse custom MVP and
 exactly three terse custom subtasks.
+
+On the normal dashboard, typing into the shared composer smoothly reveals the
+same two-pane work surface used during a screen break: ReFocus AI remains on the
+left while the selected Agenda, Today, Tomorrow, Daily, Diff, or Settings view
+stays editable on the right. Assistant output is rendered as one selectable
+attributed-text surface so a mouse selection can cross paragraphs and lists;
+the per-message copy action still copies the complete source response.
 
 The menu-bar entry is a retained AppKit status item and floating panel rather
 than a SwiftUI `MenuBarExtra` window. The panel uses `moveToActiveSpace` and is

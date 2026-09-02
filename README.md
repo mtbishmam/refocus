@@ -73,6 +73,13 @@ The assistant receives a fresh Dhaka date, time, cycle, and current task on
 every turn. It understands `cur -> did ...` as an append to the current task
 Description and sequential `next -> N cyc/cycle -> ...` planning. New AI tasks
 always receive one terse custom MVP and exactly three terse custom subtasks.
+The static policy portion is regenerated at `agents/context/refocus-ai.md`
+when its curated vault sources change; current tasks and Daily values remain
+fresh SQLite context, with recent history injected only when relevant. Native
+AI writes are planner-validated and reported successful only after durable
+read-back verification. Starting to type from any non-AI dashboard tab opens a
+smooth AI-left/work-right split without hiding the selected tab, and response
+text supports mouse selection across the entire multi-paragraph message.
 
 ## Build and verify
 
