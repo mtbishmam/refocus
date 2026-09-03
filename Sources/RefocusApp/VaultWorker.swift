@@ -228,13 +228,18 @@ actor VaultWorker {
         let now = Date()
         _ = try store.ensurePredefinedRoutineBlocks(on: date)
         let dayTasks = try store.tasks(on: date)
-        let lower = calendar.date(byAdding: .day, value: -30, to: date) ?? date
-        let upper = calendar.date(byAdding: .day, value: 365, to: date) ?? date
+        // Keep the default context local to the selected plan. A different
+        // date can be loaded explicitly through get_refocus_context, while a
+        // year of Agenda records on every request can overwhelm the model.
+        let lower = calendar.startOfDay(for: date)
+        let upper = calendar.date(byAdding: .day, value: 14, to: lower) ?? lower
         let agenda = try store.agenda(asOf: date).filter { $0.date >= lower && $0.date <= upper }
         let definitions = try store.fieldDefinitions()
         let values = try store.fieldValues(from: date, through: date)
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        // Compact JSON is easier for the model to parse and avoids spending
+        // input tokens on indentation repeated for every task and field.
+        encoder.outputFormatting = [.sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         let today = calendar.startOfDay(for: now)
         _ = try store.ensurePredefinedRoutineBlocks(on: today)
@@ -264,10 +269,10 @@ actor VaultWorker {
     }
 
     func loadAIRequestContext(prompt: String, on date: Date) throws -> AIRequestContext {
-        let operatingManual = try refreshAIContextProjection()
+        let projection = try refreshAIContextProjection()
         let liveContext = try loadAIContext(on: date)
         return AIRequestContext(
-            operatingManual: operatingManual,
+            operatingManual: ReFocusAIContextProjection.promptText(from: projection),
             liveContext: liveContext,
             targetedHistory: try targetedAIHistory(for: prompt, on: date)
         )
@@ -307,7 +312,7 @@ actor VaultWorker {
     private func targetedAIHistory(for prompt: String, on date: Date) throws -> String? {
         let lower = prompt.lowercased()
         let historyTerms = [
-            "history", "previous", "recent", "last ", "before", "what did", "did ",
+            "history", "previous", "recent", "last ", "before", "what did",
             "better", "faster", "description", "metric", "weight", "calorie",
             "expense", "solved", "cp hour", "trend", "past",
         ]
@@ -333,7 +338,7 @@ actor VaultWorker {
             dailyValues: values
         )
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.outputFormatting = [.sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         return String(data: try encoder.encode(payload), encoding: .utf8)
     }
@@ -373,7 +378,7 @@ actor VaultWorker {
                 "excerpt": String(text[start..<end]),
             ])
         }
-        guard let data = try? JSONSerialization.data(withJSONObject: matches, options: [.prettyPrinted, .sortedKeys]) else { return "[]" }
+        guard let data = try? JSONSerialization.data(withJSONObject: matches, options: [.sortedKeys]) else { return "[]" }
         return String(data: data, encoding: .utf8) ?? "[]"
     }
 

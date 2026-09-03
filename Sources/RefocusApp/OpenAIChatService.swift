@@ -242,7 +242,10 @@ actor OpenAIResponsesClient {
         previousResponseID: String?,
         onEvent: @escaping EventHandler
     ) async throws -> (responseID: String, calls: [ToolCall]) {
-        let maxAttempts = 3
+        // Rapid retries make TPM exhaustion worse: each retry is another full
+        // prompt. Allow one retry, and for rate limits wait for the server's
+        // requested window instead of retrying after a few hundred ms.
+        let maxAttempts = 2
 
         for attempt in 1...maxAttempts {
             let state = StreamAttemptState()
@@ -279,7 +282,12 @@ actor OpenAIResponsesClient {
                     throw error
                 }
 
-                try await Task.sleep(nanoseconds: UInt64(attempt) * 400_000_000)
+                let delay = Self.retryDelay(for: error)
+                    ?? (Self.isRateLimit(error) ? 60.0 : Double(attempt) * 0.4)
+                guard delay <= 60 else {
+                    throw Self.errorAfterRetries(error, attempts: attempt)
+                }
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }
         }
 
@@ -302,6 +310,7 @@ actor OpenAIResponsesClient {
             "store": true,
             "reasoning": ["effort": "low", "summary": "auto"],
             "tools": Self.tools,
+            "prompt_cache_key": "refocus-ai-v1-\(model)",
         ]
         if let previousResponseID { payload["previous_response_id"] = previousResponseID }
 
@@ -423,6 +432,29 @@ actor OpenAIResponsesClient {
         case .missingAPIKey, .keychain, .toolLoopLimit:
             return false
         }
+    }
+
+    private static func isRateLimit(_ error: Error) -> Bool {
+        guard let chatError = error as? OpenAIChatError else { return false }
+        guard case .api(let message) = chatError else { return false }
+        let normalized = message.lowercased()
+        return normalized.contains("rate limit")
+            || normalized.contains("rate_limit")
+            || normalized.contains("http 429")
+            || normalized.contains("tokens per min")
+    }
+
+    private static func retryDelay(for error: Error) -> TimeInterval? {
+        guard let chatError = error as? OpenAIChatError,
+              case .api(let message) = chatError else { return nil }
+        let pattern = #"(?i)try again in\s+([0-9]+(?:\.[0-9]+)?)s"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(
+                  in: message, range: NSRange(message.startIndex..., in: message)
+              ),
+              let secondsRange = Range(match.range(at: 1), in: message),
+              let seconds = Double(message[secondsRange]) else { return nil }
+        return max(0, seconds)
     }
 
     private static func errorAfterRetries(_ error: Error, attempts: Int) -> OpenAIChatError {

@@ -46,6 +46,24 @@ public enum ReFocusAIContextProjection {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Returns only the stable operating manual from the generated projection.
+    /// The source excerpts are useful for human inspection and targeted vault
+    /// search, but repeating them in every model request needlessly expands the
+    /// prompt and makes the stable prefix harder to cache.
+    public static func promptText(from projection: String) -> String {
+        guard let manual = projection.range(of: "# ReFocus AI operating manual") else {
+            return projection
+        }
+        guard let excerpts = projection.range(
+            of: "# Curated source excerpts", range: manual.upperBound..<projection.endIndex
+        ) else {
+            return String(projection[manual.lowerBound...])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return String(projection[manual.lowerBound..<excerpts.lowerBound])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     public static func render(
         sources: [ReFocusAIContextSource],
         compiledAt: Date = Date(),

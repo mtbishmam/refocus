@@ -208,7 +208,7 @@ final class AppModel: ObservableObject {
             errorMessage = "Add your OpenAI API key in Settings before using ReFocus AI."
             return
         }
-        let history = aiMessages.filter { !$0.isStreaming && !$0.text.isEmpty }
+        let history = compactAIHistory()
         aiDraft = ""
         if selectedDashboardTab != .ai { aiSplitPresented = true }
         aiMessages.append(AIChatMessage(role: .user, text: prompt))
@@ -422,13 +422,13 @@ final class AppModel: ObservableObject {
         } ?? "No targeted history was needed for this prompt."
         return """
         You are ReFocus AI, the fast planning assistant inside the native ReFocus app.
+
+        Generated static ReFocus AI operating manual:
+        \(context.operatingManual)
+
         Live Asia/Dhaka date and time for this turn: \(localNow). Current phase: \(snapshot.phase.rawValue). Current cycle starts at \(cycleStart); the next cycle starts at \(nextCycleStart). This live value overrides dates or times inherited from older chat turns.
 
-        Follow this priority: direct current user instruction > dated or Special Event rule > live Ikigai routine > ReFocus AI operating manual > defaults. The application has already injected a fresh SQLite snapshot for this request, and get_refocus_context can refresh or select another date. Stable task IDs are mandatory for existing-record mutations. The native tools validate writes and read them back; never claim success unless the result contains both ok=true and verified=true.
-
-        Reserve Rest by default at 05:00–06:00, 11:00–12:00, 17:00–18:00, and 23:00–00:00 Asia/Dhaka. Interpret a user-written "break" as Rest. Apply the guard only to the current or future interval; completed intervals are historical evidence and must not keep the plan blocked or create stale warnings. If a current or future work task conflicts with Rest, move it to the first valid slot after Rest and tell the user what changed. Only the current prompt's explicit instruction to override, overrule, bypass, ignore, or force through Rest/protected windows may place future work inside the protected window; then preserve the Rest row and report the override. Do not infer an override from a merely timed task, and do not use an override to hide collisions between work tasks or to cross midnight.
-
-        When the user gives a partial plan, parse all explicitly timed lines first. Match requested task names against existing tasks by course, number, subject, and close wording; prefer updating/rescheduling the closest existing task over creating a duplicate. If you interpret X as existing task Y, explicitly report that mapping. Any task included in the plan without a time should be assigned sequentially after the last explicitly timed task, skipping occupied slots and protected Rest windows. Leave a task untimed only when the user explicitly asks for an untimed Agenda capture.
+        The application injected a fresh SQLite snapshot for this request. Use get_refocus_context before mutating records or when a different date is needed. Stable task IDs are mandatory for existing-record mutations. Native tools validate writes and read them back; never claim success unless the result contains both ok=true and verified=true.
 
         Show concise progress summaries and supported tool activity. Do not expose or invent private chain-of-thought. A supported reasoning summary may explain the approach at a high level.
 
@@ -436,9 +436,6 @@ final class AppModel: ObservableObject {
         \(context.liveContext)
 
         \(history)
-
-        Generated static ReFocus AI operating manual:
-        \(context.operatingManual)
         """
     }
 
@@ -507,6 +504,15 @@ final class AppModel: ObservableObject {
         snapshot.phase == .focus ? "FOCUS" : "SCREEN BREAK"
     }
 
+    /// The visible schedule block includes the 00:00–06:00 midnight section,
+    /// while `activeSegment` remains the planning-gate segment used for the
+    /// morning quota once the planning window opens.
+    var activeScheduleBlockTitle: String {
+        clock.minuteOfDay(for: now) < PlanningSegment.morning.startMinute
+            ? "Midnight Block"
+            : activeSegment.title
+    }
+
     var hasInitialPlan: Bool { initialSegments.contains(activeSegment) }
 
     var plannedCycles: Int {
@@ -532,6 +538,23 @@ final class AppModel: ObservableObject {
 
     var isPlanCommitted: Bool {
         hasPersistedToday && hasInitialPlan && blockingIssues(in: currentValidation(baselineTasks)).isEmpty
+    }
+
+    /// A block with no remaining compliant focus slots does not need to keep
+    /// the whole app behind the planning gate when there is no future work in
+    /// that block. The next planning block will be evaluated normally when
+    /// the live clock reaches it. Any other current/future validation error
+    /// still keeps the gate in place.
+    var isPlanningGateRequired: Bool {
+        guard !isPlanCommitted else { return false }
+        guard requiredCycleMinimum == 0,
+              !validator.hasRemainingPlannedWork(in: activeSegment, at: now, tasks: tasks) else {
+            return true
+        }
+        return blockingIssues(in: currentValidation(tasks)).contains { issue in
+            if case .noAvailableCycles = issue { return false }
+            return true
+        }
     }
 
     var executionTasks: [PlanTask] {
@@ -584,7 +607,7 @@ final class AppModel: ObservableObject {
     }
 
     func startNow() {
-        guard isPlanCommitted else {
+        guard isPlanCommitted || !isPlanningGateRequired else {
             errorMessage = planGateMessage
             return
         }
@@ -766,7 +789,30 @@ final class AppModel: ObservableObject {
             self.screenBreakSkipsUsed = skipCount
             self.reloadStreakSummaries()
             self.reloadDailyDashboardAnalytics()
+            // A reload may have started while the planning gate was visible.
+            // Re-evaluate the live gate after the saved plan is published so a
+            // stale overlay cannot remain over a plan that is now committed.
+            self.tick(at: self.now)
         }
+    }
+
+    private func compactAIHistory() -> [AIChatMessage] {
+        let completed = aiMessages.filter { !$0.isStreaming && !$0.text.isEmpty }
+        let recent = completed.suffix(6)
+        let perMessageLimit = 4_000
+        var remaining = 12_000
+        var compacted: [AIChatMessage] = []
+
+        for message in recent {
+            guard remaining > 0 else { break }
+            let limit = min(perMessageLimit, remaining)
+            let clipped = String(message.text.prefix(limit))
+            guard !clipped.isEmpty else { continue }
+            let text = clipped.count < message.text.count ? clipped + "\n[older text omitted]" : clipped
+            compacted.append(AIChatMessage(id: message.id, role: message.role, text: text))
+            remaining -= min(message.text.count, limit)
+        }
+        return compacted
     }
 
     func savePlan() {
@@ -1739,6 +1785,16 @@ final class AppModel: ObservableObject {
 
         // An incomplete Today plan is a persistent planning gate. It is not a
         // five-minute break and therefore does not expire at a clock boundary.
+        // An exhausted/protected block with no remaining work is different:
+        // it should not cover the dashboard until the next block begins.
+        guard isPlanningGateRequired else {
+            isArmed = false
+            activeBreakID = nil
+            if overlayController.mode == .planningGate { overlayController.hide() }
+            isBreakVisible = false
+            return
+        }
+
         guard isPlanCommitted else {
             isArmed = false
             activeBreakID = nil
@@ -1933,7 +1989,7 @@ final class AppModel: ObservableObject {
         let minimumCycles = validator.requiredCycles(
             in: activeSegment, at: now, profile: dayProfile, tasks: candidate
         )
-        var issues = validator.validate(
+        let issues = validator.validate(
             tasks: candidate,
             profile: dayProfile,
             minimumCycles: minimumCycles,
@@ -1943,13 +1999,11 @@ final class AppModel: ObservableObject {
             scheduledDate: now,
             now: now
         )
-        let minute = clock.minuteOfDay(for: now)
-        if minute >= 330 && minute < PlanningSegment.lateNight.endMinute,
-           let availabilityIssue = validator.availabilityIssue(
-               in: activeSegment, at: now, profile: dayProfile, tasks: candidate
-           ) {
-            issues.append(availabilityIssue)
-        }
+        // Zero capacity is a gate signal, not a task error. When a block has
+        // no current/future focus work, completed tasks and protected routine
+        // time must not leave a stale red warning in the dashboard. If there
+        // is future work, its concrete validation issues (collision, missing
+        // details, or protected-window conflict) are still returned above.
         return issues
     }
 

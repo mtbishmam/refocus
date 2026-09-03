@@ -83,12 +83,14 @@ struct DashboardView: View {
                         let aiWidth = proxy.size.width * 0.5
                         HStack(spacing: 0) {
                             DashboardAIChatPanel()
-                                .frame(width: aiWidth)
+                                .frame(minWidth: 0, idealWidth: aiWidth, maxWidth: aiWidth)
                                 .frame(maxHeight: .infinity)
                             Divider()
                             dashboardContent(for: model.selectedDashboardTab)
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                                .clipped()
                         }
+                        .frame(width: proxy.size.width, height: proxy.size.height, alignment: .leading)
                     }
                     .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .center)))
                 } else {
@@ -980,10 +982,10 @@ struct PlanEditorView: View {
         VStack(spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 7) {
-                    Text("Today").font(.largeTitle.bold())
+                        Text("Today").font(.largeTitle.bold())
                     HStack(spacing: 7) {
                         headerTag(profileName, color: .secondary)
-                        headerTag(model.activeSegment.title, color: .blue)
+                        headerTag(model.activeScheduleBlockTitle, color: .blue)
                         headerTag(
                             model.requiredCycleMinimum == 0
                                 ? "No work cycles available"
@@ -1279,7 +1281,10 @@ private struct TaskEditorRow: View {
                     ? MarkdownPlanCodec.time(task.startMinute) + "–" + MarkdownPlanCodec.time(task.endMinute)
                     : "No time")
                     .monospacedDigit().foregroundStyle(.secondary).frame(width: 112, alignment: .leading)
-                Text(task.title).font(.headline)
+                Text(task.title)
+                    .font(.headline)
+                    .lineLimit(2)
+                    .layoutPriority(1)
                 Spacer()
                 Button("Delete", role: .destructive, action: delete)
                     .buttonStyle(.borderless)
@@ -1307,12 +1312,16 @@ private struct TaskEditorRow: View {
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(2...5)
               }
-              HStack(alignment: .bottom, spacing: 14) {
+              LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 140), alignment: .top)],
+                alignment: .leading,
+                spacing: 14
+              ) {
                 editorField("Start") {
                     if task.fixedRole != nil || task.isRoutineBlock {
                         TimeEditorField(minute: $task.startMinute)
                             .disabled(task.fixedRole != nil)
-                            .frame(width: 114, alignment: .leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
                         HStack(alignment: .center, spacing: 8) {
                             Toggle("Scheduled", isOn: Binding(
@@ -1323,22 +1332,22 @@ private struct TaskEditorRow: View {
                             .toggleStyle(.checkbox)
                             if task.hasScheduledTime { TimeEditorField(minute: $task.startMinute) }
                         }
-                        .frame(width: 114, height: 24, alignment: .leading)
+                        .frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
                     }
                 }
                 editorField("Priority") {
                     Picker("", selection: $task.priority) {
-                        ForEach(priorities, id: \.self) { Text($0).tag($0) }
+                    ForEach(priorities, id: \.self) { Text($0).tag($0) }
                     }
                     .labelsHidden()
-                    .frame(width: 120)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 editorField("Difficulty") {
                     Picker("", selection: $task.difficulty) {
-                        ForEach(difficulties, id: \.self) { Text($0).tag($0) }
+                    ForEach(difficulties, id: \.self) { Text($0).tag($0) }
                     }
                     .labelsHidden()
-                    .frame(width: 120)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 editorField("Kind") {
                     Picker("", selection: $task.kind) {
@@ -1346,7 +1355,7 @@ private struct TaskEditorRow: View {
                         Text("Contest").tag(TaskKind.contest)
                     }
                     .labelsHidden()
-                    .frame(width: 180)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .disabled(task.fixedRole != nil)
                 }
                 editorField("Duration") {
@@ -1359,7 +1368,7 @@ private struct TaskEditorRow: View {
                         task.durationMinutes = nil
                         cyclesChanged()
                     }
-                    .frame(width: 145)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 editorField("Color") {
                     Picker("", selection: Binding(
@@ -1369,7 +1378,7 @@ private struct TaskEditorRow: View {
                         ForEach(TaskDisplayColor.allCases, id: \.self) { Text($0.label).tag($0) }
                     }
                     .labelsHidden()
-                    .frame(width: 110)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
               }
 
@@ -1411,6 +1420,7 @@ private struct TaskEditorRow: View {
               }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 12)
         .onAppear {
             if model.requestedTaskNameFocusID == task.id {
@@ -1441,6 +1451,7 @@ private struct TaskEditorRow: View {
                 .foregroundStyle(.secondary)
             content()
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

@@ -96,6 +96,9 @@ do {
         try expect(first.contains("`next -> 1 cyc/cycle -> Y"), "Next-cycle shorthand is absent from the operating manual")
         try expect(first.contains("fresh SQLite context"), "Static policy does not require fresh live context")
         try expect(first.contains("Delete only when"), "Explicit deletion safety is absent")
+        let prompt = ReFocusAIContextProjection.promptText(from: first)
+        try expect(prompt.contains("# ReFocus AI operating manual"), "AI prompt lost the operating manual")
+        try expect(!prompt.contains("# Curated source excerpts"), "AI prompt still includes source excerpts")
     }
     try check("Monday uses Standard Routine") {
         let profile = RoutineProfileResolver(calendar: calendar).profile(for: try date("2026-08-03", format: "yyyy-MM-dd"))
