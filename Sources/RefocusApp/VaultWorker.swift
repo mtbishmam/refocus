@@ -31,16 +31,9 @@ private struct AIContextPayload: Codable {
     var dailyValues: [DailyFieldValue]
 }
 
-private struct AITargetedHistoryPayload: Codable {
-    var reason: String
-    var taskDescriptions: [AITaskRecord]
-    var dailyValues: [DailyFieldValue]
-}
-
 struct AIRequestContext: Sendable {
-    var operatingManual: String
+    var preferences: String
     var liveContext: String
-    var targetedHistory: String?
 }
 
 struct AITaskWriteResult: Sendable {
@@ -268,79 +261,56 @@ actor VaultWorker {
         return String(data: try encoder.encode(payload), encoding: .utf8) ?? "{}"
     }
 
-    func loadAIRequestContext(prompt: String, on date: Date) throws -> AIRequestContext {
-        let projection = try refreshAIContextProjection()
-        let liveContext = try loadAIContext(on: date)
-        return AIRequestContext(
-            operatingManual: ReFocusAIContextProjection.promptText(from: projection),
-            liveContext: liveContext,
-            targetedHistory: try targetedAIHistory(for: prompt, on: date)
+    func loadAIRequestContext(prompt _: String, on date: Date) throws -> AIRequestContext {
+        AIRequestContext(
+            preferences: try store.aiPreferences(),
+            liveContext: try compactAIContext(on: date)
         )
     }
 
-    func prepareAIContextProjection() throws {
-        _ = try refreshAIContextProjection()
+    func loadAIPreferences() throws -> String { try store.aiPreferences() }
+
+    func saveAIPreferences(_ document: String) throws -> String {
+        try store.saveAIPreferences(document)
+        return try store.aiPreferences()
     }
 
-    private func refreshAIContextProjection() throws -> String {
-        let relativePaths = [
-            "ego/ikigai.md", "ego/non-negotiables.md", "ego/goals.md",
-            "ego/habits.md", "ego/universal-truths.md", "ego/gyoji.md",
-            "agents/context/reapps.md",
+    func recordAIUsage(promptID: UUID, on date: Date, usage: AITokenUsage) throws -> AITokenUsage {
+        try store.recordAIUsage(promptID: promptID, on: date, usage: usage)
+        return try store.aiUsage(on: date)
+    }
+
+    func loadAIUsage(on date: Date) throws -> AITokenUsage { try store.aiUsage(on: date) }
+
+    private func compactAIContext(on date: Date) throws -> String {
+        let now = Date()
+        _ = try store.ensurePredefinedRoutineBlocks(on: date)
+        let tasks = try store.tasks(on: date)
+        let today = calendar.startOfDay(for: now)
+        let currentTasks = calendar.isDate(today, inSameDayAs: date) ? tasks : try store.tasks(on: today)
+        let wallClock = WallClock(calendar: calendar)
+        let snapshot = wallClock.snapshot(at: now)
+        let currentMinute = wallClock.minuteOfDay(for: snapshot.cycleStart)
+        let currentTask = currentTasks.first(where: { $0.contains(minuteOfDay: currentMinute) })
+        let taskRecords: [[String: Any]] = tasks.map { task in
+            var value: [String: Any] = [
+                "id": task.id.uuidString.lowercased(), "title": task.title,
+                "start": task.hasScheduledTime ? task.startMinute : -1,
+                "cycles": task.cycles, "complete": task.isComplete,
+            ]
+            if let fixedRole = task.fixedRole { value["fixed_role"] = fixedRole.rawValue }
+            return value
+        }
+        let payload: [String: Any] = [
+            "timezone": "Asia/Dhaka", "date": dayKey(now), "time": localTime(now),
+            "phase": snapshot.phase.rawValue,
+            "cycle_start": localTime(snapshot.cycleStart),
+            "selected_date": dayKey(date),
+            "current_task_id": currentTask.map { $0.id.uuidString.lowercased() } ?? NSNull(),
+            "tasks": taskRecords,
         ]
-        let sources = relativePaths.compactMap { relativePath -> ReFocusAIContextSource? in
-            let url = vaultURL.appendingPathComponent(relativePath)
-            guard let contents = try? String(contentsOf: url, encoding: .utf8) else { return nil }
-            return ReFocusAIContextSource(path: relativePath, contents: contents)
-        }
-        let contextURL = vaultURL.appendingPathComponent("agents/context/refocus-ai.md")
-        let existing = try? String(contentsOf: contextURL, encoding: .utf8)
-        guard ReFocusAIContextProjection.needsRefresh(existing, sources: sources) else {
-            return existing ?? ""
-        }
-        let document = ReFocusAIContextProjection.render(
-            sources: sources,
-            corrections: ReFocusAIContextProjection.preservedCorrections(from: existing)
-        )
-        try FileManager.default.createDirectory(
-            at: contextURL.deletingLastPathComponent(), withIntermediateDirectories: true
-        )
-        try document.write(to: contextURL, atomically: true, encoding: .utf8)
-        return document
-    }
-
-    private func targetedAIHistory(for prompt: String, on date: Date) throws -> String? {
-        let lower = prompt.lowercased()
-        let historyTerms = [
-            "history", "previous", "recent", "last ", "before", "what did",
-            "better", "faster", "description", "metric", "weight", "calorie",
-            "expense", "solved", "cp hour", "trend", "past",
-        ]
-        guard historyTerms.contains(where: lower.contains) else { return nil }
-
-        let start = calendar.date(byAdding: .day, value: -14, to: date) ?? date
-        var descriptions: [AITaskRecord] = []
-        var cursor = start
-        while cursor <= date, descriptions.count < 30 {
-            let entries = try store.tasks(on: cursor).filter {
-                !($0.description?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
-            }
-            descriptions.append(contentsOf: entries.prefix(max(0, 30 - descriptions.count)).map {
-                AITaskRecord(date: dayKey(cursor), task: $0)
-            })
-            cursor = calendar.date(byAdding: .day, value: 1, to: cursor) ?? date.addingTimeInterval(1)
-        }
-        let metricStart = calendar.date(byAdding: .day, value: -45, to: date) ?? date
-        let values = try store.fieldValues(from: metricStart, through: date)
-        let payload = AITargetedHistoryPayload(
-            reason: "The current prompt requested recent execution or Daily history.",
-            taskDescriptions: descriptions,
-            dailyValues: values
-        )
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        return String(data: try encoder.encode(payload), encoding: .utf8)
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        return String(data: data, encoding: .utf8) ?? "{}"
     }
 
     private func localTime(_ date: Date) -> String {
@@ -352,42 +322,12 @@ actor VaultWorker {
         return formatter.string(from: date)
     }
 
-    func searchVaultForAI(_ query: String) -> String {
-        let terms = query.lowercased().split(whereSeparator: { $0.isWhitespace }).map(String.init)
-        guard !terms.isEmpty else { return "[]" }
-        let keys: [URLResourceKey] = [.isRegularFileKey, .isHiddenKey]
-        guard let enumerator = FileManager.default.enumerator(
-            at: vaultURL, includingPropertiesForKeys: keys,
-            options: [.skipsHiddenFiles, .skipsPackageDescendants]
-        ) else { return "[]" }
-        var matches: [[String: String]] = []
-        for case let url as URL in enumerator {
-            if matches.count >= 10 { break }
-            guard url.pathExtension.lowercased() == "md",
-                  let values = try? url.resourceValues(forKeys: Set(keys)),
-                  values.isRegularFile == true,
-                  let text = try? String(contentsOf: url, encoding: .utf8)
-            else { continue }
-            let lower = text.lowercased()
-            guard terms.allSatisfy(lower.contains) else { continue }
-            let first = terms.compactMap { lower.range(of: $0)?.lowerBound }.min() ?? lower.startIndex
-            let start = lower.index(first, offsetBy: -500, limitedBy: lower.startIndex) ?? lower.startIndex
-            let end = lower.index(first, offsetBy: 1_500, limitedBy: lower.endIndex) ?? lower.endIndex
-            matches.append([
-                "path": url.path.replacingOccurrences(of: vaultURL.path + "/", with: ""),
-                "excerpt": String(text[start..<end]),
-            ])
-        }
-        guard let data = try? JSONSerialization.data(withJSONObject: matches, options: [.sortedKeys]) else { return "[]" }
-        return String(data: data, encoding: .utf8) ?? "[]"
-    }
-
     func createAITask(_ arguments: AICreateTaskArguments, prompt: String) throws -> AITaskWriteResult {
         let date = try parseAIDate(arguments.date)
         _ = try store.ensurePredefinedRoutineBlocks(on: date)
         let requestedMinute = try parseAITime(arguments.startTime)
         let requestedKind = TaskKind(rawValue: arguments.kind ?? "normal") ?? .normal
-        let cycles = max(1, min(10, arguments.cycles))
+        let cycles = max(1, min(4, arguments.cycles))
         let requestedTitle = arguments.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let preserveUntimed = explicitlyRequestsUntimed(prompt)
         let allowOverride = explicitlyRequestsOverride(prompt)
@@ -697,7 +637,7 @@ actor VaultWorker {
                 entry.task.timeAssigned = nil
             }
         }
-        if let cycles = arguments.cycles { entry.task.cycles = max(1, min(10, cycles)) }
+        if let cycles = arguments.cycles { entry.task.cycles = max(1, min(4, cycles)) }
         if let kind = arguments.kind, let value = TaskKind(rawValue: kind) { entry.task.kind = value }
         if let priority = arguments.priority { entry.task.priority = priority }
         if let difficulty = arguments.difficulty { entry.task.difficulty = difficulty }

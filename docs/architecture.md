@@ -43,20 +43,19 @@ entity state.
 The native AI surface is not part of persistence or synchronization. It streams
 through the OpenAI Responses API only when the user configures a Keychain-backed
 API key. Supported reasoning summaries and tool progress are display metadata;
-hidden chain-of-thought is never requested for display. Its context has three
-layers: a generated static policy projection at `agents/context/refocus-ai.md`,
-a fresh SQLite snapshot injected on every request, and bounded task/metric
-history selected only when the current prompt needs it. Source fingerprints
-refresh the static projection when its curated vault notes change, while a
-marked approved-corrections section survives regeneration. Mutable facts never
-come from the Markdown policy layer.
+hidden chain-of-thought is never requested for display. Its sole persistent
+policy layer is a small `How I Work` document stored in SQLite and editable in
+Settings or through an explicit AI tool call. It does not ingest Ikigai, the
+vault, or targeted Markdown history. Each request adds a compact live SQLite
+task snapshot and fresh Asia/Dhaka clock data; mutable facts never enter the
+preference document. Per-prompt usage and day totals are persisted locally.
 
 Every mutation passes the ordinary planner validation, writes through the same
 `RefocusStore` transaction and sync outbox as a manual edit, then receives a
 durable SQLite read-back. Tool results expose `verified: true` only after that
 read-back matches; deletion additionally requires explicit delete/remove/cancel
-language. The assistant receives targeted vault search instead of uploading the
-whole vault on every prompt.
+language. Chat context is bounded to four recent messages and 6,000 characters,
+and output is capped to keep latency and token use predictable.
 
 The task Description is the canonical execution/reflection narrative. The
 screen-break task expander edits only the task name, MVP, Description, and three

@@ -138,6 +138,61 @@ public final class RefocusStore: @unchecked Sendable {
         return TodayPlan(date: date, profile: profile, tasks: tasks, initialSegments: segments)
     }
 
+    public func aiPreferences() throws -> String {
+        if let stored = try scalar("SELECT value FROM meta WHERE key = 'ai_preferences_v1'"),
+           !stored.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return stored
+        }
+        let document = ReFocusAIPreferences.defaultDocument
+        try execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('ai_preferences_v1', ?)",
+            [.text(document)]
+        )
+        return document
+    }
+
+    public func saveAIPreferences(_ document: String) throws {
+        let clean = document.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { throw RefocusStoreError.corrupt("AI preferences cannot be empty.") }
+        guard clean.count <= 16_000 else { throw RefocusStoreError.corrupt("AI preferences must be 16,000 characters or fewer.") }
+        try execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('ai_preferences_v1', ?)",
+            [.text(clean)]
+        )
+    }
+
+    public func recordAIUsage(promptID: UUID, on date: Date, usage: AITokenUsage) throws {
+        try execute(
+            """
+            INSERT OR REPLACE INTO ai_usage(prompt_id, day, input_tokens, output_tokens, total_tokens, cached_input_tokens, created_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                .text(promptID.uuidString.lowercased()), .text(dayKey(date)),
+                .integer(usage.inputTokens), .integer(usage.outputTokens),
+                .integer(usage.totalTokens), .integer(usage.cachedInputTokens),
+                .double(Date().timeIntervalSince1970),
+            ]
+        )
+    }
+
+    public func aiUsage(on date: Date) throws -> AITokenUsage {
+        guard let row = try firstRow(
+            """
+            SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                   COALESCE(SUM(total_tokens), 0), COALESCE(SUM(cached_input_tokens), 0)
+            FROM ai_usage WHERE day = ?
+            """,
+            [.text(dayKey(date))]
+        ) else { return .zero }
+        return AITokenUsage(
+            inputTokens: Int(row[0] ?? "0") ?? 0,
+            outputTokens: Int(row[1] ?? "0") ?? 0,
+            totalTokens: Int(row[2] ?? "0") ?? 0,
+            cachedInputTokens: Int(row[3] ?? "0") ?? 0
+        )
+    }
+
     public func planSnapshots(on date: Date) throws -> PlanSnapshots? {
         guard let plan = try loadPlan(date: date) else { return nil }
         let initialByName = try snapshotMap(date: date, column: "initial_snapshots")
@@ -862,6 +917,13 @@ public final class RefocusStore: @unchecked Sendable {
         try execute(
             """
             CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS ai_usage(
+              prompt_id TEXT PRIMARY KEY, day TEXT NOT NULL,
+              input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
+              total_tokens INTEGER NOT NULL, cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+              created_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ai_usage_day ON ai_usage(day);
             CREATE TABLE IF NOT EXISTS tasks(
               id TEXT PRIMARY KEY, scheduled_date TEXT NOT NULL, title TEXT NOT NULL,
               start_minute INTEGER NOT NULL, fixed_role TEXT, payload BLOB NOT NULL,

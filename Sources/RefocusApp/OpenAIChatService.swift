@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import RefocusCore
 
 enum AIChatRole: String, Sendable {
     case user
@@ -12,17 +13,20 @@ struct AIChatMessage: Identifiable, Sendable {
     var text: String
     var reasoningSummary: String
     var toolActivity: [String]
+    var tokenUsage: AITokenUsage
     var isStreaming: Bool
 
     init(
         id: UUID = UUID(), role: AIChatRole, text: String,
-        reasoningSummary: String = "", toolActivity: [String] = [], isStreaming: Bool = false
+        reasoningSummary: String = "", toolActivity: [String] = [],
+        tokenUsage: AITokenUsage = .zero, isStreaming: Bool = false
     ) {
         self.id = id
         self.role = role
         self.text = text
         self.reasoningSummary = reasoningSummary
         self.toolActivity = toolActivity
+        self.tokenUsage = tokenUsage
         self.isStreaming = isStreaming
     }
 }
@@ -32,6 +36,7 @@ enum AIStreamEvent: Sendable {
     case reasoningDelta(String)
     case toolStarted(String)
     case toolFinished(String)
+    case usage(AITokenUsage)
 }
 
 struct AICreateTaskArguments: Codable, Sendable {
@@ -253,7 +258,7 @@ actor OpenAIResponsesClient {
                 switch event {
                 case .outputDelta, .reasoningDelta:
                     await state.markContentStreamed()
-                case .toolStarted, .toolFinished:
+                case .toolStarted, .toolFinished, .usage:
                     break
                 }
                 await onEvent(event)
@@ -309,8 +314,9 @@ actor OpenAIResponsesClient {
             "stream": true,
             "store": true,
             "reasoning": ["effort": "low", "summary": "auto"],
+            "max_output_tokens": 3_000,
             "tools": Self.tools,
-            "prompt_cache_key": "refocus-ai-v1-\(model)",
+            "prompt_cache_key": "refocus-ai-v2-\(model)",
         ]
         if let previousResponseID { payload["previous_response_id"] = previousResponseID }
 
@@ -345,6 +351,9 @@ actor OpenAIResponsesClient {
             case "response.created", "response.completed":
                 if let response = event["response"] as? [String: Any], let id = response["id"] as? String {
                     responseID = id
+                    if type == "response.completed", let usage = Self.tokenUsage(from: response) {
+                        await onEvent(.usage(usage))
+                    }
                 }
             case "response.failed":
                 let message = Self.streamFailureMessage(from: event) ?? "OpenAI response failed."
@@ -415,6 +424,20 @@ actor OpenAIResponsesClient {
         return nil
     }
 
+    private static func tokenUsage(from response: [String: Any]) -> AITokenUsage? {
+        guard let usage = response["usage"] as? [String: Any] else { return nil }
+        let input = usage["input_tokens"] as? Int ?? 0
+        let output = usage["output_tokens"] as? Int ?? 0
+        let total = usage["total_tokens"] as? Int ?? input + output
+        let details = usage["input_tokens_details"] as? [String: Any]
+        return AITokenUsage(
+            inputTokens: input,
+            outputTokens: output,
+            totalTokens: total,
+            cachedInputTokens: details?["cached_tokens"] as? Int ?? 0
+        )
+    }
+
     private static func isRetryable(_ error: Error) -> Bool {
         if error is URLError { return true }
         guard let chatError = error as? OpenAIChatError else { return false }
@@ -472,15 +495,15 @@ actor OpenAIResponsesClient {
     }
 
     private static let tools: [[String: Any]] = [
-        function("get_refocus_context", "Read dated tasks, Agenda tasks, Daily metrics, and habit values. Call this before mutating records.", [
+        function("get_refocus_context", "Read full context for another date or fetch Agenda and Daily fields absent from the compact request context.", [
             "date": string("Date in YYYY-MM-DD. Defaults to today in Asia/Dhaka."),
         ], required: []),
-        function("create_task", "Create a quick task. Supply one terse custom MVP and exactly three terse title-specific subtasks. Rest means 05:00–06:00, 11:00–12:00, 17:00–18:00, and 23:00–00:00 Asia/Dhaka; a timed work task is moved to the first valid slot after Rest by default. Only an explicit override/overrule/bypass/ignore/force instruction in the current user prompt may schedule work inside Rest; preserve the Rest row and report that override. A timed task may replace only an overlapping non-Rest predefined routine. In a partial plan, match close existing task names before creating duplicates and allocate omitted times after the last explicitly timed task.", [
+        function("create_task", "Create a task according to the internal How I Work document. Supply one terse custom MVP and exactly three terse title-specific subtasks.", [
             "date": string("Scheduled date in YYYY-MM-DD."),
             "title": string("Concrete task title."),
             "description": string("Optional notes or instructions."),
             "start_time": nullableString("Optional HH:mm in Asia/Dhaka. In a partial plan, omit only when the task should be allocated after the last explicitly timed task; use an untimed Agenda task only when the user explicitly asks for one."),
-            "cycles": integer("Number of half-hour cycles, 1-10."),
+            "cycles": integer("Number of half-hour cycles, 1-4."),
             "kind": enumString(["normal", "contest"]),
             "priority": enumString(["Do/Die", "High", "Medium", "Low"]),
             "difficulty": enumString(["Hard", "Moderate", "Easy"]),
@@ -488,7 +511,7 @@ actor OpenAIResponsesClient {
             "mvp": string("Very short, task-specific completion definition."),
             "subtasks": array(of: string("Very short, task-specific subtask; provide exactly three.")),
         ], required: ["date", "title", "cycles", "mvp", "subtasks"]),
-        function("update_task", "Edit any field of an existing task while preserving its stable ID. If the resulting work task overlaps protected Rest, move it after Rest unless the current user prompt explicitly says to override, overrule, bypass, ignore, or force through Rest; report any automatic move or explicit override.", [
+        function("update_task", "Edit any field of an existing task while preserving its stable ID and following the internal How I Work document.", [
             "task_id": string("Task UUID returned by get_refocus_context."),
             "date": nullableString("Optional replacement date YYYY-MM-DD."),
             "title": nullableString("Optional replacement title."),
@@ -505,7 +528,7 @@ actor OpenAIResponsesClient {
                 "title": string("Subtask title."), "completed": boolean("Completion state."),
             ], "required": ["title", "completed"], "additionalProperties": false]],
         ], required: ["task_id"]),
-        function("reschedule_task", "Move a task to another date and optionally assign a new time. Protected Rest is respected by default: move work after Rest and report it. Only an explicit override/overrule/bypass/ignore/force instruction in the current prompt may place work inside Rest; preserve the Rest row and report the override.", [
+        function("reschedule_task", "Move a task to another date and optionally assign a new time, following the internal How I Work document.", [
             "task_id": string("Task UUID returned by get_refocus_context."),
             "date": string("Destination date YYYY-MM-DD."),
             "start_time": nullableString("Optional HH:mm; empty keeps it untimed."),
@@ -522,9 +545,9 @@ actor OpenAIResponsesClient {
             "field_id": string("Field ID returned by get_refocus_context."),
             "value": string("Number, text, or blank/win/fail for a habit."),
         ], required: ["date", "field_id", "value"]),
-        function("search_vault", "Search the configured Obsidian vault for planning context. Use targeted queries instead of loading unrelated files.", [
-            "query": string("Words or phrase to search."),
-        ], required: ["query"]),
+        function("update_ai_preferences", "Replace the internal How I Work document after the user explicitly asks to save, add, remove, or change a lasting ReFocus preference. Preserve unrelated preferences and do not put current tasks, dates, or other mutable facts in it.", [
+            "document": string("The complete replacement Markdown document, including all unchanged preferences."),
+        ], required: ["document"]),
     ]
 
     private static func function(

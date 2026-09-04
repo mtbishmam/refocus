@@ -546,7 +546,7 @@ public struct PlanValidator: Sendable {
                     issues.append(.invalidCycleCount(task: displayTitle))
                 }
             case .contest:
-                if !(1...10).contains(task.cycles) {
+                if !(1...(task.isRoutineBlock ? 10 : 4)).contains(task.cycles) {
                     issues.append(.invalidContest(task: displayTitle))
                 }
             }

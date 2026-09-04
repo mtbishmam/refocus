@@ -84,9 +84,10 @@ The day is independently planned and snapshotted in four super-blocks:
 
 - Floor the current time to its active wall-clock cycle. At 07:13 the current
   cycle begins at 07:00.
-- Only tasks wholly inside the active block count toward that block's gate,
-  except the predefined five-hour Mashup: it remains one task and contributes
-  only the half-hour cycles that physically overlap each gate.
+- Count the physical half-hour cycles that each task overlaps inside the active
+  block. A task that crosses a block boundary contributes its in-block cycles
+  to each relevant gate; it does not make the earlier gate appear incomplete.
+  The predefined five-hour Mashup follows the same overlap rule.
   The fixed evening tasks count only toward the Evening gate.
 - The first successful save in each block creates its immutable Initial
   snapshot. Later saves refresh that block's Modified snapshot. A save also
@@ -115,7 +116,8 @@ The day is independently planned and snapshotted in four super-blocks:
 ## Task rules
 
 - `normal` and `contest` are the only kinds.
-- Normal tasks use one to four cycles. Contest tasks use one to ten cycles.
+- Normal and contest tasks use one to four cycles (two hours maximum). The
+  predefined five-hour Mashup remains the only longer routine exception.
 - Every Today/Tomorrow task has a concrete MVP as its sole completion
   definition and at least three named subtasks; more are allowed.
 - Task Description is the single execution narrative: what actually happened,
@@ -190,11 +192,17 @@ The day is independently planned and snapshotted in four super-blocks:
 - Every Responses API turn and tool round receives a fresh Asia/Dhaka date,
   time, phase, current-cycle start, next-cycle start, and current task. Older
   chat turns must never override this live context after midnight.
-- AI context has three layers: the generated static policy projection at
-  `agents/context/refocus-ai.md`, a fresh SQLite snapshot on every request and
-  before every mutation, and bounded task/metric history only when the prompt
-  needs it. Mutable facts must never come from the Markdown policy projection.
-  Regeneration preserves its marked approved-corrections section.
+- Native AI has one small, user-editable `How I Work` preference document
+  stored in ReFocus SQLite and exposed in Settings. This is its only persistent
+  policy/context document; it does not read Ikigai, the Obsidian vault, or
+  targeted Markdown history. Every prompt additionally receives only a compact
+  live SQLite task snapshot and fresh Asia/Dhaka clock data. The user may edit
+  the document directly or explicitly ask ReFocus AI to update it. Mutable
+  facts such as today's tasks and current time must never be stored in it.
+- Responses API usage is recorded per user prompt in SQLite and shown beside
+  the response, with a day-scoped total in the composer. Chat history is
+  bounded to four recent messages and 6,000 characters, and response output is
+  capped to avoid runaway token use.
 - Native AI task writes use the ordinary planner validator and must pass a
   durable SQLite read-back before the tool returns `verified: true`. The AI
   must not report a write as successful without both `ok: true` and
@@ -204,17 +212,16 @@ The day is independently planned and snapshotted in four super-blocks:
   screen break). `next -> 1 cyc/cycle -> Y, then 2 cyc/cycle -> Z` schedules Y
   for the next half-hour cycle and Z for the following two cycles, continuing
   sequentially for additional `then` clauses. `cyc` and `cycle` are synonyms.
-- The generated policy projection includes bounded material from the
-  configured vault and exposes targeted Markdown search. Prefer
-  `ego/ikigai.md`, current
-  non-negotiables, goals, habits, universal truths, and gyoji; do not ingest the
-  entire vault into every request.
+- Increasing a task duration or inserting a task before, between, or after
+  another task pushes later movable work forward by the added cycles while
+  preserving fixed routine/Rest windows and task order.
 
 ## Live routine authority
 
-Before every planning, prioritization, rollover, rescheduling, or scheduling
-operation, reread `ego/ikigai.md` and calculate the actual weekday in
-`Asia/Dhaka`. The live file overrides examples copied here.
+The native app and native ReFocus AI do not read `ego/ikigai.md`. For explicit
+Codex planning work against the user's vault, reread `ego/ikigai.md` and
+calculate the actual weekday in `Asia/Dhaka`; that file remains the authority
+for those external planning workflows.
 
 Current recurring profiles:
 

@@ -79,27 +79,6 @@ do {
         try expect(nextCycle.map { calendar.component(.day, from: $0) } == 3, "Next cycle did not roll into September 3")
         try expect(time(nextCycle ?? beforeMidnight.phaseEnd) == "00:00", "Midnight next-cycle time was not 00:00")
     }
-    try check("Generated AI context refreshes sources and preserves corrections") {
-        let firstSources = [ReFocusAIContextSource(path: "ego/ikigai.md", contents: "Goal A")]
-        let first = ReFocusAIContextProjection.render(
-            sources: firstSources, compiledAt: try date("2026-09-02 10:00:00"),
-            corrections: "When current means live, use the live cycle."
-        )
-        try expect(!ReFocusAIContextProjection.needsRefresh(first, sources: firstSources), "Fresh context projection looked stale")
-        let changed = [ReFocusAIContextSource(path: "ego/ikigai.md", contents: "Goal B")]
-        try expect(ReFocusAIContextProjection.needsRefresh(first, sources: changed), "Changed source did not invalidate AI context")
-        try expect(
-            ReFocusAIContextProjection.preservedCorrections(from: first) == "When current means live, use the live cycle.",
-            "Approved AI correction was not preserved"
-        )
-        try expect(first.contains("`cur -> did X`"), "Current-cycle shorthand is absent from the operating manual")
-        try expect(first.contains("`next -> 1 cyc/cycle -> Y"), "Next-cycle shorthand is absent from the operating manual")
-        try expect(first.contains("fresh SQLite context"), "Static policy does not require fresh live context")
-        try expect(first.contains("Delete only when"), "Explicit deletion safety is absent")
-        let prompt = ReFocusAIContextProjection.promptText(from: first)
-        try expect(prompt.contains("# ReFocus AI operating manual"), "AI prompt lost the operating manual")
-        try expect(!prompt.contains("# Curated source excerpts"), "AI prompt still includes source excerpts")
-    }
     try check("Monday uses Standard Routine") {
         let profile = RoutineProfileResolver(calendar: calendar).profile(for: try date("2026-08-03", format: "yyyy-MM-dd"))
         try expect(profile.kind == .standard, "Monday was not standard")
@@ -127,7 +106,7 @@ do {
     try check("Plan validation rejects university overlap") {
         let profile = RoutineProfileResolver(calendar: calendar).profile(for: try date("2026-08-04", format: "yyyy-MM-dd"))
         let contest = PlanTask(
-            title: "Codeforces contest", startMinute: 360, cycles: 10, kind: .contest,
+            title: "Codeforces contest", startMinute: 360, cycles: 4, kind: .contest,
             priority: "Do/Die", difficulty: "Hard", mvp: "Complete the contest",
             coreTasks: [CoreTask(title: "Setup"), CoreTask(title: "Compete"), CoreTask(title: "Review")]
         )
@@ -420,21 +399,21 @@ do {
             if case .tooFewSubtasks = $0 { return true }; return false
         }), "More than three subtasks was rejected")
     }
-    try check("Contest is one flexible kind capped at ten cycles") {
+    try check("User contests are capped at four cycles") {
         let profile = RoutineProfileResolver(calendar: calendar).profile(for: try date("2026-08-05", format: "yyyy-MM-dd"))
         let valid = PlanTask(
-            title: "Codeforces contest", startMinute: 960, cycles: 10, kind: .contest,
+            title: "Codeforces contest", startMinute: 960, cycles: 4, kind: .contest,
             priority: "High", difficulty: "Hard", mvp: "Submit the contest",
             coreTasks: [CoreTask(title: "Solve A"), CoreTask(title: "Solve B"), CoreTask(title: "Review")]
         )
         let tooLong = PlanTask(
-            title: "Too long", startMinute: 360, cycles: 11, kind: .contest,
+            title: "Too long", startMinute: 360, cycles: 5, kind: .contest,
             priority: "High", difficulty: "Hard", mvp: "Finish",
             coreTasks: [CoreTask(title: "One"), CoreTask(title: "Two"), CoreTask(title: "Three")]
         )
         let validator = PlanValidator()
-        try expect(!validator.validate(tasks: [valid], profile: profile, minimumCycles: 10).contains(.invalidContest(task: "Codeforces contest")), "Ten-cycle contest was rejected")
-        try expect(validator.validate(tasks: [tooLong], profile: profile).contains(.invalidContest(task: "Too long")), "Eleven-cycle contest was accepted")
+        try expect(!validator.validate(tasks: [valid], profile: profile, minimumCycles: 4).contains(.invalidContest(task: "Codeforces contest")), "Four-cycle contest was rejected")
+        try expect(validator.validate(tasks: [tooLong], profile: profile).contains(.invalidContest(task: "Too long")), "Five-cycle contest was accepted")
     }
     try check("Late planning minimum shrinks to remaining cycles") {
         let moment = try date("2026-08-05 20:15:00")
@@ -455,6 +434,17 @@ do {
             countedSegment: .morning
         )
         try expect(issues.contains(.insufficientCycles(actual: 0, required: 4)), "Fixed evening cycles leaked into the morning gate")
+        let eveningBoundaryTasks = [
+            PlanTask(title: "Evening one", startMinute: 1140, cycles: 2, mvp: "Done"),
+            PlanTask(title: "Evening two", startMinute: 1200, cycles: 2, mvp: "Done"),
+            PlanTask(title: "Crosses evening boundary", startMinute: 1260, cycles: 2, mvp: "Done")
+        ]
+        let boundaryIssues = validator.validate(
+            tasks: eveningBoundaryTasks, profile: profile, minimumCycles: 5,
+            requireFixedTasks: false, requireTaskDetails: false,
+            countedSegment: .evening
+        )
+        try expect(!boundaryIssues.contains(.insufficientCycles(actual: 4, required: 5)), "A task crossing 21:30 still failed to contribute its evening half-hour")
     }
     try check("Deleting Rest releases two required planning cycles") {
         let validator = PlanValidator()
@@ -1559,6 +1549,27 @@ do {
         try expect(secondCount == 2, "Second break was not counted")
         try expect(cappedCount == 3, "The persistence layer allowed more than three daily skips")
         try expect(nextDayCount == 0, "Skip count leaked into the next Dhaka day")
+    }
+    try check("AI preferences and prompt usage stay local and day-scoped") {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-ai-local-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let store = try RefocusStore(databaseURL: temporary.appendingPathComponent("refocus.sqlite3"), calendar: calendar)
+        let defaultPreferences = try store.aiPreferences()
+        try expect(defaultPreferences.contains("six-hour blocks"), "Default internal AI preferences were not seeded")
+        try store.saveAIPreferences("# How I Work\n\n- Keep it short.")
+        let savedPreferences = try store.aiPreferences()
+        try expect(savedPreferences.contains("Keep it short"), "Internal AI preferences did not persist")
+        let firstDay = try date("2026-09-03 10:30:00")
+        let nextDay = try date("2026-09-04 10:30:00")
+        try store.recordAIUsage(
+            promptID: UUID(), on: firstDay,
+            usage: AITokenUsage(inputTokens: 100, outputTokens: 25, totalTokens: 125, cachedInputTokens: 40)
+        )
+        let usage = try store.aiUsage(on: firstDay)
+        try expect(usage.totalTokens == 125 && usage.cachedInputTokens == 40, "Prompt token usage was not persisted")
+        let nextDayUsage = try store.aiUsage(on: nextDay)
+        try expect(nextDayUsage == .zero, "AI token usage leaked into another day")
     }
     try check("Local store stays inside the speed budget") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-speed-\(UUID().uuidString)")

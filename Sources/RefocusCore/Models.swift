@@ -524,11 +524,11 @@ public struct PlanTask: Identifiable, Codable, Equatable, Sendable {
 
     public func planningCycles(in segment: PlanningSegment) -> Int {
         guard hasScheduledTime, countsTowardPlanning else { return 0 }
-        if segment.contains(self) { return cycles }
-        // A predefined five-hour contest remains one editable task even when
-        // it crosses a planning-gate boundary. Count only the half-hour cycles
-        // physically inside that gate.
-        guard isRoutineBlock, predefinedKind == .mashup else { return 0 }
+        // Count the physical half-hour slots covered by this task inside the
+        // gate. A normal task may cross a gate boundary: its portion in this
+        // block belongs to this block, and the remainder belongs to the next
+        // one. This prevents a valid 21:00–22:00 task from making the
+        // 18:00–21:30 evening gate appear one cycle short.
         let overlap = max(0, min(endMinute, segment.endMinute) - max(startMinute, segment.startMinute))
         return overlap / 30
     }

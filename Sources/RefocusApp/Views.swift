@@ -24,7 +24,6 @@ struct MenuContentView: View {
             Button("Open Dashboard") {
                 DashboardWindowController.shared.show(model: model)
             }
-            Button("Choose Obsidian Vault…") { model.chooseVault() }
             Divider()
             Button("Quit ReFocus") { NSApp.terminate(nil) }
         }
@@ -293,6 +292,13 @@ private struct AIMessageView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .help("Copy this message")
+                }
+                if message.role == .assistant, message.tokenUsage.totalTokens > 0 {
+                    Text("Prompt: \(message.tokenUsage.totalTokens.formatted()) tokens · \(message.tokenUsage.inputTokens.formatted()) in · \(message.tokenUsage.outputTokens.formatted()) out")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .textSelection(.enabled)
                 }
             }
             .multilineTextAlignment(message.role == .user ? .trailing : .leading)
@@ -688,7 +694,8 @@ private struct AIComposer: View {
     }
 
     var body: some View {
-        HStack(alignment: .center, spacing: 10) {
+        VStack(alignment: .leading, spacing: 5) {
+          HStack(alignment: .center, spacing: 10) {
             AIComposerInput(
                 text: $model.aiDraft,
                 placeholder: "Ask ReFocus to plan or update anything…"
@@ -715,6 +722,12 @@ private struct AIComposer: View {
                 .buttonStyle(.plain)
                 .disabled(model.aiDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
+          }
+          Text("Today: \(model.aiDailyUsage.totalTokens.formatted()) tokens · \(model.aiDailyUsage.inputTokens.formatted()) in · \(model.aiDailyUsage.outputTokens.formatted()) out")
+              .font(.caption2)
+              .foregroundStyle(.secondary)
+              .monospacedDigit()
+              .padding(.horizontal, 2)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 9)
@@ -1058,9 +1071,10 @@ struct PlanEditorView: View {
                                 MidnightBlockHeader(taskCount: midnightTasks.count) {
                                     model.addTask(startingAt: 0, before: PlanningSegment.morning.startMinute)
                                 }
-                                ForEach(midnightTasks) { task in
-                                    TaskEditorRow(task: taskBinding(for: task), cyclesChanged: {
-                                        model.normalizeCoreTasks(for: task.id)
+                                ForEach(Array(midnightTasks.enumerated()), id: \.element.id) { index, task in
+                                    TimelineInsertionControl { model.insertTask(before: task.id) }
+                                    TaskEditorRow(task: taskBinding(for: task), cyclesChanged: { oldCycles in
+                                        model.taskCyclesChanged(task.id, previousCycles: oldCycles)
                                     }, delete: {
                                         model.removeTask(id: task.id)
                                     }, addSubtask: {
@@ -1074,6 +1088,9 @@ struct PlanEditorView: View {
                                     .padding(.horizontal, 16)
                                     .background((task.displayColor ?? .none).swiftUIColor.opacity(task.displayColor == nil ? 0.055 : 0.13), in: RoundedRectangle(cornerRadius: 14))
                                     .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.09)))
+                                    if index == midnightTasks.count - 1 {
+                                        TimelineInsertionControl { model.insertTask(after: task.id) }
+                                    }
                                 }
                             }
                             ForEach(PlanningSegment.allCases, id: \.self) { segment in
@@ -1081,9 +1098,10 @@ struct PlanEditorView: View {
                                 PlanningBlockHeader(segment: segment, taskCount: segmentTasks.count) {
                                     model.addTask(in: segment)
                                 }
-                                ForEach(segmentTasks) { task in
-                                    TaskEditorRow(task: taskBinding(for: task), cyclesChanged: {
-                                        model.normalizeCoreTasks(for: task.id)
+                                ForEach(Array(segmentTasks.enumerated()), id: \.element.id) { index, task in
+                                    TimelineInsertionControl { model.insertTask(before: task.id) }
+                                    TaskEditorRow(task: taskBinding(for: task), cyclesChanged: { oldCycles in
+                                        model.taskCyclesChanged(task.id, previousCycles: oldCycles)
                                     }, delete: {
                                         model.removeTask(id: task.id)
                                     }, addSubtask: {
@@ -1097,6 +1115,9 @@ struct PlanEditorView: View {
                                     .padding(.horizontal, 16)
                                     .background((task.displayColor ?? .none).swiftUIColor.opacity(task.displayColor == nil ? 0.055 : 0.13), in: RoundedRectangle(cornerRadius: 14))
                                     .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.09)))
+                                    if index == segmentTasks.count - 1 {
+                                        TimelineInsertionControl { model.insertTask(after: task.id) }
+                                    }
                                 }
                             }
                         }
@@ -1200,10 +1221,11 @@ struct TomorrowPlanView: View {
                         MidnightBlockHeader(taskCount: midnightTasks.count) {
                             model.addTomorrowTask(startingAt: 0, before: PlanningSegment.morning.startMinute)
                         }
-                        ForEach(midnightTasks) { task in
+                        ForEach(Array(midnightTasks.enumerated()), id: \.element.id) { index, task in
+                            TimelineInsertionControl { model.insertTask(before: task.id, tomorrow: true) }
                             TaskEditorRow(
                                 task: taskBinding(for: task),
-                                cyclesChanged: { model.normalizeTomorrowSubtasks(for: task.id) },
+                                cyclesChanged: { oldCycles in model.taskCyclesChanged(task.id, previousCycles: oldCycles, tomorrow: true) },
                                 delete: { model.removeTomorrowTask(id: task.id) },
                                 addSubtask: { model.addTomorrowSubtask(to: task.id) },
                                 removeSubtask: { model.removeTomorrowSubtask(taskID: task.id, subtaskID: $0) },
@@ -1213,6 +1235,9 @@ struct TomorrowPlanView: View {
                             .padding(.horizontal, 16)
                             .background((task.displayColor ?? .none).swiftUIColor.opacity(task.displayColor == nil ? 0.055 : 0.13), in: RoundedRectangle(cornerRadius: 14))
                             .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.09)))
+                            if index == midnightTasks.count - 1 {
+                                TimelineInsertionControl { model.insertTask(after: task.id, tomorrow: true) }
+                            }
                         }
                     }
                     ForEach(PlanningSegment.preplannedCases, id: \.self) { segment in
@@ -1220,10 +1245,11 @@ struct TomorrowPlanView: View {
                         PlanningBlockHeader(segment: segment, taskCount: segmentTasks.count) {
                             model.addTomorrowTask(in: segment)
                         }
-                        ForEach(segmentTasks) { task in
+                        ForEach(Array(segmentTasks.enumerated()), id: \.element.id) { index, task in
+                            TimelineInsertionControl { model.insertTask(before: task.id, tomorrow: true) }
                             TaskEditorRow(
                                 task: taskBinding(for: task),
-                                cyclesChanged: { model.normalizeTomorrowSubtasks(for: task.id) },
+                                cyclesChanged: { oldCycles in model.taskCyclesChanged(task.id, previousCycles: oldCycles, tomorrow: true) },
                                 delete: { model.removeTomorrowTask(id: task.id) },
                                 addSubtask: { model.addTomorrowSubtask(to: task.id) },
                                 removeSubtask: { model.removeTomorrowSubtask(taskID: task.id, subtaskID: $0) },
@@ -1233,6 +1259,9 @@ struct TomorrowPlanView: View {
                             .padding(.horizontal, 16)
                             .background((task.displayColor ?? .none).swiftUIColor.opacity(task.displayColor == nil ? 0.055 : 0.13), in: RoundedRectangle(cornerRadius: 14))
                             .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.09)))
+                            if index == segmentTasks.count - 1 {
+                                TimelineInsertionControl { model.insertTask(after: task.id, tomorrow: true) }
+                            }
                         }
                     }
                 }.padding()
@@ -1263,7 +1292,7 @@ struct TomorrowPlanView: View {
 private struct TaskEditorRow: View {
     @EnvironmentObject private var model: AppModel
     @Binding var task: PlanTask
-    var cyclesChanged: () -> Void
+    var cyclesChanged: (Int) -> Void
     var delete: () -> Void
     var addSubtask: () -> Void
     var removeSubtask: (UUID) -> Void
@@ -1364,9 +1393,9 @@ private struct TaskEditorRow: View {
                         value: $task.cycles,
                         in: durationRange
                     )
-                    .onChange(of: task.cycles) {
+                    .onChange(of: task.cycles) { oldCycles, _ in
                         task.durationMinutes = nil
-                        cyclesChanged()
+                        cyclesChanged(oldCycles)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -1440,7 +1469,7 @@ private struct TaskEditorRow: View {
         switch task.fixedRole {
         case .planTomorrow: 1...2
         case .dayAnalysis, .revision: 1...1
-        case nil: task.isRoutineBlock ? 1...10 : (task.kind == .normal ? 1...4 : 1...10)
+        case nil: task.isRoutineBlock ? 1...10 : 1...4
         }
     }
 
@@ -1452,6 +1481,30 @@ private struct TaskEditorRow: View {
             content()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct TimelineInsertionControl: View {
+    let insert: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: insert) {
+            HStack(spacing: 8) {
+                Rectangle().frame(height: 1)
+                Label("Insert task", systemImage: "plus.circle.fill").fixedSize()
+                Rectangle().frame(height: 1)
+            }
+            .font(.caption.bold())
+            .foregroundStyle(.blue)
+        }
+        .buttonStyle(.plain)
+        .opacity(hovering ? 1 : 0.001)
+        .frame(maxWidth: .infinity, minHeight: 12)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.14), value: hovering)
+        .accessibilityLabel("Insert task here")
     }
 }
 
@@ -1477,15 +1530,23 @@ private struct SavedPlanView: View {
                     let midnightTasks = visibleTasks.filter(isMidnightTask)
                     if !midnightTasks.isEmpty {
                         MidnightBlockHeader(taskCount: midnightTasks.count)
-                        ForEach(midnightTasks) { task in
+                        ForEach(Array(midnightTasks.enumerated()), id: \.element.id) { index, task in
+                            TimelineInsertionControl { model.insertTask(before: task.id) }
                             SavedTaskCard(task: task, isCurrent: task.id == model.executionTask?.id)
+                            if index == midnightTasks.count - 1 {
+                                TimelineInsertionControl { model.insertTask(after: task.id) }
+                            }
                         }
                     }
                     ForEach(PlanningSegment.allCases, id: \.self) { segment in
                         let segmentTasks = visibleTasks.filter { !isMidnightTask($0) && planningSegment(for: $0) == segment }
                         PlanningBlockHeader(segment: segment, taskCount: segmentTasks.count)
-                        ForEach(segmentTasks) { task in
+                        ForEach(Array(segmentTasks.enumerated()), id: \.element.id) { index, task in
+                            TimelineInsertionControl { model.insertTask(before: task.id) }
                             SavedTaskCard(task: task, isCurrent: task.id == model.executionTask?.id)
+                            if index == segmentTasks.count - 1 {
+                                TimelineInsertionControl { model.insertTask(after: task.id) }
+                            }
                         }
                     }
                 }
@@ -1987,7 +2048,7 @@ private struct AgendaTaskRow: View {
                         Stepper(
                             "\(taskBinding.wrappedValue.cycles)×",
                             value: cycleBinding,
-                            in: 1...(taskBinding.wrappedValue.kind == .contest || taskBinding.wrappedValue.isRoutineBlock ? 10 : 4)
+                            in: 1...(taskBinding.wrappedValue.isRoutineBlock ? 10 : 4)
                         ).frame(width: 92)
                         Picker("Kind", selection: taskBinding.kind) {
                             Text("Normal").tag(TaskKind.normal)
@@ -2682,10 +2743,6 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            Section("Vault") {
-                LabeledContent("Location", value: model.vaultURL?.path ?? "Not selected")
-                Button("Choose Vault…") { model.chooseVault() }
-            }
             Section("Startup") {
                 Toggle("Launch ReFocus when I log in", isOn: Binding(
                     get: { model.launchAtLogin },
@@ -2749,6 +2806,27 @@ struct SettingsView: View {
                 Text("The key stays in macOS Keychain. ReFocus sends prompts directly to the OpenAI Responses API and shows supported reasoning summaries and tool activity.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+            Section("How I Work") {
+                Text("This is the only persistent preference document ReFocus AI reads. Live time and tasks still come directly from ReFocus.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextEditor(text: $model.aiPreferencesDraft)
+                    .font(.system(.body, design: .monospaced))
+                    .frame(minHeight: 300)
+                    .padding(8)
+                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.12)))
+                HStack {
+                    Button("Save How I Work") { model.saveAIPreferences() }
+                        .buttonStyle(.borderedProminent)
+                    Text(model.aiPreferencesStatus).font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Text("Today: \(model.aiDailyUsage.totalTokens.formatted()) tokens")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
             }
             Section("Timer") {
                 Text("Focus: :00–:25 and :30–:55")
@@ -3022,7 +3100,7 @@ private struct TodayPlanPanel: View {
                         ForEach(midnightTasks) { task in
                             TaskEditorRow(
                                 task: taskBinding(for: task),
-                                cyclesChanged: { model.normalizeCoreTasks(for: task.id) },
+                                cyclesChanged: { oldCycles in model.taskCyclesChanged(task.id, previousCycles: oldCycles) },
                                 delete: { model.removeTask(id: task.id) },
                                 addSubtask: { model.addSubtask(to: task.id) },
                                 removeSubtask: { model.removeSubtask(taskID: task.id, subtaskID: $0) },
@@ -3041,7 +3119,7 @@ private struct TodayPlanPanel: View {
                         ForEach(segmentTasks) { task in
                             TaskEditorRow(
                                 task: taskBinding(for: task),
-                                cyclesChanged: { model.normalizeCoreTasks(for: task.id) },
+                                cyclesChanged: { oldCycles in model.taskCyclesChanged(task.id, previousCycles: oldCycles) },
                                 delete: { model.removeTask(id: task.id) },
                                 addSubtask: { model.addSubtask(to: task.id) },
                                 removeSubtask: { model.removeSubtask(taskID: task.id, subtaskID: $0) },

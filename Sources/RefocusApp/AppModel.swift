@@ -30,7 +30,7 @@ final class AppModel: ObservableObject {
     @Published var tomorrowValidationIssues: [PlanValidationIssue] = []
     @Published var tomorrowIsDirty = false
     @Published var isSavingTomorrow = false
-    @Published var planMessage = "Choose your Obsidian vault."
+    @Published var planMessage = "Loading ReFocus…"
     @Published var validationIssues: [PlanValidationIssue] = []
     @Published var dayProfile = RoutineProfileResolver().profile(for: Date())
     @Published var activeSegment = PlanValidator().segment(at: Date())
@@ -48,7 +48,6 @@ final class AppModel: ObservableObject {
     @Published var diffInitialSnapshots: PlanSnapshots?
     @Published var diffFinalSnapshot: FinalSnapshotAvailability = .pending
     @Published var errorMessage: String?
-    @Published var vaultURL: URL?
     @Published var launchAtLogin = false
     @Published var planIsDirty = false
     @Published var requiredCycleMinimum = 10
@@ -81,6 +80,9 @@ final class AppModel: ObservableObject {
     @Published var openAIKeyDraft = ""
     @Published var openAIKeyConfigured = OpenAIKeychain.load() != nil
     @Published private(set) var openAIModel = "gpt-5.4-mini"
+    @Published var aiPreferencesDraft = ReFocusAIPreferences.defaultDocument
+    @Published private(set) var aiDailyUsage = AITokenUsage.zero
+    @Published var aiPreferencesStatus = "Saved locally"
 
     private let clock = WallClock()
     private let resolver = RoutineProfileResolver()
@@ -106,7 +108,6 @@ final class AppModel: ObservableObject {
     private var tomorrowBaselineTasks: [PlanTask] = []
     private var knownTaskIDs: Set<UUID> = []
     private var userRequestedEditing = false
-    private var accessedSecurityScopedResource = false
     private let taskUndoManager: UndoManager = {
         let manager = UndoManager()
         manager.levelsOfUndo = 100
@@ -119,7 +120,7 @@ final class AppModel: ObservableObject {
         // ReFocus deliberately uses one fast, tool-capable model. Persist the
         // choice so existing installations migrate away from older defaults.
         UserDefaults.standard.set(openAIModel, forKey: "refocus.openai.model")
-        restoreVault()
+        configureLocalStorage()
         refreshLoginStatus()
         startTicker()
     }
@@ -200,7 +201,7 @@ final class AppModel: ObservableObject {
         let prompt = (suppliedPrompt ?? aiDraft).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty, !aiIsResponding else { return }
         guard worker != nil else {
-            errorMessage = "Choose the ReFocus vault before using ReFocus AI."
+            errorMessage = "ReFocus local storage is unavailable."
             return
         }
         guard openAIKeyConfigured else {
@@ -258,6 +259,7 @@ final class AppModel: ObservableObject {
     }
 
     private func finishAIMessage(id: UUID, status: String = "Ready") {
+        let usage = aiMessages.first(where: { $0.id == id })?.tokenUsage ?? .zero
         if let index = aiMessages.firstIndex(where: { $0.id == id }) {
             aiMessages[index].isStreaming = false
         }
@@ -265,6 +267,15 @@ final class AppModel: ObservableObject {
         aiStatus = status
         aiContextWasLoadedForRequest = false
         aiResponseTask = nil
+        if usage.totalTokens > 0, let worker {
+            let usageDate = now
+            Task { [weak self] in
+                guard let self else { return }
+                if let daily = try? await worker.recordAIUsage(promptID: id, on: usageDate, usage: usage) {
+                    self.aiDailyUsage = daily
+                }
+            }
+        }
     }
 
     private func applyAIEvent(_ event: AIStreamEvent, messageID: UUID) {
@@ -283,6 +294,8 @@ final class AppModel: ObservableObject {
             if let activityIndex = aiMessages[index].toolActivity.lastIndex(where: { $0 == "Running \(name)…" }) {
                 aiMessages[index].toolActivity[activityIndex] = "Completed \(name)"
             }
+        case .usage(let usage):
+            aiMessages[index].tokenUsage = aiMessages[index].tokenUsage + usage
         }
     }
 
@@ -359,9 +372,20 @@ final class AppModel: ObservableObject {
                 "ok": true, "verified": true, "action": "daily_field_updated",
                 "field_id": verified.definitionID, "date": verified.date, "value": verified.value,
             ])
-        case "search_vault":
+        case "update_ai_preferences":
+            let lower = userPrompt.lowercased()
+            guard ["how i work", "preference", "remember", "from now on", "always", "manual", "document"]
+                .contains(where: lower.contains) else {
+                return aiJSON(["ok": false, "verified": false, "error": "Updating How I Work requires an explicit preference or document instruction in the current prompt."])
+            }
             let object = try JSONSerialization.jsonObject(with: arguments) as? [String: Any]
-            return await worker.searchVaultForAI(object?["query"] as? String ?? "")
+            guard let document = object?["document"] as? String else {
+                throw OpenAIChatError.api("update_ai_preferences requires document")
+            }
+            let saved = try await worker.saveAIPreferences(document)
+            aiPreferencesDraft = saved
+            aiPreferencesStatus = "Updated by ReFocus AI"
+            return aiJSON(["ok": true, "verified": true, "action": "ai_preferences_updated"])
         default:
             throw OpenAIChatError.api("Unknown ReFocus tool: \(name)")
         }
@@ -417,25 +441,20 @@ final class AppModel: ObservableObject {
         let cycleStart = MarkdownPlanCodec.time(clock.minuteOfDay(for: snapshot.cycleStart))
         let nextCycleDate = WallClock.dhakaCalendar().date(byAdding: .minute, value: 30, to: snapshot.cycleStart) ?? snapshot.phaseEnd
         let nextCycleStart = MarkdownPlanCodec.time(clock.minuteOfDay(for: nextCycleDate))
-        let history = context.targetedHistory.map {
-            "Targeted recent history selected for this prompt:\n\($0)"
-        } ?? "No targeted history was needed for this prompt."
         return """
         You are ReFocus AI, the fast planning assistant inside the native ReFocus app.
 
-        Generated static ReFocus AI operating manual:
-        \(context.operatingManual)
+        The only persistent work-preference document you may use is this internal How I Work document:
+        \(context.preferences)
 
         Live Asia/Dhaka date and time for this turn: \(localNow). Current phase: \(snapshot.phase.rawValue). Current cycle starts at \(cycleStart); the next cycle starts at \(nextCycleStart). This live value overrides dates or times inherited from older chat turns.
 
-        The application injected a fresh SQLite snapshot for this request. Use get_refocus_context before mutating records or when a different date is needed. Stable task IDs are mandatory for existing-record mutations. Native tools validate writes and read them back; never claim success unless the result contains both ok=true and verified=true.
+        The application already injected fresh tasks for the selected date. Call get_refocus_context only when you need a different date, Agenda, or Daily fields that are absent from the compact snapshot. Stable task IDs are mandatory for existing-record mutations. Native tools validate writes and read them back; never claim success unless the result contains both ok=true and verified=true.
 
         Show concise progress summaries and supported tool activity. Do not expose or invent private chain-of-thought. A supported reasoning summary may explain the approach at a high level.
 
-        Fresh SQLite-backed live context for this request:
+        Minimal fresh SQLite-backed live context for this request:
         \(context.liveContext)
-
-        \(history)
         """
     }
 
@@ -663,27 +682,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func chooseVault() {
-        let panel = NSOpenPanel()
-        panel.title = "Choose your Obsidian vault"
-        panel.message = "Select the folder containing tasks.md and ego/ikigai.md."
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.prompt = "Use Vault"
-        // The planning gate uses screen-saver-level panels, so keep the vault
-        // chooser above them when Settings is opened from the blocker.
-        panel.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        guard FileManager.default.fileExists(atPath: url.appendingPathComponent("tasks.md").path),
-              FileManager.default.fileExists(atPath: url.appendingPathComponent("ego/ikigai.md").path) else {
-            errorMessage = "That folder is not the expected Obsidian vault."
-            return
-        }
-        persistVault(url)
-        configureVault(url)
-    }
-
     func reloadVault(force: Bool = false, preservingLocalEdits: Bool = false) {
         guard let worker else { return }
         if planIsDirty && !force && !preservingLocalEdits {
@@ -798,9 +796,9 @@ final class AppModel: ObservableObject {
 
     private func compactAIHistory() -> [AIChatMessage] {
         let completed = aiMessages.filter { !$0.isStreaming && !$0.text.isEmpty }
-        let recent = completed.suffix(6)
-        let perMessageLimit = 4_000
-        var remaining = 12_000
+        let recent = completed.suffix(4)
+        let perMessageLimit = 2_000
+        var remaining = 6_000
         var compacted: [AIChatMessage] = []
 
         for message in recent {
@@ -813,6 +811,22 @@ final class AppModel: ObservableObject {
             remaining -= min(message.text.count, limit)
         }
         return compacted
+    }
+
+    func saveAIPreferences() {
+        guard let worker else { return }
+        let document = aiPreferencesDraft
+        aiPreferencesStatus = "Saving…"
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                self.aiPreferencesDraft = try await worker.saveAIPreferences(document)
+                self.aiPreferencesStatus = "Saved locally"
+            } catch {
+                self.aiPreferencesStatus = "Could not save"
+                self.errorMessage = error.localizedDescription
+            }
+        }
     }
 
     func savePlan() {
@@ -1089,6 +1103,108 @@ final class AppModel: ObservableObject {
         tomorrowTasks[index] = updated
         markTomorrowDirty()
         if autosave { scheduleAgendaTomorrowAutosave() }
+    }
+
+    func taskCyclesChanged(_ id: UUID, previousCycles: Int, tomorrow: Bool = false) {
+        var draft = tomorrow ? tomorrowTasks : tasks
+        guard let anchor = draft.first(where: { $0.id == id }) else { return }
+        let addedMinutes = max(0, anchor.cycles - previousCycles) * 30
+        guard addedMinutes > 0 else {
+            if tomorrow { normalizeTomorrowSubtasks(for: id) }
+            else { normalizeCoreTasks(for: id) }
+            return
+        }
+        let oldEnd = anchor.startMinute + previousCycles * 30
+        guard shiftTimelineTasks(&draft, startingAt: oldEnd, by: addedMinutes, excluding: id) else {
+            errorMessage = "The later tasks cannot be pushed without crossing midnight."
+            return
+        }
+        if tomorrow {
+            tomorrowTasks = draft
+            normalizeTomorrowSubtasks(for: id)
+        } else {
+            tasks = draft
+            normalizeCoreTasks(for: id)
+        }
+    }
+
+    func insertTask(before taskID: UUID, tomorrow: Bool = false) {
+        insertTask(relativeTo: taskID, after: false, tomorrow: tomorrow)
+    }
+
+    func insertTask(after taskID: UUID, tomorrow: Bool = false) {
+        insertTask(relativeTo: taskID, after: true, tomorrow: tomorrow)
+    }
+
+    private func insertTask(relativeTo taskID: UUID, after: Bool, tomorrow: Bool) {
+        var draft = tomorrow ? tomorrowTasks : tasks
+        guard let anchor = draft.first(where: { $0.id == taskID }), anchor.hasScheduledTime else { return }
+        let insertionMinute = after ? anchor.endMinute : anchor.startMinute
+        guard insertionMinute < 1_440 else {
+            errorMessage = "A task cannot be inserted after midnight."
+            return
+        }
+        guard shiftTimelineTasks(&draft, startingAt: insertionMinute, by: 30, excluding: after ? taskID : nil) else {
+            errorMessage = "The later tasks cannot be pushed without crossing midnight."
+            return
+        }
+        let task = PlanTask(
+            title: "New task", startMinute: insertionMinute, cycles: 1, mvp: "",
+            coreTasks: [CoreTask(title: ""), CoreTask(title: ""), CoreTask(title: "")],
+            quickCapture: false, timeAssigned: true
+        )
+        registerTaskUndo(actionName: "Insert Task", persistence: .none)
+        draft.append(task)
+        registerNewTask(task.id)
+        if tomorrow {
+            tomorrowTasks = draft
+            markTomorrowDirty()
+        } else {
+            userRequestedEditing = true
+            isEditingPlan = true
+            tasks = draft
+            markPlanDirty()
+        }
+    }
+
+    private func shiftTimelineTasks(
+        _ draft: inout [PlanTask], startingAt threshold: Int, by minutes: Int, excluding excludedID: UUID?
+    ) -> Bool {
+        guard minutes > 0 else { return true }
+        let movingIDs = Set(draft.filter {
+            $0.hasScheduledTime && $0.startMinute >= threshold && $0.id != excludedID
+                && !isTimelineAnchor($0)
+        }.map(\.id))
+        var occupied: [Range<Int>] = protectedRestRanges
+        occupied += draft.compactMap { task in
+            guard task.hasScheduledTime, !movingIDs.contains(task.id) else { return nil }
+            return task.startMinute..<task.endMinute
+        }
+        let orderedIDs = draft.filter { movingIDs.contains($0.id) }
+            .sorted { $0.startMinute < $1.startMinute }.map(\.id)
+        for id in orderedIDs {
+            guard let index = draft.firstIndex(where: { $0.id == id }) else { continue }
+            let duration = draft[index].endMinute - draft[index].startMinute
+            var candidate = draft[index].startMinute + minutes
+            while let collision = occupied
+                .filter({ candidate < $0.upperBound && candidate + duration > $0.lowerBound })
+                .min(by: { $0.lowerBound < $1.lowerBound }) {
+                candidate = collision.upperBound
+            }
+            guard candidate + duration <= 1_440 else { return false }
+            draft[index].startMinute = candidate
+            occupied.append(candidate..<(candidate + duration))
+        }
+        return true
+    }
+
+    private func isTimelineAnchor(_ task: PlanTask) -> Bool {
+        let title = task.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return task.fixedRole != nil || task.isRoutineBlock || title == "rest" || title == "break"
+    }
+
+    private var protectedRestRanges: [Range<Int>] {
+        [300..<360, 660..<720, 1_020..<1_080, 1_380..<1_440]
     }
 
     func addTask() {
@@ -1709,6 +1825,14 @@ final class AppModel: ObservableObject {
             attemptedFinalCaptureDay = nil
             activeBreakID = nil
             screenBreakSkipsUsed = 0
+            aiDailyUsage = .zero
+            if let worker {
+                Task { [weak self] in
+                    if let usage = try? await worker.loadAIUsage(on: date) {
+                        self?.aiDailyUsage = usage
+                    }
+                }
+            }
             reloadVault(force: true)
         }
 
@@ -2115,11 +2239,9 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func configureVault(_ url: URL) {
-        if accessedSecurityScopedResource { vaultURL?.stopAccessingSecurityScopedResource() }
-        vaultURL = url
-        accessedSecurityScopedResource = url.startAccessingSecurityScopedResource()
+    private func configureStorage(_ url: URL) {
         do {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
             worker = try VaultWorker(vaultURL: url)
         } catch {
             worker = nil
@@ -2132,30 +2254,30 @@ final class AppModel: ObservableObject {
         if let worker {
             Task {
                 await worker.refreshProjections()
-                try? await worker.prepareAIContextProjection()
+                if let preferences = try? await worker.loadAIPreferences() {
+                    self.aiPreferencesDraft = preferences
+                }
+                if let usage = try? await worker.loadAIUsage(on: self.now) {
+                    self.aiDailyUsage = usage
+                }
             }
         }
         reloadVault()
         startCloudSyncLoop()
     }
 
-    private func persistVault(_ url: URL) {
-        if let data = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil) {
-            UserDefaults.standard.set(data, forKey: "vaultBookmark")
+    private func configureLocalStorage() {
+        do {
+            let base = try FileManager.default.url(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask,
+                appropriateFor: nil,
+                create: true
+            )
+            configureStorage(base.appendingPathComponent("ReFocus/Internal", isDirectory: true))
+        } catch {
+            errorMessage = "Could not open ReFocus local storage: \(error.localizedDescription)"
         }
-    }
-
-    private func restoreVault() {
-        guard let data = UserDefaults.standard.data(forKey: "vaultBookmark") else { return }
-        var stale = false
-        guard let url = try? URL(
-            resolvingBookmarkData: data,
-            options: [.withSecurityScope, .withoutUI],
-            relativeTo: nil,
-            bookmarkDataIsStale: &stale
-        ) else { return }
-        if stale { persistVault(url) }
-        configureVault(url)
     }
 
     private func refreshLoginStatus() {

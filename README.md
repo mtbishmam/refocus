@@ -77,9 +77,10 @@ The assistant receives a fresh Dhaka date, time, cycle, and current task on
 every turn. It understands `cur -> did ...` as an append to the current task
 Description and sequential `next -> N cyc/cycle -> ...` planning. New AI tasks
 always receive one terse custom MVP and exactly three terse custom subtasks.
-The static policy portion is regenerated at `agents/context/refocus-ai.md`
-when its curated vault sources change; current tasks and Daily values remain
-fresh SQLite context, with recent history injected only when relevant. Native
+The only persistent AI policy is the small, user-editable `How I Work`
+document stored in ReFocus SQLite and shown in Settings. The assistant does not
+read Ikigai or other vault files; current tasks and time come from a compact,
+fresh SQLite context. Per-prompt and day-total token use is shown in chat. Native
 AI writes are planner-validated and reported successful only after durable
 read-back verification. The assistant preserves the four protected Rest
 windows by default, interprets "break" as Rest, moves current/future overlapping work after
@@ -87,7 +88,6 @@ Rest, matches close task names before creating duplicates, and allocates
 untimed tasks after the last explicitly timed task in a partial plan. An
 explicit current-prompt override/overrule/bypass instruction may place work in
 Rest while keeping the Rest row visible; the override is reported and never
-inferred. Submitting a prompt from any non-AI dashboard tab opens
 a smooth 50/50 AI-left/work-right split without hiding the selected tab;
 the split can be closed independently and its conversation remains in the AI
 tab. Response text supports mouse selection across the entire multi-paragraph
