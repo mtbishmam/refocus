@@ -505,9 +505,9 @@ final class AppModel: ObservableObject {
         guard let window = FixedPlanTasks.defaultRestWindows.first(where: {
             minute >= $0.startMinute && minute < $0.endMinute
         }) else { return nil }
-        // The 05:00–06:00 guard overlaps the legacy 05:30 Morning Routine
-        // row, so it is represented as a non-persisted guard rather than a
-        // second overlapping task in Today.
+        // Keep a defensive virtual guard for legacy or partially migrated
+        // databases. Normal dates materialize all four Rest rows through
+        // RefocusStore.ensurePredefinedRoutineBlocks(on:).
         return PlanTask(
             title: "Rest", startMinute: window.startMinute,
             cycles: max(1, (window.endMinute - window.startMinute) / 30),
@@ -1838,6 +1838,16 @@ final class AppModel: ObservableObject {
 
         if refreshPlanningState(at: date) {
             validationIssues = currentValidation(tasks)
+
+            // The active planning gate changes at 12:00, 18:00, and 21:30.
+            // Recompute the committed/editing state with the new segment as
+            // one operation. Without this, an Evening save remained visually
+            // marked as "Saved" after the Late Night gate became active,
+            // while the overlay correctly demanded a Late Night save.
+            let committed = isPlanCommitted
+            planMessage = committed ? "Today is planned." : "Today plan is incomplete."
+            isArmed = committed
+            isEditingPlan = !committed || planIsDirty || userRequestedEditing
         }
 
         let minute = clock.minuteOfDay(for: date)

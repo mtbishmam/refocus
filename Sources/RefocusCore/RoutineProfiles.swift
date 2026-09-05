@@ -116,11 +116,23 @@ public enum FixedPlanTasks {
 public enum PredefinedRoutineBlocks {
     public static func daily(for date: Date, calendar: Calendar = WallClock.dhakaCalendar()) -> [PlanTask] {
         let weekday = calendar.component(.weekday, from: date)
-        var blocks = [block(
+        // Rest is a real predefined row on every date, not only a virtual
+        // screen guard. Keep the rows present even when they are otherwise
+        // empty so AI scheduling and the UI use the same protected timeline.
+        // Saturday/Thursday previously tombstoned the old `rest-evening`
+        // identity, so use a new stable key for that one migration path.
+        let eveningRestKey = [5, 7].contains(weekday) ? "rest-evening-fixed" : "rest-evening"
+        var blocks = [
+            rest(date: date, key: "rest-early", start: 300, end: 360, calendar: calendar),
+            rest(date: date, key: "rest-midday", start: 660, end: 720, calendar: calendar),
+            rest(date: date, key: eveningRestKey, start: 1020, end: 1080, calendar: calendar),
+            rest(date: date, key: "rest-night", start: 1380, end: 1440, calendar: calendar),
+            block(
             date: date, key: "morning-routine", title: "Morning Routine",
             start: 330, end: 360, description: "Audio Wakeup + Bath & Weight + Coffee & Water",
             predefinedKind: .morningRoutine, calendar: calendar
-        )]
+            )
+        ]
 
         switch weekday {
         case 7, 5: // Saturday, Thursday
@@ -141,36 +153,35 @@ public enum PredefinedRoutineBlocks {
         default:
             blocks += standardWorkday(date: date, calendar: calendar)
         }
-        blocks.append(rest(date: date, key: "rest-night", start: 1380, end: 1440, calendar: calendar))
         return blocks.sorted { $0.startMinute < $1.startMinute }
     }
 
     private static func lateUniversity(date: Date, finalTitle: String, finalDetail: String, calendar: Calendar) -> [PlanTask] {
         [
-            rest(date: date, key: "rest-midday", start: 660, end: 720, calendar: calendar),
             university(date: date, key: "cse111", title: "CSE111 Class", detail: "CSE111-06-ADU-09H-35C", start: 750, end: 840, calendar: calendar),
             university(date: date, key: "university-final", title: finalTitle, detail: finalDetail, start: 840, end: 1020, calendar: calendar),
             transition(date: date, key: "return-home", start: 1020, end: 1050, calendar: calendar),
-            rest(date: date, key: "rest-evening", start: 1050, end: 1080, calendar: calendar),
         ]
     }
 
     private static func standardWorkday(date: Date, calendar: Calendar) -> [PlanTask] {
         [
             mashup(date: date, key: "mashup-morning", start: 360, end: 660, calendar: calendar),
-            rest(date: date, key: "rest-midday", start: 660, end: 720, calendar: calendar),
             block(date: date, key: "upsolve-1", title: "Upsolve 1", start: 720, end: 840, predefinedKind: .upsolve, calendar: calendar),
             block(date: date, key: "upsolve-2", title: "Upsolve 2", start: 840, end: 1020, predefinedKind: .upsolve, calendar: calendar),
-            rest(date: date, key: "rest-evening", start: 1020, end: 1080, calendar: calendar),
         ]
     }
 
     private static func rest(date: Date, key: String, start: Int, end: Int, calendar: Calendar) -> PlanTask {
-        block(
+        var task = block(
             date: date, key: key, title: "Rest", start: start, end: end,
             description: "InstaS + Bath + Food + Coffee", displayColor: .green,
             predefinedKind: .rest, calendar: calendar
         )
+        // Version 5 makes the four exact protected windows a data migration,
+        // including the former Sunday/Tuesday 17:30–18:00 row.
+        task.predefinedVersion = 5
+        return task
     }
 
     private static func transition(date: Date, key: String, start: Int, end: Int, calendar: Calendar) -> PlanTask {
@@ -283,6 +294,16 @@ public enum PredefinedRoutineBlocks {
             // University color is semantic, not decorative: every class and
             // lab must remain visibly red across native/web synchronization.
             task.displayColor = .red
+        } else if definition.predefinedKind == .rest {
+            // Rest rows are canonical timeline anchors. Repair older rows that
+            // used 17:30–18:00 (or omitted the exact duration) while retaining
+            // the row's identity and durable history.
+            task.title = definition.title
+            task.startMinute = definition.startMinute
+            task.durationMinutes = definition.durationMinutes
+            task.cycles = definition.cycles
+            task.description = definition.description
+            task.displayColor = definition.displayColor
         } else {
             if task.displayColor == nil { task.displayColor = definition.displayColor }
         }

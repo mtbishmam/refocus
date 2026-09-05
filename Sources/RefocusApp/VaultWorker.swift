@@ -91,6 +91,14 @@ actor VaultWorker {
                 legacyFieldValues: Self.readLegacyFieldValues(logs: legacyLogs, definitions: streaks)
             )
         }
+
+        // Materialize the protected Rest rows as part of startup, before the
+        // dashboard or AI panel is opened. This matters for the menu-bar-only
+        // launch path, where no Today view may call loadToday yet.
+        let today = calendar.startOfDay(for: Date())
+        let tomorrow = calendar.date(byAdding: .day, value: 1, to: today) ?? today
+        _ = try store.ensurePredefinedRoutineBlocks(on: today)
+        _ = try store.ensurePredefinedRoutineBlocks(on: tomorrow)
     }
 
     func refreshProjections() {

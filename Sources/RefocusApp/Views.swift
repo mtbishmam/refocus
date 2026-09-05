@@ -1053,7 +1053,7 @@ struct PlanEditorView: View {
                     systemImage: "calendar.badge.exclamationmark",
                     description: Text("Complete and save a valid \(model.requiredCycleMinimum)-cycle Today plan to unlock work.")
                 )
-            } else if model.isEditingPlan {
+            } else if model.isEditingPlan || !model.isPlanCommitted {
                 let visibleTasks = model.tasks.filter {
                     taskVisible($0, showUser: showUserTasks, showPredefined: showPredefinedBlocks, showFixed: showFixedBlocks)
                 }

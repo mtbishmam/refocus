@@ -250,6 +250,8 @@ do {
         let sundayBlocks = PredefinedRoutineBlocks.daily(for: sunday, calendar: calendar)
         try expect(saturdayBlocks.contains { $0.title == "CSE111/220 Study" && $0.startMinute == 570 && $0.endMinute == 615 }, "Saturday 09:30–10:15 study block missing")
         try expect(saturdayBlocks.contains { $0.title == "Return Home / Transition" && $0.startMinute == 750 && $0.endMinute == 780 }, "Saturday return-home block missing")
+        let saturdayRestWindows = Set(saturdayBlocks.filter { $0.predefinedKind == .rest }.map { "\($0.startMinute)-\($0.endMinute)" })
+        try expect(saturdayRestWindows == Set(["300-360", "660-720", "1020-1080", "1380-1440"]), "Saturday did not materialize all four exact Rest blocks")
         try expect(saturdayBlocks.contains { $0.predefinedKey == "rest-night" && $0.startMinute == 1380 && $0.endMinute == 1440 }, "Saturday omitted the 23:00–00:00 Rest block")
         try expect(saturdayBlocks.filter { $0.predefinedKind == .rest }.allSatisfy {
             FixedPlanTasks.isAllowedScheduledRest(start: $0.startMinute, end: $0.endMinute)
@@ -288,6 +290,15 @@ do {
             try expect(upgraded.title == "CSE220 Lab" && upgraded.description == "CSE220L-15-TBA-09B-09L" && upgraded.mvp.isEmpty, "Existing university MVP was not migrated into Description")
             try expect(upgraded.displayColor == .red && upgraded.predefinedVersion == 4, "Existing orange university class was not repaired")
         }
+        if let canonicalRest = sundayBlocks.first(where: { $0.predefinedKey == "rest-evening" }) {
+            let staleRest = PlanTask(
+                id: canonicalRest.id, title: "Rest", startMinute: 1050, cycles: 1,
+                routineBlock: true, durationMinutes: 30, predefinedKind: .rest,
+                predefinedKey: "rest-evening", predefinedVersion: 4
+            )
+            let upgraded = PredefinedRoutineBlocks.upgrade(staleRest, to: canonicalRest)
+            try expect(upgraded.startMinute == 1020 && upgraded.endMinute == 1080 && upgraded.predefinedVersion == 5, "Legacy 17:30–18:00 Rest was not repaired to 17:00–18:00")
+        }
         let tuesday = try date("2026-08-11", format: "yyyy-MM-dd")
         let tuesdayBlocks = PredefinedRoutineBlocks.daily(for: tuesday, calendar: calendar)
         try expect(tuesdayBlocks.contains { $0.title == "CSE111 Lab" && $0.startMinute == 840 && $0.endMinute == 1020 }, "Tuesday three-hour CSE111 Lab title missing")
@@ -306,7 +317,8 @@ do {
     try check("Scheduled Rest screen guards are limited to the four live windows") {
         try expect(FixedPlanTasks.isAllowedScheduledRest(start: 300, end: 360), "05:00–06:00 Rest was not allowed")
         try expect(FixedPlanTasks.isAllowedScheduledRest(start: 660, end: 720), "11:00–12:00 Rest was not allowed")
-        try expect(FixedPlanTasks.isAllowedScheduledRest(start: 1050, end: 1080), "17:30–18:00 Rest was not allowed")
+        try expect(FixedPlanTasks.isAllowedScheduledRest(start: 1020, end: 1080), "17:00–18:00 Rest was not allowed")
+        try expect(FixedPlanTasks.isAllowedScheduledRest(start: 1050, end: 1080), "A shorter Rest entry inside 17:00–18:00 was rejected")
         try expect(FixedPlanTasks.isAllowedScheduledRest(start: 1380, end: 1440), "23:00–00:00 Rest was not allowed")
         try expect(!FixedPlanTasks.isAllowedScheduledRest(start: 270, end: 330), "04:30–05:30 Rest incorrectly crossed into the early guard window")
         try expect(!FixedPlanTasks.isAllowedScheduledRest(start: 780, end: 840), "13:00–14:00 Rest incorrectly remained a screen guard")
@@ -1147,7 +1159,9 @@ do {
         let day = try date("2026-08-05", format: "yyyy-MM-dd")
         let initiallySeeded = try store.ensurePredefinedRoutineBlocks(on: day)
         try expect(initiallySeeded, "Routine defaults were not seeded")
-        let rest = try store.tasks(on: day).first { $0.title.hasPrefix("Rest") }
+        let seededRests = try store.tasks(on: day).filter { $0.predefinedKind == .rest }
+        try expect(Set(seededRests.map { "\($0.startMinute)-\($0.endMinute)" }) == Set(["300-360", "660-720", "1020-1080", "1380-1440"]), "Routine seeding omitted one of the four predefined Rest windows")
+        let rest = seededRests.first
         try expect(rest != nil, "Seeded routine omitted Rest")
         if let rest { try store.deleteTask(id: rest.id) }
         let reseeded = try store.ensurePredefinedRoutineBlocks(on: day)

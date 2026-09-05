@@ -6,7 +6,7 @@ public enum ReFocusAIPreferences {
 
     - Plan my day in four six-hour blocks: 00:00–06:00, 06:00–12:00, 12:00–18:00, and 18:00–00:00.
     - One cycle is 30 minutes. A task may use at most four cycles (two hours).
-    - Reserve the final hour of every six-hour block for Rest: 05:00–06:00, 11:00–12:00, 17:00–18:00, and 23:00–00:00. Treat “break” as Rest.
+    - Every date has predefined Rest rows at 05:00–06:00, 11:00–12:00, 17:00–18:00, and 23:00–00:00. Keep those rows blank for work by default; treat “break” as Rest.
     - Preserve Rest by default. Only schedule work inside Rest when I explicitly say to override it.
     - When I insert a task or increase a task’s duration, push every later movable task forward by the same number of cycles while preserving order.
     - If pushed work reaches Rest, continue it after Rest. Never create an overlap and never silently cross midnight.
