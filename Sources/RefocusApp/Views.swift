@@ -1018,7 +1018,7 @@ struct PlanEditorView: View {
                     )
                 }
                 .buttonStyle(.borderless)
-                Toggle("Show completed", isOn: $model.showCompletedSubtasks)
+                Toggle("Hide Completed", isOn: $model.hideCompleted)
                     .toggleStyle(.checkbox)
                     .fixedSize(horizontal: true, vertical: false)
                 if model.isEditingPlan {
@@ -1056,6 +1056,7 @@ struct PlanEditorView: View {
             } else if model.isEditingPlan || !model.isPlanCommitted {
                 let visibleTasks = model.tasks.filter {
                     taskVisible($0, showUser: showUserTasks, showPredefined: showPredefinedBlocks, showFixed: showFixedBlocks)
+                        && (!model.hideCompleted || !$0.isComplete)
                 }
                 ScrollView {
                     if visibleTasks.isEmpty {
@@ -1063,6 +1064,7 @@ struct PlanEditorView: View {
                             showUserTasks = true
                             showPredefinedBlocks = true
                             showFixedBlocks = true
+                            model.hideCompleted = false
                         }
                     } else {
                         LazyVStack(spacing: 12) {
@@ -1430,7 +1432,7 @@ private struct TaskEditorRow: View {
                         .buttonStyle(.borderless)
                     }
                     ForEach(Array(task.coreTasks.indices), id: \.self) { index in
-                        if model.showCompletedSubtasks || !task.coreTasks[index].isComplete {
+                        if !model.hideCompleted || !task.coreTasks[index].isComplete {
                           HStack(spacing: 8) {
                             Toggle("", isOn: $task.coreTasks[index].isComplete).labelsHidden()
                             Text("\(index + 1).").foregroundStyle(.secondary).frame(width: 20, alignment: .trailing)
@@ -1519,12 +1521,14 @@ private struct SavedPlanView: View {
             LazyVStack(spacing: 14) {
                 let visibleTasks = model.tasks.filter {
                     taskVisible($0, showUser: showUserTasks, showPredefined: showPredefinedBlocks, showFixed: showFixedBlocks)
+                        && (!model.hideCompleted || !$0.isComplete)
                 }
                 if visibleTasks.isEmpty && !model.tasks.isEmpty {
                     FilteredTasksEmptyState {
                         showUserTasks = true
                         showPredefinedBlocks = true
                         showFixedBlocks = true
+                        model.hideCompleted = false
                     }
                 } else {
                     let midnightTasks = visibleTasks.filter(isMidnightTask)
@@ -1599,7 +1603,7 @@ private struct SavedTaskCard: View {
             if !model.collapsedTaskIDs.contains(task.id) {
               if !task.mvp.isEmpty { Text("MVP → \(task.mvp)").font(.subheadline) }
               ForEach(Array(task.coreTasks.enumerated()), id: \.element.id) { index, core in
-                if model.showCompletedSubtasks || !core.isComplete {
+                if !model.hideCompleted || !core.isComplete {
                 HStack(spacing: 8) {
                     Button { model.toggleSubtaskCompletion(taskID: task.id, subtaskID: core.id) } label: {
                         Image(systemName: core.isComplete ? "checkmark.square.fill" : "square")
@@ -1731,7 +1735,7 @@ struct AgendaView: View {
     @State private var range: AgendaRange = .month
     @State private var priority: AgendaPriority = .all
     @State private var showingAdd = false
-    @AppStorage("agendaShowCompleted") private var showCompleted = false
+    @AppStorage("agendaHideCompleted") private var hideCompleted = false
 
     private var entries: [AgendaTask] {
         let calendar = WallClock.dhakaCalendar()
@@ -1746,7 +1750,7 @@ struct AgendaView: View {
         let liveIDs = Set((todayEntries + tomorrowEntries).map(\.id))
         return (todayEntries + tomorrowEntries + model.agendaTasks.filter { !liveIDs.contains($0.id) })
             .filter { $0.task.fixedRole == nil && !$0.task.isRoutineBlock }
-            .filter { showCompleted || !$0.task.isComplete }
+            .filter { !hideCompleted || !$0.task.isComplete }
             .filter { priority.includes($0.task) }
             .filter { futureLimit == nil || $0.date < futureLimit! }
             .sorted {
@@ -1793,7 +1797,7 @@ struct AgendaView: View {
                 .labelsHidden()
                 .pickerStyle(.menu)
                 .frame(width: 125)
-                Toggle("Show completed", isOn: $showCompleted)
+                Toggle("Hide Completed", isOn: $hideCompleted)
                     .toggleStyle(.checkbox)
                     .fixedSize(horizontal: true, vertical: false)
                 Button("Add Task") { showingAdd = true }
@@ -3065,7 +3069,7 @@ private struct TodayPlanPanel: View {
                             .contentShape(Rectangle())
                     }.buttonStyle(.plain)
                     if !isEditing {
-                        Toggle("Show completed", isOn: $model.showCompletedSubtasks)
+                        Toggle("Hide Completed", isOn: $model.hideCompleted)
                             .toggleStyle(.checkbox).font(.caption)
                             .fixedSize(horizontal: true, vertical: false)
                         Text(model.executionCycleSummaryText).foregroundStyle(.secondary)
@@ -3131,7 +3135,8 @@ private struct TodayPlanPanel: View {
                         }
                     }
                 } else {
-                    let midnightTasks = model.executionTasks.filter(isMidnightTask)
+                    let visibleTasks = model.executionTasks.filter { !model.hideCompleted || !$0.isComplete }
+                    let midnightTasks = visibleTasks.filter(isMidnightTask)
                     if !midnightTasks.isEmpty {
                         MidnightBlockHeader(taskCount: midnightTasks.count)
                         ForEach(midnightTasks) { task in
@@ -3148,7 +3153,7 @@ private struct TodayPlanPanel: View {
                         }
                     }
                     ForEach(PlanningSegment.allCases, id: \.self) { segment in
-                        let segmentTasks = model.executionTasks.filter { !isMidnightTask($0) && planningSegment(for: $0) == segment }
+                        let segmentTasks = visibleTasks.filter { !isMidnightTask($0) && planningSegment(for: $0) == segment }
                         PlanningBlockHeader(segment: segment, taskCount: segmentTasks.count)
                         ForEach(segmentTasks) { task in
                             let isCurrent = task.id == model.currentTask?.id

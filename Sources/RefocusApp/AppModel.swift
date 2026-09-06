@@ -58,7 +58,8 @@ final class AppModel: ObservableObject {
     @Published var collapsedTaskIDs: Set<UUID> = []
     @Published var requestedTaskNameFocusID: UUID?
     @Published private(set) var taskUndoRevision = 0
-    @Published var showCompletedSubtasks = false
+    /// Completed tasks are visible by default; this only hides them when enabled.
+    @Published var hideCompleted = false
     @Published var quickNote = ""
     @Published var isSavingQuickNote = false
     @Published var quickNoteError: String?
