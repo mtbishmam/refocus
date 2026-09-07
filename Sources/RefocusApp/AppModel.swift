@@ -242,7 +242,6 @@ final class AppModel: ObservableObject {
                 )
                 guard !Task.isCancelled else { return }
                 self.finishAIMessage(id: assistantID)
-                self.reloadVault(force: true)
             } catch is CancellationError {
                 self.finishAIMessage(id: assistantID, status: "Stopped")
             } catch {
@@ -317,6 +316,7 @@ final class AppModel: ObservableObject {
                 decoder.decode(AICreateTaskArguments.self, from: arguments),
                 prompt: userPrompt
             )
+            try await refreshAITaskSurfaces(on: result.affectedDates, using: worker)
             return aiTaskResult(result.entry, action: result.interpretation == nil ? "created" : "created_or_merged", interpretation: result.interpretation)
         case "update_task":
             guard aiContextWasLoadedForRequest else { return aiMissingFreshContextResult() }
@@ -325,6 +325,7 @@ final class AppModel: ObservableObject {
                 decoder.decode(AIUpdateTaskArguments.self, from: arguments),
                 prompt: userPrompt
             )
+            try await refreshAITaskSurfaces(on: result.affectedDates, using: worker)
             return aiTaskResult(result.entry, action: "updated", interpretation: result.interpretation)
         case "append_task_description":
             guard aiContextWasLoadedForRequest else { return aiMissingFreshContextResult() }
@@ -334,6 +335,7 @@ final class AppModel: ObservableObject {
                 throw OpenAIChatError.api("append_task_description requires task_id and text")
             }
             let entry = try await worker.appendAITaskDescription(taskID: taskID, text: text)
+            try await refreshAITaskSurfaces(on: [entry.date], using: worker)
             return aiTaskResult(entry, action: "description_appended")
         case "reschedule_task":
             guard aiContextWasLoadedForRequest else { return aiMissingFreshContextResult() }
@@ -342,6 +344,7 @@ final class AppModel: ObservableObject {
                 decoder.decode(AIRescheduleTaskArguments.self, from: arguments),
                 prompt: userPrompt
             )
+            try await refreshAITaskSurfaces(on: result.affectedDates, using: worker)
             return aiTaskResult(result.entry, action: "rescheduled", interpretation: result.interpretation)
         case "delete_task":
             guard aiContextWasLoadedForRequest else { return aiMissingFreshContextResult() }
@@ -354,7 +357,8 @@ final class AppModel: ObservableObject {
             guard let rawID = object?["task_id"] as? String, let id = UUID(uuidString: rawID) else {
                 throw OpenAIChatError.api("delete_task requires a valid task_id")
             }
-            try await worker.deleteAITaskAndVerify(id)
+            let deletedDate = try await worker.deleteAITaskAndVerify(id)
+            try await refreshAITaskSurfaces(on: [deletedDate], using: worker)
             return aiJSON([
                 "ok": true, "verified": true, "action": "deleted",
                 "task_id": id.uuidString.lowercased(),
@@ -369,6 +373,11 @@ final class AppModel: ObservableObject {
                 throw OpenAIChatError.api("set_daily_metric requires date, field_id, and value")
             }
             let verified = try await worker.setAIFieldValue(definitionID: fieldID, value: value, dateText: date)
+            if verified.date == MarkdownPlanCodec.isoDate(now, calendar: WallClock.dhakaCalendar()) {
+                dailyFieldValues[verified.definitionID] = verified.value
+                reloadStreakSummaries()
+                reloadDailyDashboardAnalytics()
+            }
             return aiJSON([
                 "ok": true, "verified": true, "action": "daily_field_updated",
                 "field_id": verified.definitionID, "date": verified.date, "value": verified.value,
@@ -412,8 +421,53 @@ final class AppModel: ObservableObject {
         // Enforce freshness in code instead of relying only on model behavior.
         // This runs for every individual write, including consecutive tool
         // calls in one response, so a prior mutation cannot leave stale state.
-        _ = try await worker.loadAIContext(on: now)
+        try await worker.refreshAIWriteContext(on: now)
         aiContextWasLoadedForRequest = true
+    }
+
+    private func refreshAITaskSurfaces(on dates: [Date], using worker: VaultWorker) async throws {
+        let calendar = WallClock.dhakaCalendar()
+        let today = calendar.startOfDay(for: now)
+        let tomorrow = calendar.date(byAdding: .day, value: 1, to: today) ?? today
+        var refreshAgenda = false
+        let uniqueDates = dates.reduce(into: [Date]()) { unique, date in
+            if !unique.contains(where: { calendar.isDate($0, inSameDayAs: date) }) {
+                unique.append(date)
+            }
+        }
+
+        for date in uniqueDates {
+            if calendar.isDate(date, inSameDayAs: today) {
+                let plan = try await worker.loadToday(date: date)
+                let normalized = withRecurringFixedTasks(plan.tasks, addMissing: false)
+                baselineTasks = normalized
+                tasks = normalized
+                hasPersistedToday = true
+                initialSegments = plan.initialSegments
+                planIsDirty = false
+                refreshPlanningState(at: now)
+                validationIssues = currentValidation(tasks)
+                let committed = hasInitialPlan && blockingIssues(in: validationIssues).isEmpty
+                planMessage = committed ? "Today is planned." : "Today plan is incomplete."
+                isArmed = committed
+                isEditingPlan = !committed || userRequestedEditing
+                collapseNewTasks()
+                tick(at: now)
+            } else if calendar.isDate(date, inSameDayAs: tomorrow) {
+                let plan = try await worker.loadTomorrow(date: date)
+                let normalized = withRecurringFixedTasks(plan.tasks, addMissing: false)
+                tomorrowBaselineTasks = normalized
+                tomorrowTasks = normalized
+                tomorrowIsDirty = false
+                tomorrowValidationIssues = validateTomorrow(normalized)
+            } else {
+                refreshAgenda = true
+            }
+        }
+
+        if refreshAgenda || uniqueDates.count > 1 {
+            agendaTasks = try await worker.loadAgenda(asOf: now).sorted(by: agendaSort)
+        }
     }
 
     private func aiJSON(_ object: [String: Any]) -> String {
@@ -433,28 +487,15 @@ final class AppModel: ObservableObject {
     }
 
     private func aiInstructions(context: AIRequestContext) -> String {
-        let localFormatter = DateFormatter()
-        localFormatter.calendar = WallClock.dhakaCalendar()
-        localFormatter.locale = Locale(identifier: "en_US_POSIX")
-        localFormatter.timeZone = TimeZone(identifier: "Asia/Dhaka")
-        localFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss EEEE"
-        let localNow = localFormatter.string(from: now)
-        let cycleStart = MarkdownPlanCodec.time(clock.minuteOfDay(for: snapshot.cycleStart))
-        let nextCycleDate = WallClock.dhakaCalendar().date(byAdding: .minute, value: 30, to: snapshot.cycleStart) ?? snapshot.phaseEnd
-        let nextCycleStart = MarkdownPlanCodec.time(clock.minuteOfDay(for: nextCycleDate))
         return """
-        You are ReFocus AI, the fast planning assistant inside the native ReFocus app.
+        You are ReFocus AI, the concise planning assistant inside the native app.
 
-        The only persistent work-preference document you may use is this internal How I Work document:
+        Persistent policy (the only work-preference document):
         \(context.preferences)
 
-        Live Asia/Dhaka date and time for this turn: \(localNow). Current phase: \(snapshot.phase.rawValue). Current cycle starts at \(cycleStart); the next cycle starts at \(nextCycleStart). This live value overrides dates or times inherited from older chat turns.
+        The final JSON below is fresh Asia/Dhaka SQLite context and overrides older chat. Use its current/next cycle and task IDs. Call get_refocus_context only for another date, Agenda, or missing Daily fields. Never report a write unless its tool returns ok=true and verified=true. Keep the answer brief; do not expose private chain-of-thought.
 
-        The application already injected fresh tasks for the selected date. Call get_refocus_context only when you need a different date, Agenda, or Daily fields that are absent from the compact snapshot. Stable task IDs are mandatory for existing-record mutations. Native tools validate writes and read them back; never claim success unless the result contains both ok=true and verified=true.
-
-        Show concise progress summaries and supported tool activity. Do not expose or invent private chain-of-thought. A supported reasoning summary may explain the approach at a high level.
-
-        Minimal fresh SQLite-backed live context for this request:
+        Live context:
         \(context.liveContext)
         """
     }
@@ -798,8 +839,8 @@ final class AppModel: ObservableObject {
     private func compactAIHistory() -> [AIChatMessage] {
         let completed = aiMessages.filter { !$0.isStreaming && !$0.text.isEmpty }
         let recent = completed.suffix(4)
-        let perMessageLimit = 2_000
-        var remaining = 6_000
+        let perMessageLimit = 1_000
+        var remaining = 3_000
         var compacted: [AIChatMessage] = []
 
         for message in recent {
@@ -1115,11 +1156,25 @@ final class AppModel: ObservableObject {
             else { normalizeCoreTasks(for: id) }
             return
         }
-        let oldEnd = anchor.startMinute + previousCycles * 30
-        guard shiftTimelineTasks(&draft, startingAt: oldEnd, by: addedMinutes, excluding: id) else {
+        guard let shifted = TimelineScheduler.tasksAfterExpanding(
+            draft,
+            taskID: id,
+            previousCycles: previousCycles,
+            protectedRanges: protectedRestRanges
+        ) else {
+            if tomorrow, let index = tomorrowTasks.firstIndex(where: { $0.id == id }) {
+                tomorrowTasks[index].cycles = previousCycles
+                tomorrowTasks[index].durationMinutes = nil
+                markTomorrowDirty()
+            } else if let index = tasks.firstIndex(where: { $0.id == id }) {
+                tasks[index].cycles = previousCycles
+                tasks[index].durationMinutes = nil
+                markPlanDirty()
+            }
             errorMessage = "The later tasks cannot be pushed without crossing midnight."
             return
         }
+        draft = shifted
         if tomorrow {
             tomorrowTasks = draft
             normalizeTomorrowSubtasks(for: id)

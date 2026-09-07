@@ -626,6 +626,14 @@ private struct AIComposerInput: NSViewRepresentable {
             if parent.text != textView.string {
                 parent.text = textView.string
             }
+            // Keep the insertion point visible when pasted text exceeds the
+            // composer's eight-line viewport. This also makes arrow-key
+            // navigation scroll the editor instead of moving offscreen.
+            textView.scrollRangeToVisible(textView.selectedRange())
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            textView?.scrollRangeToVisible(textView?.selectedRange() ?? NSRange(location: 0, length: 0))
         }
     }
 
@@ -637,9 +645,10 @@ private struct AIComposerInput: NSViewRepresentable {
         let scrollView = NSScrollView()
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
-        scrollView.hasVerticalScroller = false
+        scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
+        scrollView.scrollerStyle = .overlay
 
         let textView = AIComposerTextView()
         textView.delegate = context.coordinator
@@ -656,12 +665,22 @@ private struct AIComposerInput: NSViewRepresentable {
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
         // A 16-point combined inset around a 20-point line fills the
         // 36-point single-line editor evenly above and below.
         textView.textContainerInset = NSSize(width: 0, height: 8)
+        textView.textContainer?.containerSize = NSSize(
+            width: scrollView.contentSize.width,
+            height: CGFloat.greatestFiniteMagnitude
+        )
         textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.heightTracksTextView = false
         textView.textContainer?.lineBreakMode = .byWordWrapping
-        textView.textContainer?.maximumNumberOfLines = 8
+        textView.textContainer?.maximumNumberOfLines = 0
 
         scrollView.documentView = textView
         context.coordinator.textView = textView
@@ -679,6 +698,7 @@ private struct AIComposerInput: NSViewRepresentable {
         let textLength = (textView.string as NSString).length
         let location = min(selection.location, textLength)
         textView.setSelectedRange(NSRange(location: location, length: 0))
+        textView.scrollRangeToVisible(textView.selectedRange())
     }
 }
 

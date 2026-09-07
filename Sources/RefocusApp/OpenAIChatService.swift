@@ -210,8 +210,11 @@ actor OpenAIResponsesClient {
         var input: Any = conversation
 
         for _ in 0..<8 {
+            let roundInstructions = previousResponseID == nil
+                ? instructions
+                : Self.toolContinuationInstructions
             let result = try await streamResponseWithRetry(
-                apiKey: apiKey, model: model, instructions: instructions,
+                apiKey: apiKey, model: model, instructions: roundInstructions,
                 input: input, previousResponseID: previousResponseID, onEvent: onEvent
             )
             previousResponseID = result.responseID
@@ -314,9 +317,10 @@ actor OpenAIResponsesClient {
             "stream": true,
             "store": true,
             "reasoning": ["effort": "low", "summary": "auto"],
-            "max_output_tokens": 3_000,
+            "text": ["verbosity": "low"],
+            "max_output_tokens": 1_800,
             "tools": Self.tools,
-            "prompt_cache_key": "refocus-ai-v2-\(model)",
+            "prompt_cache_key": "refocus-ai-v3-\(model)",
         ]
         if let previousResponseID { payload["previous_response_id"] = previousResponseID }
 
@@ -493,6 +497,10 @@ actor OpenAIResponsesClient {
     private static func escape(_ text: String) -> String {
         text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
     }
+
+    private static let toolContinuationInstructions = """
+    Continue the same ReFocus request using verified tool outputs as current truth. Call tools as needed. Keep the final answer brief and report writes only when ok=true and verified=true.
+    """
 
     private static let tools: [[String: Any]] = [
         function("get_refocus_context", "Read full context for another date or fetch Agenda and Daily fields absent from the compact request context.", [

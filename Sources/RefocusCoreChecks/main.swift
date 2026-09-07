@@ -1585,6 +1585,45 @@ do {
         let nextDayUsage = try store.aiUsage(on: nextDay)
         try expect(nextDayUsage == .zero, "AI token usage leaked into another day")
     }
+    try check("Duration expansion consumes an empty adjacent cycle without shifting later tasks") {
+        let anchorID = UUID()
+        let expanded = PlanTask(id: anchorID, title: "Current task", startMinute: 1_020, cycles: 2)
+        let later = PlanTask(title: "Later task", startMinute: 1_080, cycles: 1)
+        let result = try require(
+            TimelineScheduler.tasksAfterExpanding(
+                [expanded, later], taskID: anchorID, previousCycles: 1,
+                protectedRanges: [300..<360, 660..<720, 1_020..<1_080, 1_380..<1_440]
+            ),
+            "An available 17:30–18:00 cycle was incorrectly rejected"
+        )
+        try expect(result.first(where: { $0.id == later.id })?.startMinute == 1_080, "Unrelated later work moved despite the free gap")
+    }
+    try check("Duration expansion pushes only the newly overlapping task chain") {
+        let anchorID = UUID()
+        let expanded = PlanTask(id: anchorID, title: "Current task", startMinute: 960, cycles: 2)
+        let first = PlanTask(title: "First", startMinute: 990, cycles: 1)
+        let second = PlanTask(title: "Second", startMinute: 1_020, cycles: 1)
+        let unrelated = PlanTask(title: "Unrelated", startMinute: 1_140, cycles: 1)
+        let result = try require(
+            TimelineScheduler.tasksAfterExpanding(
+                [expanded, first, second, unrelated], taskID: anchorID,
+                previousCycles: 1, protectedRanges: []
+            ),
+            "The overlapping chain could not be shifted"
+        )
+        try expect(result.first(where: { $0.id == first.id })?.startMinute == 1_020, "First overlapping task did not move one cycle")
+        try expect(result.first(where: { $0.id == second.id })?.startMinute == 1_050, "Second overlapping task did not preserve chain order")
+        try expect(result.first(where: { $0.id == unrelated.id })?.startMinute == 1_140, "Work after the next free gap moved unnecessarily")
+    }
+    try check("Impossible duration expansion fails without a partial schedule") {
+        let anchorID = UUID()
+        let expanded = PlanTask(id: anchorID, title: "Current task", startMinute: 1_380, cycles: 2)
+        let later = PlanTask(title: "Later task", startMinute: 1_410, cycles: 1)
+        let result = TimelineScheduler.tasksAfterExpanding(
+            [expanded, later], taskID: anchorID, previousCycles: 1, protectedRanges: []
+        )
+        try expect(result == nil, "Expansion past midnight should fail atomically")
+    }
     try check("Local store stays inside the speed budget") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-speed-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)

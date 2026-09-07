@@ -39,6 +39,13 @@ struct AIRequestContext: Sendable {
 struct AITaskWriteResult: Sendable {
     var entry: AgendaTask
     var interpretation: String?
+    var affectedDates: [Date]
+
+    init(entry: AgendaTask, interpretation: String? = nil, affectedDates: [Date]? = nil) {
+        self.entry = entry
+        self.interpretation = interpretation
+        self.affectedDates = affectedDates ?? [entry.date]
+    }
 }
 
 actor VaultWorker {
@@ -276,6 +283,11 @@ actor VaultWorker {
         )
     }
 
+    func refreshAIWriteContext(on date: Date) throws {
+        _ = try store.ensurePredefinedRoutineBlocks(on: date)
+        _ = try store.tasks(on: date)
+    }
+
     func loadAIPreferences() throws -> String { try store.aiPreferences() }
 
     func saveAIPreferences(_ document: String) throws -> String {
@@ -300,6 +312,7 @@ actor VaultWorker {
         let snapshot = wallClock.snapshot(at: now)
         let currentMinute = wallClock.minuteOfDay(for: snapshot.cycleStart)
         let currentTask = currentTasks.first(where: { $0.contains(minuteOfDay: currentMinute) })
+        let nextCycle = calendar.date(byAdding: .minute, value: 30, to: snapshot.cycleStart) ?? snapshot.phaseEnd
         let taskRecords: [[String: Any]] = tasks.map { task in
             var value: [String: Any] = [
                 "id": task.id.uuidString.lowercased(), "title": task.title,
@@ -313,6 +326,7 @@ actor VaultWorker {
             "timezone": "Asia/Dhaka", "date": dayKey(now), "time": localTime(now),
             "phase": snapshot.phase.rawValue,
             "cycle_start": localTime(snapshot.cycleStart),
+            "next_cycle_start": localTime(nextCycle),
             "selected_date": dayKey(date),
             "current_task_id": currentTask.map { $0.id.uuidString.lowercased() } ?? NSNull(),
             "tasks": taskRecords,
@@ -631,6 +645,7 @@ actor VaultWorker {
         guard let id = UUID(uuidString: arguments.taskID), var entry = try store.taskEntry(id: id) else {
             throw RefocusStoreError.corrupt("task to update was not found")
         }
+        let sourceDate = entry.date
         if let date = arguments.date { entry.date = try parseAIDate(date) }
         if let title = arguments.title { entry.task.title = title }
         if let description = arguments.description {
@@ -675,13 +690,18 @@ actor VaultWorker {
               calendar.isDate(verified.date, inSameDayAs: entry.date) else {
             throw RefocusStoreError.corrupt("updated task failed durable read-back verification")
         }
-        return AITaskWriteResult(entry: verified, interpretation: interpretation)
+        return AITaskWriteResult(
+            entry: verified,
+            interpretation: interpretation,
+            affectedDates: [sourceDate, verified.date]
+        )
     }
 
     func rescheduleAITask(_ arguments: AIRescheduleTaskArguments, prompt: String) throws -> AITaskWriteResult {
         guard let id = UUID(uuidString: arguments.taskID), var entry = try store.taskEntry(id: id) else {
             throw RefocusStoreError.corrupt("task to reschedule was not found")
         }
+        let sourceDate = entry.date
         entry.date = try parseAIDate(arguments.date)
         if let startTime = arguments.startTime {
             if startTime.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -711,7 +731,11 @@ actor VaultWorker {
               calendar.isDate(verified.date, inSameDayAs: entry.date) else {
             throw RefocusStoreError.corrupt("rescheduled task failed durable read-back verification")
         }
-        return AITaskWriteResult(entry: verified, interpretation: interpretation)
+        return AITaskWriteResult(
+            entry: verified,
+            interpretation: interpretation,
+            affectedDates: [sourceDate, verified.date]
+        )
     }
 
     func setAIFieldValue(definitionID: String, value: String, dateText: String) throws -> DailyFieldValue {
@@ -729,8 +753,8 @@ actor VaultWorker {
         return verified
     }
 
-    func deleteAITaskAndVerify(_ taskID: UUID) throws {
-        guard try store.taskEntry(id: taskID) != nil else {
+    func deleteAITaskAndVerify(_ taskID: UUID) throws -> Date {
+        guard let existing = try store.taskEntry(id: taskID) else {
             throw RefocusStoreError.corrupt("task to delete was not found")
         }
         try store.deleteTask(id: taskID)
@@ -738,6 +762,7 @@ actor VaultWorker {
             throw RefocusStoreError.corrupt("deleted task remained after durable read-back verification")
         }
         scheduleBackgroundWork(days: [])
+        return existing.date
     }
 
     private func validateAIWrite(_ task: PlanTask, on date: Date, replacing taskID: UUID?) throws {
