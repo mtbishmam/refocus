@@ -544,7 +544,7 @@ do {
             "An untimed task incorrectly occupied a physical planning slot"
         )
     }
-    try check("Global quick tasks may remain untimed while ordinary Today tasks may not") {
+    try check("Quick and ordinary dated tasks may remain in Unscheduled") {
         let profile = RoutineProfileResolver(calendar: calendar).profile(for: try date("2026-08-10", format: "yyyy-MM-dd"))
         let quick = PlanTask(
             title: "Capture for later", startMinute: 360, cycles: 1,
@@ -565,7 +565,7 @@ do {
             requireFixedTasks: false, requireTaskDetails: true
         )
         try expect(!quickIssues.contains { if case .missingTime = $0 { return true }; return false }, "Global quick task incorrectly required a time")
-        try expect(ordinaryIssues.contains { if case .missingTime = $0 { return true }; return false }, "Ordinary Today task unexpectedly bypassed its time requirement")
+        try expect(!ordinaryIssues.contains { if case .missingTime = $0 { return true }; return false }, "Ordinary dated task was rejected from Unscheduled")
     }
     try check("Live Sunday planning state uses the current morning window") {
         let sundayEarly = try date("2026-08-09 04:35:00")
@@ -1394,7 +1394,38 @@ do {
             tasks: [untimed], profile: RoutineProfileResolver(calendar: calendar).profile(for: day),
             minimumCycles: 0, requireFixedTasks: false, requireTaskDetails: true
         )
-        try expect(issues.contains(.missingTime(task: "Choose exam topics")), "Today validation accepted an untimed task")
+        try expect(!issues.contains(.missingTime(task: "Choose exam topics")), "Today validation rejected an untimed Unscheduled task")
+    }
+    try check("Authoritative AI slots overwrite Rest and move work to Unscheduled") {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-ai-displace-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let store = try RefocusStore(databaseURL: temporary.appendingPathComponent("refocus.sqlite3"), calendar: calendar)
+        try store.importLegacy(today: nil, tomorrow: nil, agenda: [], templates: [], streaks: [])
+        let day = try date("2026-09-08", format: "yyyy-MM-dd")
+        _ = try store.ensurePredefinedRoutineBlocks(on: day)
+        let existing = PlanTask(title: "Existing work", startMinute: 660, cycles: 1, mvp: "Done")
+        let routine = PlanTask(
+            title: "Existing routine", startMinute: 660, cycles: 1,
+            routineBlock: true, predefinedKind: .upsolve
+        )
+        try store.saveScheduledEntries([
+            AgendaTask(date: day, task: existing), AgendaTask(date: day, task: routine),
+        ])
+        let requested = PlanTask(title: "Requested work", startMinute: 660, cycles: 2, mvp: "Done", quickCapture: true)
+        let receipts = try store.upsertAIQuickTask(requested, on: day, displacingOverlaps: true)
+        let tasks = try store.tasks(on: day)
+        let displaced = try require(tasks.first(where: { $0.id == existing.id }), "Displaced work was deleted")
+        let displacedRoutine = try require(tasks.first(where: { $0.id == routine.id }), "Displaced routine was deleted")
+        try expect(!displaced.hasScheduledTime, "Displaced work did not move to Unscheduled")
+        try expect(!displacedRoutine.hasScheduledTime, "Displaced routine did not move to Unscheduled")
+        try expect(tasks.contains { $0.id == requested.id && $0.hasScheduledTime && $0.startMinute == 660 }, "Requested task did not keep its exact slot")
+        try expect(!tasks.contains { $0.predefinedKind == .rest && $0.startMinute == 660 }, "Overwritten Rest remained active")
+        try expect(receipts.contains { $0.contains("Existing work") && $0.contains("Unscheduled") }, "Displaced work receipt was missing")
+        try expect(receipts.contains { $0.contains("Existing routine") && $0.contains("Unscheduled") }, "Displaced routine receipt was missing")
+        try expect(receipts.contains { $0.contains("Rest") && $0.contains("overwritten") }, "Rest overwrite receipt was missing")
+        let plan = try require(store.loadPlan(date: day), "Dated plan disappeared")
+        try expect(plan.tasks.contains { $0.id == existing.id && !$0.hasScheduledTime }, "Unscheduled task was omitted from Today")
     }
     try check("Task sync sends changed fields only and merges remote fields independently") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-field-merge-\(UUID().uuidString)")

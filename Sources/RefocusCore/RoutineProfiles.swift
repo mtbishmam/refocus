@@ -585,9 +585,9 @@ public struct PlanValidator: Sendable {
                     issues.append(.emptyCoreTask(task: displayTitle))
                 }
             }
-            if requireTaskDetails && !historical && !task.hasScheduledTime && task.quickCapture != true {
-                issues.append(.missingTime(task: displayTitle))
-            }
+            // Untimed dated work is valid backlog. It appears in the day's
+            // Unscheduled section and contributes no cycles until assigned a
+            // concrete start time.
             guard task.hasScheduledTime else { continue }
             if task.endMinute > 1440 { issues.append(.afterDayBoundary(task: displayTitle)) }
             let isLegacyRestAlias = !task.isRoutineBlock

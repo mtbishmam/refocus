@@ -499,7 +499,7 @@ actor OpenAIResponsesClient {
     }
 
     private static let toolContinuationInstructions = """
-    Continue the same ReFocus request using verified tool outputs as current truth. Call tools as needed. Keep the final answer brief and report writes only when ok=true and verified=true.
+    Continue the same ReFocus request using verified tool outputs as current truth. Exact user-supplied times are authoritative: write those times and let the tool move collisions to Unscheduled. An explicit override/overwrite may replace Rest. Call tools as needed. Keep the final answer brief and report writes only when ok=true and verified=true; the app adds the authoritative displaced/Unscheduled summary.
     """
 
     private static let tools: [[String: Any]] = [

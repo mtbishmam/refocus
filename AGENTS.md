@@ -180,15 +180,19 @@ The day is independently planned and snapshotted in four super-blocks:
   and 23:00–00:00. A task named "break" is interpreted as Rest. Work that
   overlaps a current or future Rest window is moved after it and reported;
   completed intervals are historical evidence and never keep a later plan
-  blocked. Only an explicit current-prompt
-  instruction to override, overrule, bypass, ignore, or force through Rest or a
-  protected window may place work there; the Rest row remains visible and the
-  override is reported. Do not infer an override, and do not use one to hide
-  work-task collisions or cross midnight. If a partial plan leaves a task
-  without a time, assign it after the last explicitly timed task while skipping
-  occupied slots and Rest. Similar task names are matched to existing tasks
-  before a new record is created, and any X → Y interpretation is reported to
-  the user.
+  blocked. Only an explicit current-prompt instruction to override, overwrite,
+  overrule, bypass, ignore, or force through Rest or a protected window may
+  replace that date's Rest row, and the overwrite is reported. Do not infer an
+  override and never silently cross midnight.
+- Exact task times supplied by the user are authoritative. The requested work
+  keeps that slot; every overlapping task except Rest is retained without a
+  time in the dated `Unscheduled` section, the overlapping Rest row is
+  overwritten for that date, and every displacement is reported. `Unscheduled`
+  is hidden when empty. After every AI prompt, the app deterministically lists
+  all non-empty dated Unscheduled tasks and asks the user to assign times.
+  Untimed Agenda tasks appear in that date's Today view under `Unscheduled`.
+  Similar task names are matched to existing tasks before a new record is
+  created, and any X → Y interpretation is reported to the user.
 - Every Responses API turn and tool round receives a fresh Asia/Dhaka date,
   time, phase, current-cycle start, next-cycle start, and current task. Older
   chat turns must never override this live context after midnight.

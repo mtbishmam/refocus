@@ -8,6 +8,8 @@ public enum ReFocusAIPreferences {
     - One cycle is 30 minutes. A task may use at most four cycles (two hours).
     - Every date has predefined Rest rows at 05:00–06:00, 11:00–12:00, 17:00–18:00, and 23:00–00:00. Keep those rows blank for work by default; treat “break” as Rest.
     - Preserve Rest by default. Only schedule work inside Rest when I explicitly say to override it.
+    - Exact times I give are authoritative. Put my requested task there, move any displaced non-routine work to Unscheduled, and report every moved task.
+    - Untimed tasks belong in Unscheduled for their date. Keep that block hidden when empty and remind me to schedule its tasks when it is not empty.
     - When I insert a task or increase a task’s duration, push every later movable task forward by the same number of cycles while preserving order.
     - If pushed work reaches Rest, continue it after Rest. Never create an overlap and never silently cross midnight.
     - In a partial plan, keep explicitly timed tasks first and put untimed tasks after the last timed task, skipping occupied slots and Rest.

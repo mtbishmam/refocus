@@ -40,11 +40,19 @@ struct AITaskWriteResult: Sendable {
     var entry: AgendaTask
     var interpretation: String?
     var affectedDates: [Date]
+    var displacementReceipts: [String]
+    var unscheduledTitles: [String]
 
-    init(entry: AgendaTask, interpretation: String? = nil, affectedDates: [Date]? = nil) {
+    init(
+        entry: AgendaTask, interpretation: String? = nil,
+        affectedDates: [Date]? = nil, displacementReceipts: [String] = [],
+        unscheduledTitles: [String] = []
+    ) {
         self.entry = entry
         self.interpretation = interpretation
         self.affectedDates = affectedDates ?? [entry.date]
+        self.displacementReceipts = displacementReceipts
+        self.unscheduledTitles = unscheduledTitles
     }
 }
 
@@ -255,7 +263,9 @@ actor VaultWorker {
         let wallClock = WallClock(calendar: calendar)
         let snapshot = wallClock.snapshot(at: now)
         let currentMinute = wallClock.minuteOfDay(for: snapshot.cycleStart)
-        let currentTask = currentTasks.first(where: { $0.contains(minuteOfDay: currentMinute) })
+        let currentTask = currentTasks.first(where: {
+            $0.hasScheduledTime && $0.contains(minuteOfDay: currentMinute)
+        })
         let nextCycle = calendar.date(byAdding: .minute, value: 30, to: snapshot.cycleStart) ?? snapshot.phaseEnd
         let payload = AIContextPayload(
             asOf: ISO8601DateFormatter().string(from: now),
@@ -302,6 +312,19 @@ actor VaultWorker {
 
     func loadAIUsage(on date: Date) throws -> AITokenUsage { try store.aiUsage(on: date) }
 
+    func unscheduledSummary(on dates: [Date]) throws -> [String] {
+        var seenDays: Set<String> = []
+        var lines: [String] = []
+        for date in dates {
+            let key = dayKey(date)
+            guard seenDays.insert(key).inserted else { continue }
+            for task in try store.tasks(on: date) where !task.hasScheduledTime {
+                lines.append("\(key) — \(task.title)")
+            }
+        }
+        return lines
+    }
+
     private func compactAIContext(on date: Date) throws -> String {
         let now = Date()
         _ = try store.ensurePredefinedRoutineBlocks(on: date)
@@ -311,7 +334,9 @@ actor VaultWorker {
         let wallClock = WallClock(calendar: calendar)
         let snapshot = wallClock.snapshot(at: now)
         let currentMinute = wallClock.minuteOfDay(for: snapshot.cycleStart)
-        let currentTask = currentTasks.first(where: { $0.contains(minuteOfDay: currentMinute) })
+        let currentTask = currentTasks.first(where: {
+            $0.hasScheduledTime && $0.contains(minuteOfDay: currentMinute)
+        })
         let nextCycle = calendar.date(byAdding: .minute, value: 30, to: snapshot.cycleStart) ?? snapshot.phaseEnd
         let taskRecords: [[String: Any]] = tasks.map { task in
             var value: [String: Any] = [
@@ -330,6 +355,7 @@ actor VaultWorker {
             "selected_date": dayKey(date),
             "current_task_id": currentTask.map { $0.id.uuidString.lowercased() } ?? NSNull(),
             "tasks": taskRecords,
+            "unscheduled": taskRecords.filter { ($0["start"] as? Int) == -1 }.compactMap { $0["title"] as? String },
         ]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
         return String(data: data, encoding: .utf8) ?? "{}"
@@ -370,7 +396,8 @@ actor VaultWorker {
             if let existing {
                 return AITaskWriteResult(
                     entry: AgendaTask(date: date, task: existing),
-                    interpretation: "Interpreted \(quoted(requestedTitle)) as the protected Rest block \(MarkdownPlanCodec.time(restWindow.startMinute))–\(MarkdownPlanCodec.time(restWindow.endMinute)) and kept it in place."
+                    interpretation: "Interpreted \(quoted(requestedTitle)) as the protected Rest block \(MarkdownPlanCodec.time(restWindow.startMinute))–\(MarkdownPlanCodec.time(restWindow.endMinute)) and kept it in place.",
+                    unscheduledTitles: try unscheduledTitles(on: date)
                 )
             }
             throw RefocusStoreError.corrupt("The requested Rest block is not available for this date; add or restore the protected Rest block first.")
@@ -453,8 +480,15 @@ actor VaultWorker {
                 }
             }
             merged.quickCapture = true
-            try validateAIWrite(merged, on: date, replacing: match.id)
-            try store.replaceAITask(id: match.id, with: merged, on: date)
+            let authoritativeSlot = requestedMinute != nil && minute == requestedMinute
+            try validateAIWrite(
+                merged, on: date, replacing: match.id,
+                displacingOverlaps: authoritativeSlot
+            )
+            let displaced = try store.replaceAITask(
+                id: match.id, with: merged, on: date,
+                displacingOverlaps: authoritativeSlot
+            )
             scheduleBackgroundWork(days: [date])
             guard let verified = try store.taskEntry(id: match.id), verified.task == merged else {
                 throw RefocusStoreError.corrupt("matched task failed durable read-back verification")
@@ -462,7 +496,9 @@ actor VaultWorker {
             let mapping = "Interpreted \(quoted(requestedTitle)) as existing task \(quoted(originalTitle)) and merged the requested details into it."
             return AITaskWriteResult(
                 entry: verified,
-                interpretation: [mapping, interpretation].compactMap { $0 }.joined(separator: " ")
+                interpretation: [mapping, interpretation].compactMap { $0 }.joined(separator: " "),
+                displacementReceipts: displaced,
+                unscheduledTitles: try unscheduledTitles(on: date)
             )
         }
 
@@ -488,13 +524,23 @@ actor VaultWorker {
             quickCapture: true,
             timeAssigned: minute != nil
         )
-        try validateAIWrite(task, on: date, replacing: nil)
-        try store.upsertAIQuickTask(task, on: date)
+        let authoritativeSlot = requestedMinute != nil && minute == requestedMinute
+        try validateAIWrite(
+            task, on: date, replacing: nil,
+            displacingOverlaps: authoritativeSlot
+        )
+        let displaced = try store.upsertAIQuickTask(
+            task, on: date, displacingOverlaps: authoritativeSlot
+        )
         scheduleBackgroundWork(days: [date])
         guard let verified = try store.taskEntry(id: task.id) else {
             throw RefocusStoreError.corrupt("created task failed durable read-back verification")
         }
-        return AITaskWriteResult(entry: verified, interpretation: interpretation)
+        return AITaskWriteResult(
+            entry: verified, interpretation: interpretation,
+            displacementReceipts: displaced,
+            unscheduledTitles: try unscheduledTitles(on: date)
+        )
     }
 
     private func quoted(_ value: String) -> String { "\"\(value)\"" }
@@ -507,7 +553,7 @@ actor VaultWorker {
 
     private func explicitlyRequestsUntimed(_ prompt: String) -> Bool {
         let lower = prompt.lowercased()
-        return ["untimed", "without a time", "no time", "agenda only", "leave it in agenda"]
+        return ["untimed", "without a time", "no time", "agenda only", "to agenda", "in agenda", "leave it in agenda"]
             .contains(where: lower.contains)
     }
 
@@ -515,12 +561,13 @@ actor VaultWorker {
         let lower = prompt.lowercased()
         let denialPhrases = [
             "do not override", "don't override", "without overriding", "no override",
+            "do not overwrite", "don't overwrite", "without overwriting",
             "do not bypass", "don't bypass", "without bypassing"
         ]
         guard !denialPhrases.contains(where: lower.contains) else { return false }
-        let overrideMarkers = ["override", "overrule", "bypass", "ignore", "force"]
+        let overrideMarkers = ["override", "overwrit", "overrule", "bypass", "ignore", "force"]
         guard overrideMarkers.contains(where: lower.contains) else { return false }
-        let protectedScope = ["rest", "sleep", "protected", "anything", "window", "period"]
+        let protectedScope = ["rest", "sleep", "protected", "anything", "everything", "window", "period"]
         return protectedScope.contains(where: lower.contains)
     }
 
@@ -528,6 +575,12 @@ actor VaultWorker {
         tasks.filter { $0.hasScheduledTime && !$0.isRoutineBlock }
             .map(\.endMinute)
             .max()
+    }
+
+    private func unscheduledTitles(on date: Date) throws -> [String] {
+        try store.tasks(on: date)
+            .filter { !$0.hasScheduledTime }
+            .map(\.title)
     }
 
     private func automaticStartTime(cycles: Int, after anchor: Int?, existing: [PlanTask], on date: Date) -> Int? {
@@ -651,6 +704,7 @@ actor VaultWorker {
         if let description = arguments.description {
             entry.task.description = description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : description
         }
+        let suppliedScheduledTime = arguments.startTime?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         if let startTime = arguments.startTime {
             if startTime.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 entry.task.timeAssigned = false
@@ -673,7 +727,8 @@ actor VaultWorker {
             entry.task.coreTasks = subtasks.map { CoreTask(title: $0.title, isComplete: $0.completed) }
         }
         let allowOverride = explicitlyRequestsOverride(prompt)
-        if allowOverride { entry.task.routineOverride = true }
+        if suppliedScheduledTime { entry.task.routineOverride = allowOverride }
+        else if allowOverride { entry.task.routineOverride = true }
         var interpretation: String?
         if !allowOverride && !entry.task.routineOverride {
             interpretation = try moveTaskOutOfProtectedRest(
@@ -682,9 +737,16 @@ actor VaultWorker {
                 on: entry.date
             )
         }
+        let authoritativeSlot = suppliedScheduledTime && interpretation == nil
         entry.task.quickCapture = true
-        try validateAIWrite(entry.task, on: entry.date, replacing: id)
-        try store.replaceAITask(id: id, with: entry.task, on: entry.date)
+        try validateAIWrite(
+            entry.task, on: entry.date, replacing: id,
+            displacingOverlaps: authoritativeSlot
+        )
+        let displaced = try store.replaceAITask(
+            id: id, with: entry.task, on: entry.date,
+            displacingOverlaps: authoritativeSlot
+        )
         scheduleBackgroundWork(days: [entry.date])
         guard let verified = try store.taskEntry(id: id), verified.task == entry.task,
               calendar.isDate(verified.date, inSameDayAs: entry.date) else {
@@ -693,7 +755,9 @@ actor VaultWorker {
         return AITaskWriteResult(
             entry: verified,
             interpretation: interpretation,
-            affectedDates: [sourceDate, verified.date]
+            affectedDates: [sourceDate, verified.date],
+            displacementReceipts: displaced,
+            unscheduledTitles: try unscheduledTitles(on: verified.date)
         )
     }
 
@@ -703,6 +767,7 @@ actor VaultWorker {
         }
         let sourceDate = entry.date
         entry.date = try parseAIDate(arguments.date)
+        let suppliedScheduledTime = arguments.startTime?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         if let startTime = arguments.startTime {
             if startTime.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 entry.task.timeAssigned = false
@@ -713,7 +778,8 @@ actor VaultWorker {
             }
         }
         let allowOverride = explicitlyRequestsOverride(prompt)
-        if allowOverride { entry.task.routineOverride = true }
+        if suppliedScheduledTime { entry.task.routineOverride = allowOverride }
+        else if allowOverride { entry.task.routineOverride = true }
         var interpretation: String?
         if !allowOverride && !entry.task.routineOverride {
             interpretation = try moveTaskOutOfProtectedRest(
@@ -722,8 +788,15 @@ actor VaultWorker {
                 on: entry.date
             )
         }
-        try validateAIWrite(entry.task, on: entry.date, replacing: id)
-        try store.replaceAITask(id: id, with: entry.task, on: entry.date)
+        let authoritativeSlot = suppliedScheduledTime && interpretation == nil
+        try validateAIWrite(
+            entry.task, on: entry.date, replacing: id,
+            displacingOverlaps: authoritativeSlot
+        )
+        let displaced = try store.replaceAITask(
+            id: id, with: entry.task, on: entry.date,
+            displacingOverlaps: authoritativeSlot
+        )
         scheduleBackgroundWork(days: [entry.date])
         guard let verified = try store.taskEntry(id: id),
               verified.task.startMinute == entry.task.startMinute,
@@ -734,7 +807,9 @@ actor VaultWorker {
         return AITaskWriteResult(
             entry: verified,
             interpretation: interpretation,
-            affectedDates: [sourceDate, verified.date]
+            affectedDates: [sourceDate, verified.date],
+            displacementReceipts: displaced,
+            unscheduledTitles: try unscheduledTitles(on: verified.date)
         )
     }
 
@@ -765,7 +840,10 @@ actor VaultWorker {
         return existing.date
     }
 
-    private func validateAIWrite(_ task: PlanTask, on date: Date, replacing taskID: UUID?) throws {
+    private func validateAIWrite(
+        _ task: PlanTask, on date: Date, replacing taskID: UUID?,
+        displacingOverlaps: Bool = false
+    ) throws {
         if task.isRoutineBlock && task.predefinedKind == .rest &&
             !FixedPlanTasks.isAllowedScheduledRest(start: task.startMinute, end: task.endMinute) {
             throw RefocusStoreError.corrupt("Protected Rest blocks must remain at 05:00–06:00, 11:00–12:00, 17:00–18:00, or 23:00–00:00.")
@@ -784,6 +862,10 @@ actor VaultWorker {
         ).filter { $0.severity == .error }.map(\.description)
         let candidate = existing.filter { current in
             if current.id == taskID { return false }
+            if displacingOverlaps && task.hasScheduledTime && current.hasScheduledTime
+                && current.startMinute < task.endMinute && current.endMinute > task.startMinute {
+                return false
+            }
             if task.hasScheduledTime && current.isRoutineBlock
                 && current.predefinedKind != .rest
                 && current.startMinute < task.endMinute && current.endMinute > task.startMinute {

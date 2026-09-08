@@ -486,30 +486,48 @@ public final class RefocusStore: @unchecked Sendable {
         return AgendaTask(date: date, task: try decoder.decode(PlanTask.self, from: encoded))
     }
 
-    /// Creates or replaces a quick task from the native AI surface. Overlap
-    /// only removes editable non-Rest predefined routine rows; the four Rest
-    /// windows are protected and cannot be silently replaced.
-    public func upsertAIQuickTask(_ task: PlanTask, on date: Date) throws {
+    /// Creates or replaces a quick task from the native AI surface. When the
+    /// user supplied an authoritative slot, user/fixed work in that slot is
+    /// retained as untimed work and an overlapping Rest row is overwritten for
+    /// this date. The returned strings are durable displacement receipts for
+    /// the assistant to report.
+    @discardableResult
+    public func upsertAIQuickTask(
+        _ task: PlanTask, on date: Date, displacingOverlaps: Bool = false
+    ) throws -> [String] {
+        var displacementReceipts: [String] = []
         try transaction {
             try ensureDayPlan(date: date)
             if task.hasScheduledTime {
-                for existing in try tasks(on: date) where existing.id != task.id
-                    && existing.isRoutineBlock
-                    && existing.predefinedKind != .rest
-                    && existing.startMinute < task.endMinute
-                    && existing.endMinute > task.startMinute {
-                    try tombstoneTask(id: existing.id.uuidString.lowercased())
+                if displacingOverlaps {
+                    displacementReceipts = try displaceAIOverlaps(
+                        with: task, on: date, excluding: task.id
+                    )
+                } else {
+                    for existing in try tasks(on: date) where existing.id != task.id
+                        && existing.isRoutineBlock
+                        && existing.predefinedKind != .rest
+                        && existing.startMinute < task.endMinute
+                        && existing.endMinute > task.startMinute {
+                        try tombstoneTask(id: existing.id.uuidString.lowercased())
+                    }
                 }
             }
             try upsertTask(task, date: date)
             let profile = RoutineProfileResolver(calendar: calendar).profile(for: date).kind
             try refreshPlanMetadata(date: date, tasks: try tasks(on: date), profile: profile, segment: .morning)
         }
+        return displacementReceipts
     }
 
     /// Replaces any editable field of an existing task and optionally moves it
     /// to another day while preserving its stable task ID.
-    public func replaceAITask(id: UUID, with task: PlanTask, on date: Date) throws {
+    @discardableResult
+    public func replaceAITask(
+        id: UUID, with task: PlanTask, on date: Date,
+        displacingOverlaps: Bool = false
+    ) throws -> [String] {
+        var displacementReceipts: [String] = []
         try transaction {
             guard let existing = try taskEntry(id: id) else {
                 throw RefocusStoreError.corrupt("task to update was not found")
@@ -517,12 +535,18 @@ public final class RefocusStore: @unchecked Sendable {
             try ensureDayPlan(date: existing.date)
             try ensureDayPlan(date: date)
             if task.hasScheduledTime {
-                for candidate in try tasks(on: date) where candidate.id != id
-                    && candidate.isRoutineBlock
-                    && candidate.predefinedKind != .rest
-                    && candidate.startMinute < task.endMinute
-                    && candidate.endMinute > task.startMinute {
-                    try tombstoneTask(id: candidate.id.uuidString.lowercased())
+                if displacingOverlaps {
+                    displacementReceipts = try displaceAIOverlaps(
+                        with: task, on: date, excluding: id
+                    )
+                } else {
+                    for candidate in try tasks(on: date) where candidate.id != id
+                        && candidate.isRoutineBlock
+                        && candidate.predefinedKind != .rest
+                        && candidate.startMinute < task.endMinute
+                        && candidate.endMinute > task.startMinute {
+                        try tombstoneTask(id: candidate.id.uuidString.lowercased())
+                    }
                 }
             }
             try upsertTask(task, date: date)
@@ -538,6 +562,36 @@ public final class RefocusStore: @unchecked Sendable {
                 )
             }
         }
+        return displacementReceipts
+    }
+
+    private func displaceAIOverlaps(
+        with task: PlanTask, on date: Date, excluding excludedID: UUID
+    ) throws -> [String] {
+        guard task.hasScheduledTime else { return [] }
+        let collisions = try tasks(on: date).filter {
+            $0.id != excludedID && $0.hasScheduledTime
+                && $0.startMinute < task.endMinute && $0.endMinute > task.startMinute
+        }
+        var receipts: [String] = []
+        for collision in collisions {
+            let oldTime = "\(Self.time(collision.startMinute))–\(Self.time(collision.endMinute))"
+            if collision.isRoutineBlock && collision.predefinedKind == .rest {
+                try tombstoneTask(id: collision.id.uuidString.lowercased())
+                receipts.append("\(collision.title) (\(oldTime)) was overwritten")
+            } else {
+                var unscheduled = collision
+                unscheduled.startMinute = 0
+                unscheduled.timeAssigned = false
+                try upsertTask(unscheduled, date: date)
+                receipts.append("\(collision.title) (\(oldTime)) moved to Unscheduled")
+            }
+        }
+        return receipts
+    }
+
+    private static func time(_ minute: Int) -> String {
+        String(format: "%02d:%02d", minute / 60, minute % 60)
     }
 
     public func loadTemplates() throws -> [PlanTask] {

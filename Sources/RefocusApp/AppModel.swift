@@ -95,6 +95,8 @@ final class AppModel: ObservableObject {
     private var cloudSyncTicker: Task<Void, Never>?
     private var aiResponseTask: Task<Void, Never>?
     private var aiContextWasLoadedForRequest = false
+    private var aiRelevantDates: [Date] = []
+    private var aiDisplacementReceipts: [String] = []
     private var saveTask: Task<Void, Never>?
     private var breakTaskSaveTask: Task<Void, Never>?
     private var agendaSaveTask: Task<Void, Never>?
@@ -219,6 +221,8 @@ final class AppModel: ObservableObject {
         aiIsResponding = true
         aiStatus = "Thinking"
         aiContextWasLoadedForRequest = false
+        aiRelevantDates = [now]
+        aiDisplacementReceipts = []
 
         aiResponseTask?.cancel()
         aiResponseTask = Task { [weak self] in
@@ -241,6 +245,12 @@ final class AppModel: ObservableObject {
                     }
                 )
                 guard !Task.isCancelled else { return }
+                let unscheduled = (try? await worker.unscheduledSummary(on: self.aiRelevantDates)) ?? []
+                self.appendAIVerifiedScheduleFooter(
+                    messageID: assistantID,
+                    displacementReceipts: self.aiDisplacementReceipts,
+                    unscheduled: unscheduled
+                )
                 self.finishAIMessage(id: assistantID)
             } catch is CancellationError {
                 self.finishAIMessage(id: assistantID, status: "Stopped")
@@ -253,6 +263,12 @@ final class AppModel: ObservableObject {
                         self.aiMessages[index].text += "\n\n" + failureMessage
                     }
                 }
+                let unscheduled = (try? await worker.unscheduledSummary(on: self.aiRelevantDates)) ?? []
+                self.appendAIVerifiedScheduleFooter(
+                    messageID: assistantID,
+                    displacementReceipts: self.aiDisplacementReceipts,
+                    unscheduled: unscheduled
+                )
                 self.finishAIMessage(id: assistantID, status: "Failed")
             }
         }
@@ -307,6 +323,7 @@ final class AppModel: ObservableObject {
             let object = (try? JSONSerialization.jsonObject(with: arguments) as? [String: Any]) ?? [:]
             let date = try aiDate(from: object["date"] as? String)
             let result = try await worker.loadAIContext(on: date)
+            rememberAIRelevantDates([date])
             aiContextWasLoadedForRequest = true
             return result
         case "create_task":
@@ -316,8 +333,9 @@ final class AppModel: ObservableObject {
                 decoder.decode(AICreateTaskArguments.self, from: arguments),
                 prompt: userPrompt
             )
+            rememberAIResult(result)
             try await refreshAITaskSurfaces(on: result.affectedDates, using: worker)
-            return aiTaskResult(result.entry, action: result.interpretation == nil ? "created" : "created_or_merged", interpretation: result.interpretation)
+            return aiTaskResult(result, action: result.interpretation == nil ? "created" : "created_or_merged")
         case "update_task":
             guard aiContextWasLoadedForRequest else { return aiMissingFreshContextResult() }
             try await refreshAIContextBeforeMutation(using: worker)
@@ -325,8 +343,9 @@ final class AppModel: ObservableObject {
                 decoder.decode(AIUpdateTaskArguments.self, from: arguments),
                 prompt: userPrompt
             )
+            rememberAIResult(result)
             try await refreshAITaskSurfaces(on: result.affectedDates, using: worker)
-            return aiTaskResult(result.entry, action: "updated", interpretation: result.interpretation)
+            return aiTaskResult(result, action: "updated")
         case "append_task_description":
             guard aiContextWasLoadedForRequest else { return aiMissingFreshContextResult() }
             try await refreshAIContextBeforeMutation(using: worker)
@@ -335,8 +354,10 @@ final class AppModel: ObservableObject {
                 throw OpenAIChatError.api("append_task_description requires task_id and text")
             }
             let entry = try await worker.appendAITaskDescription(taskID: taskID, text: text)
+            let result = AITaskWriteResult(entry: entry)
+            rememberAIResult(result)
             try await refreshAITaskSurfaces(on: [entry.date], using: worker)
-            return aiTaskResult(entry, action: "description_appended")
+            return aiTaskResult(result, action: "description_appended")
         case "reschedule_task":
             guard aiContextWasLoadedForRequest else { return aiMissingFreshContextResult() }
             try await refreshAIContextBeforeMutation(using: worker)
@@ -344,8 +365,9 @@ final class AppModel: ObservableObject {
                 decoder.decode(AIRescheduleTaskArguments.self, from: arguments),
                 prompt: userPrompt
             )
+            rememberAIResult(result)
             try await refreshAITaskSurfaces(on: result.affectedDates, using: worker)
-            return aiTaskResult(result.entry, action: "rescheduled", interpretation: result.interpretation)
+            return aiTaskResult(result, action: "rescheduled")
         case "delete_task":
             guard aiContextWasLoadedForRequest else { return aiMissingFreshContextResult() }
             let lower = userPrompt.lowercased()
@@ -358,6 +380,7 @@ final class AppModel: ObservableObject {
                 throw OpenAIChatError.api("delete_task requires a valid task_id")
             }
             let deletedDate = try await worker.deleteAITaskAndVerify(id)
+            rememberAIRelevantDates([deletedDate])
             try await refreshAITaskSurfaces(on: [deletedDate], using: worker)
             return aiJSON([
                 "ok": true, "verified": true, "action": "deleted",
@@ -401,7 +424,8 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func aiTaskResult(_ entry: AgendaTask, action: String, interpretation: String? = nil) -> String {
+    private func aiTaskResult(_ write: AITaskWriteResult, action: String) -> String {
+        let entry = write.entry
         let date = MarkdownPlanCodec.isoDate(entry.date, calendar: WallClock.dhakaCalendar())
         let time = entry.task.hasScheduledTime ? MarkdownPlanCodec.time(entry.task.startMinute) : "untimed"
         var result: [String: Any] = [
@@ -409,8 +433,39 @@ final class AppModel: ObservableObject {
             "task_id": entry.id.uuidString.lowercased(), "title": entry.task.title,
             "date": date, "time": time, "cycles": entry.task.cycles,
         ]
-        if let interpretation { result["interpretation"] = interpretation }
+        if let interpretation = write.interpretation { result["interpretation"] = interpretation }
+        if !write.displacementReceipts.isEmpty { result["displaced"] = write.displacementReceipts }
+        if !write.unscheduledTitles.isEmpty { result["unscheduled"] = write.unscheduledTitles }
         return aiJSON(result)
+    }
+
+    private func rememberAIResult(_ result: AITaskWriteResult) {
+        rememberAIRelevantDates(result.affectedDates)
+        for receipt in result.displacementReceipts where !aiDisplacementReceipts.contains(receipt) {
+            aiDisplacementReceipts.append(receipt)
+        }
+    }
+
+    private func rememberAIRelevantDates(_ dates: [Date]) {
+        let calendar = WallClock.dhakaCalendar()
+        for date in dates where !aiRelevantDates.contains(where: { calendar.isDate($0, inSameDayAs: date) }) {
+            aiRelevantDates.append(date)
+        }
+    }
+
+    private func appendAIVerifiedScheduleFooter(
+        messageID: UUID, displacementReceipts: [String], unscheduled: [String]
+    ) {
+        guard !displacementReceipts.isEmpty || !unscheduled.isEmpty,
+              let index = aiMessages.firstIndex(where: { $0.id == messageID }) else { return }
+        var sections: [String] = []
+        if !displacementReceipts.isEmpty {
+            sections.append("Moved by your requested times:\n" + displacementReceipts.map { "• \($0)" }.joined(separator: "\n"))
+        }
+        if !unscheduled.isEmpty {
+            sections.append("Unscheduled — please assign times:\n" + unscheduled.map { "• \($0)" }.joined(separator: "\n"))
+        }
+        aiMessages[index].text += (aiMessages[index].text.isEmpty ? "" : "\n\n") + sections.joined(separator: "\n\n")
     }
 
     private func aiMissingFreshContextResult() -> String {
@@ -493,7 +548,7 @@ final class AppModel: ObservableObject {
         Persistent policy (the only work-preference document):
         \(context.preferences)
 
-        The final JSON below is fresh Asia/Dhaka SQLite context and overrides older chat. Use its current/next cycle and task IDs. Call get_refocus_context only for another date, Agenda, or missing Daily fields. Never report a write unless its tool returns ok=true and verified=true. Keep the answer brief; do not expose private chain-of-thought.
+        The final JSON below is fresh Asia/Dhaka SQLite context and overrides older chat. Use its current/next cycle and task IDs. Exact user-supplied times are authoritative: tools move conflicting work to Unscheduled, and an explicit override/overwrite may replace Rest. Call get_refocus_context only for another date, Agenda, or missing Daily fields. Never report a write unless its tool returns ok=true and verified=true. The app appends verified moved/Unscheduled receipts, so do not duplicate them. Keep the answer brief; do not expose private chain-of-thought.
 
         Live context:
         \(context.liveContext)
@@ -502,7 +557,7 @@ final class AppModel: ObservableObject {
 
     var currentTask: PlanTask? {
         let minute = clock.minuteOfDay(for: snapshot.cycleStart)
-        return executionTasks.first(where: { $0.contains(minuteOfDay: minute) })
+        return executionTasks.first(where: { $0.hasScheduledTime && $0.contains(minuteOfDay: minute) })
     }
 
     var snapshot: ClockSnapshot { clockDisplay.snapshot }
@@ -529,7 +584,10 @@ final class AppModel: ObservableObject {
     var executionTask: PlanTask? {
         if let currentTask { return currentTask }
         guard isArmed else { return nil }
-        return executionTasks.first(where: { !$0.isComplete && $0.priority.caseInsensitiveCompare("Do/Die") == .orderedSame })
+        return executionTasks.first(where: {
+            $0.hasScheduledTime && !$0.isComplete
+                && $0.priority.caseInsensitiveCompare("Do/Die") == .orderedSame
+        })
     }
 
     var currentTaskTitle: String {
@@ -544,17 +602,7 @@ final class AppModel: ObservableObject {
                 && FixedPlanTasks.isAllowedScheduledRest(start: $0.startMinute, end: $0.endMinute)
                 && $0.contains(minuteOfDay: minute)
         }) { return scheduled }
-        guard let window = FixedPlanTasks.defaultRestWindows.first(where: {
-            minute >= $0.startMinute && minute < $0.endMinute
-        }) else { return nil }
-        // Keep a defensive virtual guard for legacy or partially migrated
-        // databases. Normal dates materialize all four Rest rows through
-        // RefocusStore.ensurePredefinedRoutineBlocks(on:).
-        return PlanTask(
-            title: "Rest", startMinute: window.startMinute,
-            cycles: max(1, (window.endMinute - window.startMinute) / 30),
-            routineBlock: true, predefinedKind: .rest
-        )
+        return nil
     }
 
     var countdownText: String {

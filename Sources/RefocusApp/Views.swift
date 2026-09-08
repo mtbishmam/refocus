@@ -928,6 +928,22 @@ private func isMidnightTask(_ task: PlanTask) -> Bool {
     task.hasScheduledTime && task.startMinute < PlanningSegment.morning.startMinute
 }
 
+private struct UnscheduledBlockHeader: View {
+    let taskCount: Int
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Unscheduled").font(.headline)
+            Text("No time assigned · \(taskCount) \(taskCount == 1 ? "task" : "tasks")")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 4)
+        .padding(.top, 5)
+    }
+}
+
 private struct MidnightBlockHeader: View {
     let taskCount: Int
     var addTask: (() -> Void)?
@@ -1088,6 +1104,27 @@ struct PlanEditorView: View {
                         }
                     } else {
                         LazyVStack(spacing: 12) {
+                            let unscheduledTasks = visibleTasks.filter { !$0.hasScheduledTime }
+                            if !unscheduledTasks.isEmpty {
+                                UnscheduledBlockHeader(taskCount: unscheduledTasks.count)
+                                ForEach(unscheduledTasks) { task in
+                                    TaskEditorRow(task: taskBinding(for: task), cyclesChanged: { oldCycles in
+                                        model.taskCyclesChanged(task.id, previousCycles: oldCycles)
+                                    }, delete: {
+                                        model.removeTask(id: task.id)
+                                    }, addSubtask: {
+                                        model.addSubtask(to: task.id)
+                                    }, removeSubtask: { subtaskID in
+                                        model.removeSubtask(taskID: task.id, subtaskID: subtaskID)
+                                    }, saveTemplate: {
+                                        model.saveTaskAsTemplate(task)
+                                    })
+                                    .id(task.id)
+                                    .padding(.horizontal, 16)
+                                    .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 14))
+                                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.09)))
+                                }
+                            }
                             let midnightTasks = visibleTasks.filter(isMidnightTask)
                             if !midnightTasks.isEmpty {
                                 MidnightBlockHeader(taskCount: midnightTasks.count) {
@@ -1116,7 +1153,7 @@ struct PlanEditorView: View {
                                 }
                             }
                             ForEach(PlanningSegment.allCases, id: \.self) { segment in
-                                let segmentTasks = visibleTasks.filter { !isMidnightTask($0) && planningSegment(for: $0) == segment }
+                                let segmentTasks = visibleTasks.filter { $0.hasScheduledTime && !isMidnightTask($0) && planningSegment(for: $0) == segment }
                                 PlanningBlockHeader(segment: segment, taskCount: segmentTasks.count) {
                                     model.addTask(in: segment)
                                 }
@@ -1238,6 +1275,24 @@ struct TomorrowPlanView: View {
                     let visibleTasks = model.tomorrowTasks.filter {
                         taskVisible($0, showUser: showUserTasks, showPredefined: showPredefinedBlocks, showFixed: showFixedBlocks)
                     }
+                    let unscheduledTasks = visibleTasks.filter { !$0.hasScheduledTime }
+                    if !unscheduledTasks.isEmpty {
+                        UnscheduledBlockHeader(taskCount: unscheduledTasks.count)
+                        ForEach(unscheduledTasks) { task in
+                            TaskEditorRow(
+                                task: taskBinding(for: task),
+                                cyclesChanged: { oldCycles in model.taskCyclesChanged(task.id, previousCycles: oldCycles, tomorrow: true) },
+                                delete: { model.removeTomorrowTask(id: task.id) },
+                                addSubtask: { model.addTomorrowSubtask(to: task.id) },
+                                removeSubtask: { model.removeTomorrowSubtask(taskID: task.id, subtaskID: $0) },
+                                saveTemplate: { model.saveTaskAsTemplate(task) }
+                            )
+                            .id(task.id)
+                            .padding(.horizontal, 16)
+                            .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 14))
+                            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.09)))
+                        }
+                    }
                     let midnightTasks = visibleTasks.filter(isMidnightTask)
                     if !midnightTasks.isEmpty {
                         MidnightBlockHeader(taskCount: midnightTasks.count) {
@@ -1263,7 +1318,7 @@ struct TomorrowPlanView: View {
                         }
                     }
                     ForEach(PlanningSegment.preplannedCases, id: \.self) { segment in
-                        let segmentTasks = visibleTasks.filter { !isMidnightTask($0) && planningSegment(for: $0) == segment }
+                        let segmentTasks = visibleTasks.filter { $0.hasScheduledTime && !isMidnightTask($0) && planningSegment(for: $0) == segment }
                         PlanningBlockHeader(segment: segment, taskCount: segmentTasks.count) {
                             model.addTomorrowTask(in: segment)
                         }
@@ -1551,6 +1606,13 @@ private struct SavedPlanView: View {
                         model.hideCompleted = false
                     }
                 } else {
+                    let unscheduledTasks = visibleTasks.filter { !$0.hasScheduledTime }
+                    if !unscheduledTasks.isEmpty {
+                        UnscheduledBlockHeader(taskCount: unscheduledTasks.count)
+                        ForEach(unscheduledTasks) { task in
+                            SavedTaskCard(task: task, isCurrent: false)
+                        }
+                    }
                     let midnightTasks = visibleTasks.filter(isMidnightTask)
                     if !midnightTasks.isEmpty {
                         MidnightBlockHeader(taskCount: midnightTasks.count)
@@ -1563,7 +1625,7 @@ private struct SavedPlanView: View {
                         }
                     }
                     ForEach(PlanningSegment.allCases, id: \.self) { segment in
-                        let segmentTasks = visibleTasks.filter { !isMidnightTask($0) && planningSegment(for: $0) == segment }
+                        let segmentTasks = visibleTasks.filter { $0.hasScheduledTime && !isMidnightTask($0) && planningSegment(for: $0) == segment }
                         PlanningBlockHeader(segment: segment, taskCount: segmentTasks.count)
                         ForEach(Array(segmentTasks.enumerated()), id: \.element.id) { index, task in
                             TimelineInsertionControl { model.insertTask(before: task.id) }
@@ -3116,6 +3178,23 @@ private struct TodayPlanPanel: View {
                     Text("Work is locked. Complete and save a valid \(model.requiredCycleMinimum)-cycle Today plan first.")
                         .foregroundStyle(.secondary)
                 } else if isEditing {
+                    let unscheduledTasks = model.tasks.filter { !$0.hasScheduledTime }
+                    if !unscheduledTasks.isEmpty {
+                        UnscheduledBlockHeader(taskCount: unscheduledTasks.count)
+                        ForEach(unscheduledTasks) { task in
+                            TaskEditorRow(
+                                task: taskBinding(for: task),
+                                cyclesChanged: { oldCycles in model.taskCyclesChanged(task.id, previousCycles: oldCycles) },
+                                delete: { model.removeTask(id: task.id) },
+                                addSubtask: { model.addSubtask(to: task.id) },
+                                removeSubtask: { model.removeSubtask(taskID: task.id, subtaskID: $0) },
+                                saveTemplate: { model.saveTaskAsTemplate(task) }
+                            )
+                            .id(task.id)
+                            .padding(.horizontal, 14)
+                            .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 12))
+                        }
+                    }
                     let midnightTasks = model.tasks.filter(isMidnightTask)
                     if !midnightTasks.isEmpty {
                         MidnightBlockHeader(taskCount: midnightTasks.count) {
@@ -3136,7 +3215,7 @@ private struct TodayPlanPanel: View {
                         }
                     }
                     ForEach(PlanningSegment.allCases, id: \.self) { segment in
-                        let segmentTasks = model.tasks.filter { !isMidnightTask($0) && planningSegment(for: $0) == segment }
+                        let segmentTasks = model.tasks.filter { $0.hasScheduledTime && !isMidnightTask($0) && planningSegment(for: $0) == segment }
                         PlanningBlockHeader(segment: segment, taskCount: segmentTasks.count) {
                             model.addTask(in: segment)
                         }
@@ -3156,6 +3235,19 @@ private struct TodayPlanPanel: View {
                     }
                 } else {
                     let visibleTasks = model.executionTasks.filter { !model.hideCompleted || !$0.isComplete }
+                    let unscheduledTasks = visibleTasks.filter { !$0.hasScheduledTime }
+                    if !unscheduledTasks.isEmpty {
+                        UnscheduledBlockHeader(taskCount: unscheduledTasks.count)
+                        ForEach(unscheduledTasks) { task in
+                            BreakTaskRow(
+                                task: breakTaskBinding(for: task),
+                                isExpanded: !model.collapsedTaskIDs.contains(task.id),
+                                isCurrent: false,
+                                toggleExpanded: { model.toggleCollapsed(task.id) },
+                                toggleComplete: { model.toggleTaskCompletion(task.id) }
+                            )
+                        }
+                    }
                     let midnightTasks = visibleTasks.filter(isMidnightTask)
                     if !midnightTasks.isEmpty {
                         MidnightBlockHeader(taskCount: midnightTasks.count)
@@ -3173,7 +3265,7 @@ private struct TodayPlanPanel: View {
                         }
                     }
                     ForEach(PlanningSegment.allCases, id: \.self) { segment in
-                        let segmentTasks = visibleTasks.filter { !isMidnightTask($0) && planningSegment(for: $0) == segment }
+                        let segmentTasks = visibleTasks.filter { $0.hasScheduledTime && !isMidnightTask($0) && planningSegment(for: $0) == segment }
                         PlanningBlockHeader(segment: segment, taskCount: segmentTasks.count)
                         ForEach(segmentTasks) { task in
                             let isCurrent = task.id == model.currentTask?.id
