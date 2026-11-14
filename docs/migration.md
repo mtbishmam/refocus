@@ -17,8 +17,7 @@ The inventory is written to
 The source Markdown is not deleted. `tasks.md`, old `journal/mon-D.md` files,
 `task-templates.md`, and `ego/non-negotiables.md` become preserved legacy input.
 After cutover, ReFocus writes only the clean output projection `tasks.md` and
-new machine-only `log/YYYY-MM-DD.md` files. Human journal writing, Daily summary, and approved day analysis remain in `journal/mon-D.md`. Quick notes are stored internally and synchronized
-instead of appending to `dump.md`.
+new machine-only `log/YYYY-MM-DD.md` files. Human journal writing, Daily summary, and approved day analysis remain in `journal/mon-D.md`. Quick notes commit to SQLite and a durable export queue, then append to the Obsidian `dump.md` selected in Settings. A security-scoped bookmark grants access to that file; `ReFocus/Internal/dump.md` is not its destination. Exports preserve existing text, survive restarts, and keep per-capture append receipts to prevent retry duplicates. Paired Macs still require the export lease; failures are shown without discarding the saved capture.
 
 If import fails, the completion marker is not committed and the next launch can
 retry. Import and each later command run in `BEGIN IMMEDIATE` transactions.

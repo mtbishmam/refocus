@@ -73,7 +73,9 @@ those edits take the ordinary Today transaction path so Modified snapshots,
 Diff, focus-session logs, and day analysis see the same value. Legacy
 What-did/Better/Faster check-ins decode into one Description without discarding
 history. Periodic five-minute screen breaks can be skipped no more than three
-times per Asia/Dhaka day. Screen-saver-level panels join all Spaces, reassert
+times in each six-hour Asia/Dhaka block (00:00–06:00, 06:00–12:00,
+12:00–18:00, and 18:00–00:00); the allowance resets at each boundary.
+Screen-saver-level panels join all Spaces, reassert
 themselves after active-Space changes, and remain above full-screen apps.
 
 Every native AI request carries fresh Asia/Dhaka wall-clock and cycle context.
@@ -103,6 +105,19 @@ session header. This keeps browser-to-Mac and Mac-to-browser edits in the same
 D1 partition.
 
 ## Projection ownership
+
+Control–Space Quick Note keeps typing local to a prewarmed AppKit text field.
+The one-second timer publishes through a separate `ClockDisplay`; the exact
+AppModel clock value is not published, so timer ticks do not redraw the full
+dashboard while the Quick Note field is active.
+Return commits the capture and its `capture_exports` row in one SQLite
+transaction. A separate exporter appends to the existing Obsidian `dump.md`
+selected in Settings, using a persistent security-scoped bookmark. It never
+falls back to an Internal dump file. Append intents and acknowledgements remain
+in SQLite, allowing crash recovery without inserting IDs into the document or
+collapsing intentional identical notes. File access and lease failures leave
+the queue intact and appear in Quick Note and Settings. Export retries run on
+startup, after capture, and during background sync; typing never waits on them.
 
 When cloud pairing is configured, a Mac requests a 90-second export lease and
 renews through normal background activity. A failed or denied lease suppresses

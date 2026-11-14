@@ -979,6 +979,61 @@ do {
         let dump = try String(contentsOf: temporary.appendingPathComponent("dump.md"), encoding: .utf8)
         try expect(dump == "same text\n\nsame text\n", "Two intentional identical captures were collapsed")
     }
+    try check("Quick-note exports survive restarts and preserve intentional duplicate notes") {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-dump-export-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let databaseURL = temporary.appendingPathComponent("refocus.sqlite3")
+        let dumpURL = temporary.appendingPathComponent("dump.md")
+        try "Existing Obsidian writing".write(to: dumpURL, atomically: true, encoding: .utf8)
+        let store = try RefocusStore(databaseURL: databaseURL, calendar: calendar)
+        try store.appendCapture("same note", id: "first")
+        try store.appendCapture("same note", id: "second")
+        let reopened = try RefocusStore(databaseURL: databaseURL, calendar: calendar)
+        let pending = try reopened.pendingCaptureExports()
+        try expect(pending.count == 2, "Pending exports were lost after reopening")
+        let exported = try QuickNoteExporter.exportPendingCaptures(from: reopened, to: dumpURL)
+        try expect(exported == 2, "Both intentional notes were not exported")
+        let output = try String(contentsOf: dumpURL, encoding: .utf8)
+        try expect(output == "Existing Obsidian writing\n\nsame note\n\nsame note\n", "The append changed existing writing or collapsed duplicate captures")
+        try store.appendCapture("same note", id: "first")
+        let retried = try store.pendingCaptureExports()
+        try expect(retried.isEmpty, "Retrying an exported capture queued it again")
+    }
+    try check("Quick-note export receipts recover crashes and retain failed exports") {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-dump-receipt-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let databaseURL = temporary.appendingPathComponent("refocus.sqlite3")
+        let dumpURL = temporary.appendingPathComponent("dump.md")
+        let store = try RefocusStore(databaseURL: databaseURL, calendar: calendar)
+        try store.appendCapture("crash note", id: "crash")
+        let suffix = Data("crash note\n".utf8)
+        try store.prepareCaptureExport(id: "crash", destination: dumpURL.path, byteOffset: 0, suffix: suffix)
+        try suffix.write(to: dumpURL)
+        let reopened = try RefocusStore(databaseURL: databaseURL, calendar: calendar)
+        _ = try QuickNoteExporter.exportPendingCaptures(from: reopened, to: dumpURL)
+        let crashOutput = try Data(contentsOf: dumpURL)
+        try expect(crashOutput == suffix, "A crash between append and acknowledgement duplicated a note")
+        try store.appendCapture("partial note", id: "partial")
+        let partialSuffix = Data("\npartial note\n".utf8)
+        try store.prepareCaptureExport(id: "partial", destination: dumpURL.path, byteOffset: Int64(suffix.count), suffix: partialSuffix)
+        try (suffix + partialSuffix.prefix(5)).write(to: dumpURL)
+        _ = try QuickNoteExporter.exportPendingCaptures(from: reopened, to: dumpURL)
+        let partialOutput = try Data(contentsOf: dumpURL)
+        try expect(partialOutput == suffix + partialSuffix, "Partial append was not resumed exactly")
+        try store.appendCapture("retry after failure", id: "failure")
+        var exportFailed = false
+        do {
+            _ = try QuickNoteExporter.exportPendingCaptures(from: store, to: temporary.appendingPathComponent("missing/dump.md"))
+        } catch { exportFailed = true }
+        try expect(exportFailed, "An unavailable destination appeared successful")
+        let failedPending = try store.pendingCaptureExports()
+        try expect(failedPending.count == 1, "A failed export lost its saved note")
+        _ = try QuickNoteExporter.exportPendingCaptures(from: store, to: dumpURL)
+        let finalPending = try store.pendingCaptureExports()
+        try expect(finalPending.isEmpty, "A failed export could not be retried")
+    }
     try check("Archived daily logs do not repopulate Agenda") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-agenda-archive-\(UUID().uuidString)")
         let logDirectory = temporary.appendingPathComponent("log", isDirectory: true)
@@ -1576,24 +1631,161 @@ do {
         )
         try expect(rows.first?.changes.contains(.metadata) == true, "Description change was absent from Diff")
     }
-    try check("Screen-break skips are durable and idempotent per day") {
+    try check("Screen-break skips are durable and idempotent per six-hour block") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-break-skips-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temporary) }
         let store = try RefocusStore(databaseURL: temporary.appendingPathComponent("refocus.sqlite3"), calendar: calendar)
-        let first = try date("2026-09-02 08:25:00")
-        let nextDay = try date("2026-09-03 08:25:00")
+        let first = try date("2026-09-02 05:25:00")
         let firstCount = try store.recordScreenBreakSkip(id: "08:00", at: first)
         let retryCount = try store.recordScreenBreakSkip(id: "08:00", at: first)
-        let secondCount = try store.recordScreenBreakSkip(id: "08:30", at: first)
-        _ = try store.recordScreenBreakSkip(id: "09:00", at: first)
-        let cappedCount = try store.recordScreenBreakSkip(id: "09:30", at: first)
-        let nextDayCount = try store.screenBreakSkipCount(on: nextDay)
+        _ = try store.recordScreenBreakSkip(id: "08:30", at: date("2026-09-02 05:40:00"))
+        _ = try store.recordScreenBreakSkip(id: "09:00", at: date("2026-09-02 05:55:00"))
+        let cappedCount = try store.recordScreenBreakSkip(id: "09:30", at: date("2026-09-02 05:59:00"))
+        let morning = try date("2026-09-02 06:00:00")
+        let noon = try date("2026-09-02 12:00:00")
+        let evening = try date("2026-09-02 18:00:00")
+        let midnight = try date("2026-09-03 00:00:00")
+        let morningCount = try store.screenBreakSkipCount(on: morning)
+        let noonCount = try store.screenBreakSkipCount(on: noon)
+        let eveningCount = try store.screenBreakSkipCount(on: evening)
+        let midnightCount = try store.screenBreakSkipCount(on: midnight)
         try expect(firstCount == 1, "First skip was not recorded")
         try expect(retryCount == 1, "Retry counted the same break twice")
-        try expect(secondCount == 2, "Second break was not counted")
-        try expect(cappedCount == 3, "The persistence layer allowed more than three daily skips")
-        try expect(nextDayCount == 0, "Skip count leaked into the next Dhaka day")
+        try expect(cappedCount == 3, "The persistence layer allowed more than three skips in one block")
+        try expect(morningCount == 0, "Skip count did not reset at 06:00")
+        try expect(noonCount == 0, "Skip count did not reset at 12:00")
+        try expect(eveningCount == 0, "Skip count did not reset at 18:00")
+        try expect(midnightCount == 0, "Skip count did not reset at midnight")
+        _ = try store.recordScreenBreakSkip(id: "morning-1", at: morning)
+        _ = try store.recordScreenBreakSkip(id: "morning-2", at: morning.addingTimeInterval(30 * 60))
+        _ = try store.recordScreenBreakSkip(id: "morning-3", at: morning.addingTimeInterval(60 * 60))
+        let morningCappedCount = try store.recordScreenBreakSkip(id: "morning-4", at: morning.addingTimeInterval(90 * 60))
+        try expect(morningCappedCount == 3, "Morning block did not enforce its independent three-skip cap")
+    }
+    try check("No-plan work releases are durable and scoped to six-hour blocks") {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-unplanned-work-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let databaseURL = temporary.appendingPathComponent("refocus.sqlite3")
+        let store = try RefocusStore(databaseURL: databaseURL, calendar: calendar)
+        let beforeMorning = try date("2026-09-14 05:59:00")
+        let morning = try date("2026-09-14 06:00:00")
+        let noon = try date("2026-09-14 12:00:00")
+        let afternoon = try date("2026-09-14 13:30:00")
+        let afternoonEnd = try date("2026-09-14 17:59:00")
+        let evening = try date("2026-09-14 18:00:00")
+
+        try expect(UnplannedWorkAllowance.blockIndex(at: beforeMorning, calendar: calendar) == 0, "00:00–06:00 block was misclassified")
+        try expect(UnplannedWorkAllowance.blockIndex(at: morning, calendar: calendar) == 1, "06:00 boundary was misclassified")
+        try expect(UnplannedWorkAllowance.blockIndex(at: noon, calendar: calendar) == 2, "12:00 boundary was misclassified")
+        try expect(UnplannedWorkAllowance.blockIndex(at: evening, calendar: calendar) == 3, "18:00 boundary was misclassified")
+
+        let first = try store.recordUnplannedWorkRelease(id: "first", at: afternoon)
+        let retry = try store.recordUnplannedWorkRelease(id: "first", at: afternoon)
+        let second = try store.recordUnplannedWorkRelease(id: "second", at: afternoon)
+        let denied = try store.recordUnplannedWorkRelease(id: "third", at: afternoon)
+        try expect(first.granted && first.used == 1, "First no-plan release was not granted")
+        try expect(retry.granted && retry.used == 1, "Retry counted the same release twice")
+        try expect(second.granted && second.used == 2, "Second no-plan release was not granted")
+        try expect(!denied.granted && denied.used == 2, "More than two releases were allowed in one block")
+        let afternoonEndCount = try store.unplannedWorkReleaseCount(at: afternoonEnd)
+        let eveningInitialCount = try store.unplannedWorkReleaseCount(at: evening)
+        try expect(afternoonEndCount == 2, "Usage did not cover the full six-hour block")
+        try expect(eveningInitialCount == 0, "Usage leaked across the 18:00 boundary")
+
+        let nextBlock = try store.recordUnplannedWorkRelease(id: "evening-first", at: evening)
+        try expect(nextBlock.granted && nextBlock.used == 1, "The next six-hour block did not receive a fresh allowance")
+        let reopened = try RefocusStore(databaseURL: databaseURL, calendar: calendar)
+        let reopenedAfternoonCount = try reopened.unplannedWorkReleaseCount(at: afternoon)
+        let reopenedEveningCount = try reopened.unplannedWorkReleaseCount(at: evening)
+        let activeReleaseEnd = try reopened.activeUnplannedWorkReleaseEnd(at: evening.addingTimeInterval(60))
+        try expect(reopenedAfternoonCount == 2, "No-plan release usage was not durable")
+        try expect(reopenedEveningCount == 1, "Next-block release usage was not durable")
+        try expect(activeReleaseEnd == evening.addingTimeInterval(UnplannedWorkAllowance.durationSeconds), "An active release did not survive reopening the store")
+
+        let breakStart = try date("2026-09-14 17:21:00")
+        let screenBreakStart = try date("2026-09-14 17:25:00")
+        try expect(
+            TemporaryBreakPolicy.end(startedAt: breakStart, minutes: 5, nextScreenBreakAt: screenBreakStart) == screenBreakStart,
+            "A temporary five-minute break did not yield to the next screen break"
+        )
+        try expect(
+            TemporaryBreakPolicy.end(startedAt: breakStart, minutes: 1, nextScreenBreakAt: screenBreakStart) == breakStart.addingTimeInterval(60),
+            "A one-minute break was incorrectly extended to the screen break"
+        )
+    }
+    try check("Reminders persist, become due on half-hour boundaries, and stop after answers") {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-reminders-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let databaseURL = temporary.appendingPathComponent("refocus.sqlite3")
+        let store = try RefocusStore(databaseURL: databaseURL, calendar: calendar)
+        let defaults = try store.reminders()
+        try expect(defaults.contains(where: { $0.id == "weight" && $0.startMinute == 330 && $0.kind == .weight }), "05:30 Weight reminder was not seeded")
+        try expect(defaults.contains(where: { $0.id == "hair-spray-1" && $0.startMinute == 330 }), "05:30 Hair Spray reminder was not seeded")
+        try expect(defaults.contains(where: { $0.id == "hair-spray-2" && $0.startMinute == 1050 }), "17:30 Hair Spray reminder was not seeded")
+        try expect(defaults.contains(where: { $0.kind == .cycleReview }), "Every-cycle review reminder was not seeded")
+
+        let beforeHair = try date("2026-09-19 05:29:00")
+        let hairTime = try date("2026-09-19 05:30:00")
+        let beforeHairDue = try store.dueReminders(at: beforeHair)
+        try expect(beforeHairDue.isEmpty, "Hair reminder appeared before its start time")
+        let dueHair = try store.dueReminders(at: hairTime)
+        try expect(dueHair.contains(where: { $0.reminder.id == "weight" }), "Weight reminder did not become due at 05:30")
+        guard let hair = dueHair.first(where: { $0.reminder.id == "hair-spray-1" }) else {
+            throw CheckFailure.failed("Hair reminder did not become due at 05:30")
+        }
+        _ = try store.answerReminder(hair, answer: "Yes", at: hairTime)
+        let afterHairAnswer = try store.dueReminders(at: hairTime)
+        try expect(afterHairAnswer.allSatisfy { $0.reminder.id != "hair-spray-1" }, "Answered reminder remained due")
+
+        let cycleStart = try date("2026-09-19 06:00:00")
+        let breakTime = try date("2026-09-19 06:25:00")
+        let cycleDue = try store.dueReminders(at: breakTime, cycleStart: cycleStart)
+        guard let cycle = cycleDue.first(where: { $0.reminder.kind == .cycleReview && $0.dueMinute == 360 }) else {
+            throw CheckFailure.failed("Cycle review occurrence was not created for the completed cycle")
+        }
+        _ = try store.answerReminder(cycle, answer: "Solved two problems", at: breakTime)
+        let afterCycleAnswer = try store.dueReminders(at: breakTime)
+        try expect(afterCycleAnswer.allSatisfy { $0.id != cycle.id }, "Answered cycle review remained due")
+
+        let afternoonCycleStart = try date("2026-09-19 15:00:00")
+        let afternoonCycleTime = try date("2026-09-19 15:25:00")
+        let oldBlockDue = try store.dueReminders(at: afternoonCycleTime, cycleStart: afternoonCycleStart)
+        try expect(oldBlockDue.contains(where: { $0.reminder.kind == .cycleReview && $0.dueMinute == 900 }), "Terra cycle review was not created")
+        let lunaCycleStart = try date("2026-09-19 18:00:00")
+        let lunaCycleTime = try date("2026-09-19 18:25:00")
+        let resetDue = try store.dueReminders(at: lunaCycleTime, cycleStart: lunaCycleStart)
+        try expect(resetDue.contains(where: { $0.reminder.kind == .cycleReview && $0.dueMinute == 1080 }), "Luna cycle review was not created")
+        try expect(resetDue.allSatisfy { $0.reminder.kind != .cycleReview || $0.dueMinute >= 1080 }, "A previous reset block's cycle review remained due")
+        let midnightDue = try store.dueReminders(at: try date("2026-09-19 05:25:00"))
+        try expect(midnightDue.allSatisfy { $0.reminder.kind != .cycleReview }, "Cycle review appeared in the pre-Sol block")
+        try expect(ReminderResetBlock.forMinute(360)?.title == "Sol Block", "Sol reset block was not defined")
+        try expect(ReminderResetBlock.forMinute(720)?.title == "Terra Block", "Terra reset block was not defined")
+        try expect(ReminderResetBlock.forMinute(1080)?.title == "Luna Block", "Luna reset block was not defined")
+
+        let custom = ReminderDefinition(
+            title: "Water", question: "Did you drink water?", startMinute: 421,
+            position: 10
+        )
+        try store.saveReminder(custom)
+        let savedReminders = try store.reminders()
+        try expect(savedReminders.contains(where: { $0.id == custom.id && $0.startMinute == 420 }), "Custom reminder did not persist on a half-hour boundary")
+        try store.deleteReminder(id: custom.id)
+        let reopened = try RefocusStore(databaseURL: databaseURL, calendar: calendar)
+        let reopenedReminders = try reopened.reminders()
+        try expect(reopenedReminders.allSatisfy { $0.id != custom.id }, "Deleted reminder reappeared after reopening")
+        let hairFields = try reopened.fieldDefinitions().filter { $0.id == "hair-spray-1" || $0.id == "hair-spray-2" }
+        try expect(hairFields.count == 2 && hairFields.allSatisfy { $0.kind == .triState }, "Hair Spray Daily checkboxes were not migrated")
+
+        let rest = PlanTask(
+            title: "Rest", startMinute: 330, cycles: 1,
+            routineBlock: true, predefinedKind: .rest, predefinedKey: "rest-05"
+        )
+        let planned = PlanTask(title: "Planned work", startMinute: 360, cycles: 2, mvp: "Finish work")
+        try expect(CycleReviewResolver.task(in: [rest, planned], at: 330) == nil, "Cycle review treated Rest as planned work")
+        try expect(CycleReviewResolver.task(in: [rest, planned], at: 360)?.id == planned.id, "Cycle review did not resolve the occupying planned task")
     }
     try check("AI preferences and prompt usage stay local and day-scoped") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-ai-local-\(UUID().uuidString)")
@@ -1601,7 +1793,7 @@ do {
         defer { try? FileManager.default.removeItem(at: temporary) }
         let store = try RefocusStore(databaseURL: temporary.appendingPathComponent("refocus.sqlite3"), calendar: calendar)
         let defaultPreferences = try store.aiPreferences()
-        try expect(defaultPreferences.contains("six-hour blocks"), "Default internal AI preferences were not seeded")
+        try expect(defaultPreferences.contains("Sol Block") && defaultPreferences.contains("Terra Block") && defaultPreferences.contains("Luna Block"), "Default internal AI preferences were not seeded")
         try store.saveAIPreferences("# How I Work\n\n- Keep it short.")
         let savedPreferences = try store.aiPreferences()
         try expect(savedPreferences.contains("Keep it short"), "Internal AI preferences did not persist")

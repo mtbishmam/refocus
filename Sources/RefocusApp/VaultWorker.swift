@@ -64,7 +64,7 @@ actor VaultWorker {
     private let cloud = CloudSyncClient()
     private var projectionTask: Task<Void, Never>?
     private var pendingProjectionDays: Set<String> = []
-    private var pendingCaptureLines: [String] = []
+    private var quickNoteExportTask: Task<QuickNoteExportStatus, Never>?
 
     init(vaultURL: URL) throws {
         self.vaultURL = vaultURL
@@ -913,8 +913,45 @@ actor VaultWorker {
         // network or the cross-device export lease. Projection and cloud work
         // remain lease-protected and flush in the background.
         try store.appendCapture(line, id: submissionID.uuidString.lowercased())
-        pendingCaptureLines.append(line)
         scheduleBackgroundWork(days: [])
+    }
+
+    func exportQuickNotes() async -> QuickNoteExportStatus {
+        if let task = quickNoteExportTask { return await task.value }
+        let task = Task { await self.performQuickNoteExport() }
+        quickNoteExportTask = task
+        defer { quickNoteExportTask = nil }
+        return await task.value
+    }
+
+    private func performQuickNoteExport() async -> QuickNoteExportStatus {
+        var destination: String?
+        var pending = 0
+        do {
+            pending = try store.pendingCaptureExports().count
+            guard let url = try QuickNoteDestination.resolve() else {
+                return QuickNoteExportStatus(destination: nil, pending: pending,
+                    issue: "Choose Obsidian dump.md in Settings → Quick Note. Saved notes are waiting in ReFocus.")
+            }
+            destination = url.path
+            guard pending > 0 else {
+                return QuickNoteExportStatus(destination: destination, pending: 0, issue: nil)
+            }
+            guard url.startAccessingSecurityScopedResource() else {
+                throw CocoaError(.fileWriteNoPermission)
+            }
+            defer { url.stopAccessingSecurityScopedResource() }
+            guard try await cloud.acquireExportLease(deviceID: projectionDeviceID()) else {
+                return QuickNoteExportStatus(destination: destination, pending: pending,
+                    issue: "Notes saved in ReFocus; Obsidian export is waiting for the other Mac's export lease.")
+            }
+            _ = try QuickNoteExporter.exportPendingCaptures(from: store, to: url)
+            return QuickNoteExportStatus(destination: destination,
+                pending: try store.pendingCaptureExports().count, issue: nil)
+        } catch {
+            return QuickNoteExportStatus(destination: destination, pending: pending,
+                issue: "Notes saved in ReFocus; dump.md export failed: \(error.localizedDescription)")
+        }
     }
 
     func loadTemplates() throws -> [PlanTask] { try store.loadTemplates() }
@@ -947,6 +984,96 @@ actor VaultWorker {
 
     func recordScreenBreakSkip(id: String, at date: Date) throws -> Int {
         try store.recordScreenBreakSkip(id: id, at: date)
+    }
+
+    func unplannedWorkReleaseCount(at date: Date) throws -> Int {
+        try store.unplannedWorkReleaseCount(at: date)
+    }
+
+    func activeUnplannedWorkReleaseEnd(at date: Date) throws -> Date? {
+        try store.activeUnplannedWorkReleaseEnd(at: date)
+    }
+
+    func recordUnplannedWorkRelease(
+        id: String, at date: Date
+    ) throws -> UnplannedWorkReleaseResult {
+        try store.recordUnplannedWorkRelease(id: id, at: date)
+    }
+
+    func loadReminders() throws -> [ReminderDefinition] {
+        try store.reminders()
+    }
+
+    func saveReminder(_ reminder: ReminderDefinition) throws -> [ReminderDefinition] {
+        try store.saveReminder(reminder)
+        return try store.reminders()
+    }
+
+    func deleteReminder(id: String) throws -> [ReminderDefinition] {
+        try store.deleteReminder(id: id)
+        return try store.reminders()
+    }
+
+    func dueReminders(at date: Date, cycleStart: Date? = nil) throws -> [ReminderOccurrence] {
+        try store.dueReminders(at: date, cycleStart: cycleStart)
+    }
+
+    func answerReminder(_ occurrence: ReminderOccurrence, answer: String, at date: Date) throws {
+        _ = try store.answerReminder(occurrence, answer: answer, at: date)
+    }
+
+    func completeCycleReviewTask(_ occurrence: ReminderOccurrence) throws -> AgendaTask {
+        let date = try parseAIDate(occurrence.day)
+        guard var task = CycleReviewResolver.task(in: try store.tasks(on: date), at: occurrence.dueMinute) else {
+            throw RefocusStoreError.corrupt("cycle review task was not found")
+        }
+        task.isComplete = true
+        try store.replaceAITask(id: task.id, with: task, on: date)
+        scheduleBackgroundWork(days: [date])
+        guard let verified = try store.taskEntry(id: task.id), verified.task.isComplete else {
+            throw RefocusStoreError.corrupt("cycle review completion failed durable read-back verification")
+        }
+        return verified
+    }
+
+    func recordCycleReview(_ occurrence: ReminderOccurrence, answer: String) throws -> AgendaTask {
+        let date = try parseAIDate(occurrence.day)
+        let clean = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { throw RefocusStoreError.corrupt("cycle review cannot be empty") }
+        let endMinute = min(1440, occurrence.dueMinute + 30)
+        let note = "\(MarkdownPlanCodec.time(occurrence.dueMinute))–\(MarkdownPlanCodec.time(endMinute)): \(clean)"
+        if let task = CycleReviewResolver.task(in: try store.tasks(on: date), at: occurrence.dueMinute) {
+            return try appendAITaskDescription(taskID: task.id.uuidString, text: note)
+        }
+
+        let words = clean.split(whereSeparator: \.isWhitespace)
+        let title = words.prefix(7).joined(separator: " ")
+        let safeTitle = String((title.isEmpty ? "Unplanned work" : title).prefix(64))
+        let task = PlanTask(
+            title: safeTitle,
+            description: note,
+            startMinute: occurrence.dueMinute,
+            cycles: 1,
+            priority: "Medium",
+            difficulty: "Moderate",
+            mvp: "Record completed work",
+            coreTasks: [
+                CoreTask(title: "State the work"),
+                CoreTask(title: "Capture the result"),
+                CoreTask(title: "Note the next step"),
+            ],
+            quickCapture: true
+        )
+        let existing = try store.tasks(on: date)
+        try store.saveAgendaEdits(
+            date: date, tasks: existing + [task],
+            profile: RoutineProfileResolver(calendar: calendar).profile(for: date).kind
+        )
+        scheduleBackgroundWork(days: [date])
+        guard let verified = try store.taskEntry(id: task.id) else {
+            throw RefocusStoreError.corrupt("cycle review task failed durable read-back verification")
+        }
+        return verified
     }
 
     func updatePlanMinimum(date: Date, completed: Bool) throws {
@@ -1032,16 +1159,8 @@ actor VaultWorker {
         guard (try? await cloud.acquireExportLease(deviceID: projectionDeviceID())) == true else { return }
         let days = pendingProjectionDays.compactMap(parseDay)
         pendingProjectionDays.removeAll()
-        try? exportPendingCaptures()
         try? exportTasksProjection()
         for day in days { try? exportDaily(day) }
-    }
-
-    private func exportPendingCaptures() throws {
-        while let line = pendingCaptureLines.first {
-            try projection.appendCapture(line)
-            pendingCaptureLines.removeFirst()
-        }
     }
 
     private func projectionDeviceID() -> String {

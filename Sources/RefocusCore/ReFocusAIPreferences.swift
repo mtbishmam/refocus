@@ -4,7 +4,7 @@ public enum ReFocusAIPreferences {
     public static let defaultDocument = """
     # How I Work
 
-    - Plan my day in four six-hour blocks: 00:00–06:00, 06:00–12:00, 12:00–18:00, and 18:00–00:00.
+    - Cycle-review reminders use three automatic reset blocks: Sol Block (06:00–12:00), Terra Block (12:00–18:00), and Luna Block (18:00–00:00). Unanswered cycle-review prompts reset when the block changes.
     - One cycle is 30 minutes. A task may use at most four cycles (two hours).
     - Every date has predefined Rest rows at 05:00–06:00, 11:00–12:00, 17:00–18:00, and 23:00–00:00. Keep those rows blank for work by default; treat “break” as Rest.
     - Preserve Rest by default. Only schedule work inside Rest when I explicitly say to override it.

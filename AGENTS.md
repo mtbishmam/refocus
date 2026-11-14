@@ -17,6 +17,19 @@ note prevents cross-app context from being lost.
   `scripts/package-app.sh`.
 - Keep ReFocus native to SwiftUI/AppKit. Speed is the primary product
   constraint.
+- The one-second clock belongs to `ClockDisplay`, which only live-clock views
+  observe. Keep the exact AppModel clock value non-published and avoid
+  per-second writes to other published properties; a dashboard-wide refresh
+  on every tick makes independent native text input lag.
+- Control–Space Quick Note uses a retained AppKit panel and text editor prepared
+  at launch. Draft typing stays local to the text field and must not publish
+  per-keystroke AppModel changes or rebuild the dashboard. Every open restores
+  keyboard focus immediately; Return commits through the SQLite worker and
+  clears the draft only after success. Escape preserves the draft. A durable
+  SQLite export queue appends captures to the Obsidian `dump.md` selected in
+  Settings using a security-scoped bookmark. Never use `ReFocus/Internal/dump.md`
+  as the capture destination. Pending exports survive restarts, retain per-ID
+  append receipts, and surface file-access/lease errors in Settings and Quick Note.
 - The user explicitly approved the database/cloud redesign on 2026-08-07.
   SQLite WAL is the native local source of truth, IndexedDB is the web cache,
   and Cloudflare D1 is durable cross-device truth. Do not add Electron, Tauri,
@@ -59,7 +72,9 @@ note prevents cross-app context from being lost.
 - Daily exposes editable dated history for Weight, Calories, Expenses, Solved
   Problems, and CP Hours in addition to habit history; current and historical
   values remain immediate-save and derived analytics recalculate from edits.
-- `agenda.md`, `task-templates.md`, `dump.md`, legacy `journal/mon-D.md`, and
+- `dump.md` is an append-only destination for raw Quick Notes; preserve all
+  existing Obsidian writing. It is not a source of live task or AI state.
+- `agenda.md`, `task-templates.md`, legacy `journal/mon-D.md`, and
   `ego/non-negotiables.md` are preserved migration sources, not runtime stores.
 - Cloud-paired projection writes require the D1 export lease. A denied or failed
   lease must not write to iCloud.
@@ -96,7 +111,10 @@ The day is independently planned and snapshotted in four super-blocks:
 - Red errors block saving. Yellow routine-exception warnings may be explicitly
   accepted for that date. Sort tasks by start time before validating; any
   unapproved collision remains red.
-- Planning is a hard gate, but Command-Q must always remain available.
+- When the Settings toggle `Enable No Plan Block` is on (the default), planning
+  is a hard gate; when off, unsaved plans do not block work. Command-Q must
+  always remain available either way. The separate five-minute screen-break
+  blocker stays active regardless of this setting.
 - During a screen break, expanding a task exposes only its editable name, MVP,
   Description, and exactly three editable subtask slots. The current task is
   always expanded. Those execution-field edits autosave through Today and
@@ -108,8 +126,9 @@ The day is independently planned and snapshotted in four super-blocks:
   unlock work. If the user edits before the first save, that edited plan becomes
   the immutable Initial snapshot.
 - Tomorrow and an all-day predefined-plan confirmation initialize Morning,
-  Afternoon, and Evening only. Late Night is deliberately excluded so the hard
-  no-plan blocker returns at 21:30 and requires an explicit 21:30–23:00 save.
+  Afternoon, and Evening only. Late Night is deliberately excluded so the
+  enabled no-plan blocker returns at 21:30 and requires an explicit
+  21:30–23:00 save.
   The planning gate ends at 23:00; tasks may still be recorded through the date
   boundary without another planning-cycle quota.
 
@@ -151,10 +170,18 @@ The day is independently planned and snapshotted in four super-blocks:
 - User-planned tasks and focused work may continue after 21:30 through the
   midnight boundary. Work after midnight belongs to the next dated plan. The
   five-minute periodic screen-break blocker runs around the clock whenever
-  ReFocus is running and may be skipped at most three times per Asia/Dhaka
-  calendar day. A skipped periodic break stays dismissed through that break's
-  end; the allowance resets after midnight. Scheduled one-hour Rest blockers and the persistent
-  no-plan blocker each offer a one-minute temporary release before relocking.
+  ReFocus is running and may be skipped at most three times in each six-hour
+  Asia/Dhaka block (00:00–06:00, 06:00–12:00, 12:00–18:00, and 18:00–00:00).
+  A skipped periodic break stays dismissed through that break's end; the
+  allowance resets at each six-hour boundary. The Settings toggle `Enable No
+  Plan Block` defaults on and controls only the unsaved-plan overlay; disabling
+  it leaves the periodic five-minute screen-break blocker active. Scheduled
+  one-hour Rest blockers and the enabled no-plan blocker each offer 1-, 5-, and
+  10-minute temporary releases before relocking. A release yields to the next
+  periodic screen break if it would overlap it. The no-plan blocker also
+  allows at most two durable, uninterrupted 25-minute work releases in each
+  wall-clock six-hour block (00:00–06:00, 06:00–12:00, 12:00–18:00, and
+  18:00–24:00), then relocks automatically at the end of each release.
 - Every day starts with these fixed evening defaults, each explicitly deletable
   for that date:
   - 20:00–20:30 — `Day Analysis and Streaks (CF & Git)`.
@@ -219,6 +246,21 @@ The day is independently planned and snapshotted in four super-blocks:
 - Increasing a task duration or inserting a task before, between, or after
   another task pushes later movable work forward by the added cycles while
   preserving fixed routine/Rest windows and task order.
+- The native AI navigation tab is named `Reminders`. Reminder definitions and
+  daily occurrences are SQLite-backed and use half-hour start times. Any due,
+  unanswered reminder is repeated in the chat panel during every screen break
+  until answered for that date. The default Weight reminder and Hair Spray 1
+  run at 05:30; Hair Spray 2 runs at 17:30. Weight answers write the verified
+  Daily Weight field and may offer an optional 75 kg goal/trend analysis. Hair
+  reminders write their
+  corresponding Daily checkboxes. The default every-cycle reminder asks what
+  happened when no task occupied that cycle. For a planned work task, it first
+  asks whether the task was done: Yes completes the task; No asks what happened
+  instead and appends that answer to the planned task Description.
+  Cycle-review reminders reset automatically at each named boundary: Sol Block
+  06:00–12:00, Terra Block 12:00–18:00, and Luna Block 18:00–00:00.
+  Unanswered cycle reviews from an earlier named block do not carry into the
+  next one; the regular reminder history remains available in chat.
 
 ## Live routine authority
 

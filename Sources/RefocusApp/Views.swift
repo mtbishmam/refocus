@@ -62,7 +62,7 @@ struct DashboardView: View {
                 Text("Tomorrow").tag(DashboardTab.tomorrow)
                 Text("Daily").tag(DashboardTab.streaks)
                 Text("Diff").tag(DashboardTab.diff)
-                Text("AI").tag(DashboardTab.ai)
+                Text("Reminders").tag(DashboardTab.reminders)
                 Text("Settings").tag(DashboardTab.settings)
             }
             .pickerStyle(.segmented)
@@ -77,7 +77,7 @@ struct DashboardView: View {
             }
 
             Group {
-                if model.aiSplitPresented && model.selectedDashboardTab != .ai {
+                if model.aiSplitPresented && model.selectedDashboardTab != .reminders {
                     GeometryReader { proxy in
                         let aiWidth = proxy.size.width * 0.5
                         HStack(spacing: 0) {
@@ -98,7 +98,7 @@ struct DashboardView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            if !model.aiSplitPresented || model.selectedDashboardTab == .ai {
+            if !model.aiSplitPresented || model.selectedDashboardTab == .reminders {
                 HStack {
                     Spacer(minLength: 0)
                     AIComposer()
@@ -137,9 +137,123 @@ struct DashboardView: View {
         case .tomorrow: TomorrowPlanView()
         case .streaks: StreaksView()
         case .diff: DiffView()
-        case .ai: AIChatView()
+        case .reminders: RemindersView()
         case .settings: SettingsView()
         }
+    }
+}
+
+private struct RemindersView: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        HSplitView {
+            VStack(spacing: 0) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Reminders").font(.title2.bold())
+                        Text("Unanswered reminders return during every screen break.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Add Reminder", systemImage: "plus") { model.addReminder() }
+                        .buttonStyle(.borderedProminent)
+                }
+                .padding(18)
+                Divider()
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+                        ForEach($model.reminders) { $reminder in
+                            ReminderEditorRow(reminder: $reminder)
+                        }
+                    }
+                    .padding(16)
+                }
+            }
+            .frame(minWidth: 350, idealWidth: 440, maxWidth: 560)
+
+            VStack(spacing: 0) {
+                if let active = model.activeReminder {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "bell.badge.fill").foregroundStyle(.orange)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(active.reminder.title).font(.headline)
+                            Text(model.reminderQuestion(for: active)).font(.subheadline)
+                        }
+                        Spacer()
+                        Text(ReminderEditorRow.timeText(active.dueMinute))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 10)
+                    .background(Color.orange.opacity(0.09))
+                    Divider()
+                }
+                AIChatView()
+                if model.weightAnalysisOffered {
+                    Button("Analyze weight against 75 kg goal") {
+                        model.requestWeightAnalysis()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .padding(.bottom, 10)
+                }
+            }
+            .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+private struct ReminderEditorRow: View {
+    @EnvironmentObject private var model: AppModel
+    @Binding var reminder: ReminderDefinition
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                TextField("Reminder name", text: $reminder.title)
+                    .font(.headline)
+                    .textFieldStyle(.plain)
+                Toggle("", isOn: $reminder.enabled).labelsHidden()
+                Button(role: .destructive) { model.deleteReminder(reminder) } label: {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.plain)
+            }
+            TextField("Question", text: $reminder.question, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(2...4)
+            HStack(spacing: 10) {
+                Picker("Type", selection: $reminder.kind) {
+                    ForEach(ReminderKind.allCases, id: \.self) { kind in
+                        Text(kind.title).tag(kind)
+                    }
+                }
+                .frame(maxWidth: 180)
+                if reminder.kind == .cycleReview {
+                    Text("Runs after every cycle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Picker("Start", selection: $reminder.startMinute) {
+                        ForEach(Array(stride(from: 0, through: 1410, by: 30)), id: \.self) { minute in
+                            Text(Self.timeText(minute)).tag(minute)
+                        }
+                    }
+                    .frame(maxWidth: 145)
+                }
+                Spacer()
+            }
+        }
+        .padding(13)
+        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08)))
+        .onChange(of: reminder) { _, value in model.saveReminder(value) }
+    }
+
+    static func timeText(_ minute: Int) -> String {
+        String(format: "%02d:%02d", minute / 60, minute % 60)
     }
 }
 
@@ -181,6 +295,8 @@ private struct DashboardAIChatPanel: View {
 private struct AIChatView: View {
     @EnvironmentObject private var model: AppModel
 
+    private let bottomID = "refocus-ai-chat-bottom"
+
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -188,8 +304,11 @@ private struct AIChatView: View {
                     if model.aiMessages.isEmpty {
                         VStack(spacing: 12) {
                             Image(systemName: "sparkles").font(.system(size: 34)).foregroundStyle(.blue)
-                            Text("Plan with ReFocus AI").font(.title.bold())
-                            Text("Create, move, edit, or delete tasks and update present or historical Daily metrics.")
+                            Text(model.selectedDashboardTab == .reminders ? "Reminders + ReFocus AI" : "Plan with ReFocus AI")
+                                .font(.title.bold())
+                            Text(model.selectedDashboardTab == .reminders
+                                 ? "Answer due reminders here, or ask ReFocus AI to update your plan and Daily data."
+                                 : "Create, move, edit, or delete tasks and update present or historical Daily metrics.")
                                 .foregroundStyle(.secondary)
                                 .multilineTextAlignment(.center)
                         }
@@ -199,6 +318,7 @@ private struct AIChatView: View {
                     ForEach(model.aiMessages) { message in
                         AIMessageView(message: message).id(message.id)
                     }
+                    Color.clear.frame(height: 1).id(bottomID)
                 }
                 .frame(maxWidth: 980)
                 .frame(maxWidth: .infinity, alignment: .center)
@@ -206,11 +326,12 @@ private struct AIChatView: View {
                 .padding(.vertical, 26)
             }
             .onChange(of: model.aiMessages.count) { _, _ in
-                if let id = model.aiMessages.last?.id { withAnimation { proxy.scrollTo(id, anchor: .bottom) } }
+                withAnimation { proxy.scrollTo(bottomID, anchor: .bottom) }
             }
             .onChange(of: model.aiMessages.last?.text) { _, _ in
-                if let id = model.aiMessages.last?.id { proxy.scrollTo(id, anchor: .bottom) }
+                proxy.scrollTo(bottomID, anchor: .bottom)
             }
+            .onAppear { proxy.scrollTo(bottomID, anchor: .bottom) }
         }
     }
 }
@@ -2371,6 +2492,27 @@ struct StreaksView: View {
                         title: "Daily Context",
                         subtitle: "Changes save immediately and feed your logs and analytics."
                     )
+                    let hairSprays = model.dailyFieldDefinitions.filter {
+                        $0.id == "hair-spray-1" || $0.id == "hair-spray-2"
+                    }
+                    if !hairSprays.isEmpty {
+                        HStack(spacing: 18) {
+                            ForEach(hairSprays) { definition in
+                                Toggle(definition.name, isOn: Binding(
+                                    get: { model.dailyFieldValues[definition.id] == StreakStatus.win.rawValue },
+                                    set: { checked in
+                                        model.setDailyField(
+                                            definition,
+                                            value: checked ? StreakStatus.win.rawValue : StreakStatus.blank.rawValue
+                                        )
+                                    }
+                                ))
+                                .toggleStyle(.checkbox)
+                            }
+                            Spacer()
+                        }
+                        .padding(.vertical, 4)
+                    }
                 let inputs = model.dailyFieldDefinitions.filter { $0.kind != .triState && $0.id != "daily-summary" }
                 if !inputs.isEmpty {
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 8)], spacing: 8) {
@@ -2835,6 +2977,27 @@ struct SettingsView: View {
                     set: { _ in model.toggleLaunchAtLogin() }
                 ))
             }
+            Section("Blockers") {
+                Toggle("Enable No Plan Block", isOn: $model.noPlanBlockEnabled)
+                Text("When enabled, ReFocus blocks work until the active plan is saved. The regular five-minute screen break stays enabled either way.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Quick Note") {
+                Text(model.quickNoteDumpPath)
+                    .font(.caption)
+                    .textSelection(.enabled)
+                HStack {
+                    Button("Choose Obsidian dump.md…") { model.chooseQuickNoteDumpFile() }
+                    Button("Retry Export") { model.refreshQuickNoteExport() }
+                }
+                Text(model.quickNoteExportMessage)
+                    .font(.caption)
+                    .foregroundStyle(model.quickNoteExportIssue == nil ? Color.secondary : Color.orange)
+                Text("Control–Space opens Quick Note. Press Enter to save. Notes are saved locally first, then appended to the selected Obsidian dump.md; queued exports survive restarts.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section("Cloud sync") {
                 LabeledContent("Status", value: model.cloudSyncStatus)
                 if model.cloudSyncPendingCount > 0 {
@@ -2919,6 +3082,7 @@ struct SettingsView: View {
                 Text("Screen break: :25–:30 and :55–:00")
                 Text("Screen breaks stay active around the clock while ReFocus is running.")
                 Text("Scheduled Rest and an unsaved planning gate can be released for one minute at a time.")
+                Text("An unsaved planning gate also allows two uninterrupted 25-minute work blocks in each six-hour wall-clock block.")
                 Text("Timezone: Asia/Dhaka")
             }
         }
@@ -2958,30 +3122,46 @@ struct BreakOverlayView: View {
 private struct ScreenBreakAIChatPanel: View {
     @EnvironmentObject private var model: AppModel
 
+    private let bottomID = "refocus-screen-break-chat-bottom"
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Label("ReFocus AI", systemImage: "sparkles").font(.title2.bold())
+                Label("Reminders + ReFocus AI", systemImage: "bell.badge.fill").font(.title2.bold())
                 Spacer()
                 if model.aiIsResponding { AIShimmerStatus(text: model.aiStatus) }
+            }
+            if let active = model.activeReminder {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(active.reminder.title).font(.headline)
+                    Text(model.reminderQuestion(for: active)).font(.subheadline)
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
             }
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 16) {
                         if model.aiMessages.isEmpty {
-                            Text("Ask AI to repair this plan, move tasks, create a new block, or update Daily metrics.")
+                            Text("Answer due reminders here, or ask AI to update this plan and Daily metrics.")
                                 .foregroundStyle(.secondary)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
                         ForEach(Array(model.aiMessages.suffix(10))) { message in
                             AIMessageView(message: message).id(message.id)
                         }
+                        Color.clear.frame(height: 1).id(bottomID)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .onChange(of: model.aiMessages.last?.text) { _, _ in
-                    if let id = model.aiMessages.last?.id { proxy.scrollTo(id, anchor: .bottom) }
+                .onChange(of: model.aiMessages.count) { _, _ in
+                    withAnimation { proxy.scrollTo(bottomID, anchor: .bottom) }
                 }
+                .onChange(of: model.aiMessages.last?.text) { _, _ in
+                    proxy.scrollTo(bottomID, anchor: .bottom)
+                }
+                .onAppear { proxy.scrollTo(bottomID, anchor: .bottom) }
             }
             AIComposer()
         }
@@ -3010,6 +3190,8 @@ private struct BreakClockHeader: View {
     @ObservedObject var clock: ClockDisplay
 
     var body: some View {
+        let clockSnapshot = clock.snapshot
+        let currentTime = clockSnapshot.phaseEnd.addingTimeInterval(-TimeInterval(clockSnapshot.secondsRemaining))
         VStack(spacing: 4) {
             Text("SCREEN BREAK")
                 .font(.system(size: 16, weight: .bold, design: .rounded))
@@ -3018,7 +3200,7 @@ private struct BreakClockHeader: View {
                 .offset(y: 6)
             Text(model.countdownText).font(.system(size: 64, weight: .bold, design: .rounded)).monospacedDigit()
             Text(model.currentTaskTitle).font(.title2.bold())
-            Text(ReFocusOverlayDateTime.string(from: model.now))
+            Text(ReFocusOverlayDateTime.string(from: currentTime))
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.68))
                 .monospacedDigit()
@@ -3026,8 +3208,8 @@ private struct BreakClockHeader: View {
                 model.skipCurrentScreenBreak()
             } label: {
                 Text(model.screenBreakSkipsRemaining > 0
-                     ? "Skip this break · \(model.screenBreakSkipsRemaining) left today"
-                     : "Daily skip limit reached")
+                     ? "Skip this break · \(model.screenBreakSkipsRemaining) left this block"
+                     : "Block skip limit reached")
             }
             .buttonStyle(.bordered)
             .disabled(model.screenBreakSkipsRemaining == 0)
@@ -3039,8 +3221,11 @@ private struct BreakClockHeader: View {
 struct PlanningGateOverlayView: View {
     @EnvironmentObject private var model: AppModel
     let isPrimary: Bool
+    @ObservedObject var clock: ClockDisplay
 
     var body: some View {
+        let clockSnapshot = clock.snapshot
+        let currentTime = clockSnapshot.phaseEnd.addingTimeInterval(-TimeInterval(clockSnapshot.secondsRemaining))
         ZStack {
             Color(red: 0.035, green: 0.04, blue: 0.055).ignoresSafeArea()
             if isPrimary {
@@ -3055,14 +3240,24 @@ struct PlanningGateOverlayView: View {
                             .foregroundStyle(.white)
                         Text(model.planGateMessage)
                             .foregroundStyle(.white.opacity(0.7))
-                        Text(ReFocusOverlayDateTime.string(from: model.now))
+                        Text(ReFocusOverlayDateTime.string(from: currentTime))
                             .font(.caption)
                             .foregroundStyle(.white.opacity(0.68))
                             .monospacedDigit()
-                        Button("Take a 1-minute break") {
-                            model.takeOneMinuteOverlayBreak()
+                        Button {
+                            model.startUnplannedWorkBlock()
+                        } label: {
+                            Text(unplannedWorkButtonTitle)
                         }
                         .buttonStyle(.borderedProminent)
+                        .disabled(
+                            model.unplannedWorkBlocksRemaining == 0 ||
+                            model.isStartingUnplannedWorkBlock
+                        )
+                        OverlayBreakButtons()
+                        Text("Two 25-minute releases are available in each six-hour block.")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.58))
                     }
                     DashboardView()
                         .environmentObject(model)
@@ -3086,6 +3281,17 @@ struct PlanningGateOverlayView: View {
             }
         }
     }
+
+    private var unplannedWorkButtonTitle: String {
+        if model.isStartingUnplannedWorkBlock {
+            return "Starting…"
+        }
+        let remaining = model.unplannedWorkBlocksRemaining
+        if remaining == 0 {
+            return "Unplanned work limit reached"
+        }
+        return "Work 25 minutes without a plan · \(remaining) left"
+    }
 }
 
 struct RestGateOverlayView: View {
@@ -3106,13 +3312,34 @@ struct RestGateOverlayView: View {
                 Text(isPrimary ? "Step away from the screen" : "Rest is active on the main display.")
                     .font(.title2.bold())
                 if isPrimary {
-                    Button("Take a 1-minute break") {
-                        model.takeOneMinuteOverlayBreak()
-                    }
-                    .buttonStyle(.borderedProminent)
+                    OverlayBreakButtons(prominent: true)
                 }
             }
             .foregroundStyle(.white)
+        }
+    }
+}
+
+private struct OverlayBreakButtons: View {
+    @EnvironmentObject private var model: AppModel
+    var prominent = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(TemporaryBreakPolicy.allowedMinutes, id: \.self) { minutes in
+                breakButton(minutes: minutes)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func breakButton(minutes: Int) -> some View {
+        if prominent {
+            Button("\(minutes)-min break") { model.takeOverlayBreak(minutes: minutes) }
+                .buttonStyle(.borderedProminent)
+        } else {
+            Button("\(minutes)-min break") { model.takeOverlayBreak(minutes: minutes) }
+                .buttonStyle(.bordered)
         }
     }
 }

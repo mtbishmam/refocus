@@ -10,7 +10,7 @@ enum DashboardTab: Hashable {
     case tomorrow
     case streaks
     case diff
-    case ai
+    case reminders
     case settings
 }
 
@@ -21,7 +21,11 @@ final class ClockDisplay: ObservableObject {
 
 @MainActor
 final class AppModel: ObservableObject {
-    @Published private(set) var now = Date()
+    // The exact clock is internal state. Publishing it every second invalidates
+    // the entire dashboard tree, which makes unrelated AppKit text input lag.
+    // ClockDisplay publishes the lightweight timer snapshot to the few views
+    // that actually render a live clock.
+    private(set) var now = Date()
     let clockDisplay = ClockDisplay()
     @Published var tasks: [PlanTask] = []
     @Published var agendaTasks: [AgendaTask] = []
@@ -36,8 +40,17 @@ final class AppModel: ObservableObject {
     @Published var activeSegment = PlanValidator().segment(at: Date())
     @Published var isArmed = false
     @Published var isBreakVisible = false
+    @Published var noPlanBlockEnabled: Bool = UserDefaults.standard.object(forKey: "refocus.noPlanBlock.enabled") as? Bool ?? true {
+        didSet {
+            guard oldValue != noPlanBlockEnabled else { return }
+            UserDefaults.standard.set(noPlanBlockEnabled, forKey: "refocus.noPlanBlock.enabled")
+            tick(at: now)
+        }
+    }
     @Published var currentCheckIn: CheckIn?
     @Published private(set) var screenBreakSkipsUsed = 0
+    @Published private(set) var unplannedWorkBlocksUsed = 0
+    @Published private(set) var isStartingUnplannedWorkBlock = false
     @Published var streakDefinitions: [StreakDefinition] = []
     @Published var streakSummaries: [StreakSummary] = []
     @Published var dailyFieldDefinitions: [DailyFieldDefinition] = []
@@ -60,9 +73,11 @@ final class AppModel: ObservableObject {
     @Published private(set) var taskUndoRevision = 0
     /// Completed tasks are visible by default; this only hides them when enabled.
     @Published var hideCompleted = false
-    @Published var quickNote = ""
     @Published var isSavingQuickNote = false
     @Published var quickNoteError: String?
+    @Published private(set) var quickNoteDumpPath = "Not connected"
+    @Published private(set) var quickNoteExportMessage = "Choose your Obsidian dump.md."
+    @Published private(set) var quickNoteExportIssue: String?
     private var quickNoteSubmissionID: UUID?
     @Published var cloudPairingToken = ""
     @Published var cloudSyncPaired = CloudCredentials.load() != nil
@@ -84,6 +99,12 @@ final class AppModel: ObservableObject {
     @Published var aiPreferencesDraft = ReFocusAIPreferences.defaultDocument
     @Published private(set) var aiDailyUsage = AITokenUsage.zero
     @Published var aiPreferencesStatus = "Saved locally"
+    @Published var reminders: [ReminderDefinition] = []
+    @Published private(set) var dueReminders: [ReminderOccurrence] = []
+    @Published private(set) var activeReminder: ReminderOccurrence?
+    @Published private(set) var weightAnalysisOffered = false
+    @Published private(set) var reminderIsSaving = false
+    @Published private(set) var cycleReviewFollowUpID: String?
 
     private let clock = WallClock()
     private let resolver = RoutineProfileResolver()
@@ -104,8 +125,10 @@ final class AppModel: ObservableObject {
     private var agendaTomorrowSaveTask: Task<Void, Never>?
     private var rescheduleTaskQueue: Task<Void, Never>?
     private var dailyFieldSaveTasks: [String: Task<Void, Never>] = [:]
+    private var reminderSaveTasks: [String: Task<Void, Never>] = [:]
     private var activeBreakID: String?
     private var overlayPauseUntil: Date?
+    private var unplannedWorkQuotaKey = ""
     private var attemptedFinalCaptureDay: Date?
     private var baselineTasks: [PlanTask] = []
     private var tomorrowBaselineTasks: [PlanTask] = []
@@ -123,6 +146,7 @@ final class AppModel: ObservableObject {
         // ReFocus deliberately uses one fast, tool-capable model. Persist the
         // choice so existing installations migrate away from older defaults.
         UserDefaults.standard.set(openAIModel, forKey: "refocus.openai.model")
+        unplannedWorkQuotaKey = Self.unplannedWorkQuotaKey(at: now)
         configureLocalStorage()
         refreshLoginStatus()
         startTicker()
@@ -139,6 +163,7 @@ final class AppModel: ObservableObject {
         agendaTomorrowSaveTask?.cancel()
         rescheduleTaskQueue?.cancel()
         dailyFieldSaveTasks.values.forEach { $0.cancel() }
+        reminderSaveTasks.values.forEach { $0.cancel() }
     }
 
     func saveOpenAISettings() {
@@ -191,8 +216,9 @@ final class AppModel: ObservableObject {
     }
 
     func dashboardTabDidChange() {
-        if selectedDashboardTab == .ai {
+        if selectedDashboardTab == .reminders {
             aiSplitPresented = false
+            refreshDueReminders(repeatPrompt: true)
         }
     }
 
@@ -203,6 +229,25 @@ final class AppModel: ObservableObject {
         tick(at: Date())
         let prompt = (suppliedPrompt ?? aiDraft).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty, !aiIsResponding else { return }
+        if activeReminder != nil {
+            answerActiveReminder(prompt)
+            return
+        }
+        if weightAnalysisOffered {
+            if Self.isAffirmative(prompt) {
+                aiDraft = ""
+                weightAnalysisOffered = false
+                requestWeightAnalysis()
+                return
+            }
+            if Self.isNegative(prompt) {
+                aiDraft = ""
+                weightAnalysisOffered = false
+                aiMessages.append(AIChatMessage(role: .user, text: prompt))
+                aiMessages.append(AIChatMessage(role: .assistant, text: "Okay — today’s weight is saved."))
+                return
+            }
+        }
         guard worker != nil else {
             errorMessage = "ReFocus local storage is unavailable."
             return
@@ -214,7 +259,7 @@ final class AppModel: ObservableObject {
         }
         let history = compactAIHistory()
         aiDraft = ""
-        if selectedDashboardTab != .ai { aiSplitPresented = true }
+        if selectedDashboardTab != .reminders { aiSplitPresented = true }
         aiMessages.append(AIChatMessage(role: .user, text: prompt))
         let assistantID = UUID()
         aiMessages.append(AIChatMessage(id: assistantID, role: .assistant, text: "", isStreaming: true))
@@ -272,6 +317,241 @@ final class AppModel: ObservableObject {
                 self.finishAIMessage(id: assistantID, status: "Failed")
             }
         }
+    }
+
+    func addReminder() {
+        let nextPosition = (reminders.map(\.position).max() ?? -1) + 1
+        let reminder = ReminderDefinition(
+            title: "New Reminder", question: "What would you like to record?",
+            startMinute: 360, position: nextPosition
+        )
+        reminders.append(reminder)
+        saveReminder(reminder)
+    }
+
+    func saveReminder(_ reminder: ReminderDefinition) {
+        guard let worker else { return }
+        reminderSaveTasks[reminder.id]?.cancel()
+        reminderSaveTasks[reminder.id] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            do {
+                self?.reminders = try await worker.saveReminder(reminder)
+                self?.refreshDueReminders()
+            } catch {
+                self?.errorMessage = "Could not save reminder: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func deleteReminder(_ reminder: ReminderDefinition) {
+        guard let worker else { return }
+        reminderSaveTasks[reminder.id]?.cancel()
+        Task { [weak self] in
+            do {
+                self?.reminders = try await worker.deleteReminder(id: reminder.id)
+                self?.refreshDueReminders()
+            } catch {
+                self?.errorMessage = "Could not delete reminder: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func refreshDueReminders(cycleStart: Date? = nil, repeatPrompt: Bool = false) {
+        guard let worker else { return }
+        let requestDate = now
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let due = try await worker.dueReminders(at: requestDate, cycleStart: cycleStart)
+                self.dueReminders = due
+                self.activeReminder = due.first
+                if let followUpID = self.cycleReviewFollowUpID,
+                   due.allSatisfy({ $0.id != followUpID }) {
+                    self.cycleReviewFollowUpID = nil
+                }
+                guard repeatPrompt, !due.isEmpty else { return }
+                let questions = due.map { occurrence in
+                    let time = MarkdownPlanCodec.time(occurrence.dueMinute)
+                    return "• \(occurrence.reminder.title) (\(time)): \(self.reminderQuestion(for: occurrence))"
+                }.joined(separator: "\n\n")
+                self.aiMessages.append(AIChatMessage(
+                    role: .assistant,
+                    text: "Unanswered reminders:\n\n\(questions)\n\nAnswer the first one now."
+                ))
+            } catch {
+                self.errorMessage = "Could not load reminders: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func requestWeightAnalysis() {
+        weightAnalysisOffered = false
+        let measurements = dailyMetricHistory
+            .filter { $0.definitionID == "weight" && !$0.value.isEmpty }
+            .sorted { $0.date < $1.date }
+            .suffix(30)
+            .map { "\($0.date): \($0.value) kg" }
+            .joined(separator: ", ")
+        let history = measurements.isEmpty ? "No earlier measurements are available." : measurements
+        sendAIMessage("Analyze my weight trend against my fixed 75 kg goal. Use these verified ReFocus measurements: \(history). Be concise and distinguish trend evidence from assumptions.")
+    }
+
+    private func answerActiveReminder(_ answer: String) {
+        guard let occurrence = activeReminder, let worker, !reminderIsSaving else { return }
+        aiDraft = ""
+        aiMessages.append(AIChatMessage(role: .user, text: answer))
+        reminderIsSaving = true
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                var confirmation: String
+                switch occurrence.reminder.kind {
+                case .weight:
+                    guard let weight = Self.weightValue(from: answer) else {
+                        self.reminderIsSaving = false
+                        self.aiMessages.append(AIChatMessage(role: .assistant, text: "Please answer with your weight as a number in kg, for example `82.4`."))
+                        return
+                    }
+                    let value = Self.compactDecimal(weight)
+                    _ = try await worker.setAIFieldValue(
+                        definitionID: "weight", value: value, dateText: occurrence.day
+                    )
+                    try await worker.answerReminder(occurrence, answer: value, at: self.now)
+                    if occurrence.day == MarkdownPlanCodec.isoDate(self.now, calendar: WallClock.dhakaCalendar()) {
+                        self.dailyFieldValues["weight"] = value
+                        if let index = self.dailyMetricHistory.firstIndex(where: {
+                            $0.definitionID == "weight" && $0.date == occurrence.day
+                        }) {
+                            self.dailyMetricHistory[index].value = value
+                        } else {
+                            self.dailyMetricHistory.append(DailyFieldValue(
+                                definitionID: "weight", date: occurrence.day, value: value
+                            ))
+                        }
+                        self.reloadDailyDashboardAnalytics()
+                    }
+                    self.weightAnalysisOffered = true
+                    confirmation = "Saved today’s weight as \(value) kg. Would you like an analysis against your 75 kg goal?"
+                case .hairSpray:
+                    guard let used = Self.yesNoValue(from: answer) else {
+                        self.reminderIsSaving = false
+                        self.aiMessages.append(AIChatMessage(role: .assistant, text: "Please answer yes or no so I can update the Daily checkbox."))
+                        return
+                    }
+                    let fieldID = occurrence.reminder.id == "hair-spray-2" ? "hair-spray-2" : "hair-spray-1"
+                    let value = used ? StreakStatus.win.rawValue : StreakStatus.fail.rawValue
+                    _ = try await worker.setAIFieldValue(
+                        definitionID: fieldID, value: value, dateText: occurrence.day
+                    )
+                    try await worker.answerReminder(occurrence, answer: used ? "Yes" : "No", at: self.now)
+                    if occurrence.day == MarkdownPlanCodec.isoDate(self.now, calendar: WallClock.dhakaCalendar()) {
+                        self.dailyFieldValues[fieldID] = value
+                    }
+                    confirmation = used ? "Saved \(occurrence.reminder.title) as completed." : "Saved \(occurrence.reminder.title) as not completed."
+                case .cycleReview:
+                    if self.cycleReviewFollowUpID == occurrence.id {
+                        let entry = try await worker.recordCycleReview(occurrence, answer: answer)
+                        try await worker.answerReminder(occurrence, answer: answer, at: self.now)
+                        self.cycleReviewFollowUpID = nil
+                        confirmation = "Added what you did to `\(entry.task.title)` in its Description."
+                        self.reloadVault(force: true)
+                    } else if self.cycleReviewTask(for: occurrence) != nil {
+                        guard let completed = Self.yesNoValue(from: answer) else {
+                            self.reminderIsSaving = false
+                            self.aiMessages.append(AIChatMessage(
+                                role: .assistant,
+                                text: "Please answer yes or no. If the answer is no, I’ll ask what you did instead."
+                            ))
+                            return
+                        }
+                        if completed {
+                            let entry = try await worker.completeCycleReviewTask(occurrence)
+                            try await worker.answerReminder(occurrence, answer: "Yes", at: self.now)
+                            confirmation = "Marked `\(entry.task.title)` as completed."
+                            self.reloadVault(force: true)
+                        } else {
+                            self.cycleReviewFollowUpID = occurrence.id
+                            self.reminderIsSaving = false
+                            self.aiMessages.append(AIChatMessage(
+                                role: .assistant,
+                                text: "What did you do during this time?"
+                            ))
+                            return
+                        }
+                    } else {
+                        let entry = try await worker.recordCycleReview(occurrence, answer: answer)
+                        try await worker.answerReminder(occurrence, answer: answer, at: self.now)
+                        confirmation = "Recorded that cycle as `\(entry.task.title)`."
+                        self.reloadVault(force: true)
+                    }
+                case .standard:
+                    try await worker.answerReminder(occurrence, answer: answer, at: self.now)
+                    confirmation = "Saved your answer for \(occurrence.reminder.title)."
+                }
+                let remaining = try await worker.dueReminders(at: self.now)
+                self.dueReminders = remaining
+                self.activeReminder = remaining.first
+                self.reminderIsSaving = false
+                self.aiMessages.append(AIChatMessage(role: .assistant, text: confirmation))
+                if let next = remaining.first {
+                    let time = MarkdownPlanCodec.time(next.dueMinute)
+                    self.aiMessages.append(AIChatMessage(
+                        role: .assistant,
+                        text: "Next reminder (\(time)) — \(next.reminder.question)"
+                    ))
+                }
+            } catch {
+                self.reminderIsSaving = false
+                self.errorMessage = "Could not save reminder answer: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private static func weightValue(from text: String) -> Double? {
+        let pieces = text.replacingOccurrences(of: ",", with: ".")
+            .components(separatedBy: CharacterSet(charactersIn: "0123456789.").inverted)
+            .filter { !$0.isEmpty }
+        return pieces.compactMap(Double.init).first(where: { (30...300).contains($0) })
+    }
+
+    func reminderQuestion(for occurrence: ReminderOccurrence) -> String {
+        guard occurrence.reminder.kind == .cycleReview else { return occurrence.reminder.question }
+        if cycleReviewFollowUpID == occurrence.id { return "What did you do during this time?" }
+        if let task = cycleReviewTask(for: occurrence) {
+            return "Did you do the task “\(task.title)”?"
+        }
+        return occurrence.reminder.question
+    }
+
+    private func cycleReviewTask(for occurrence: ReminderOccurrence) -> PlanTask? {
+        guard occurrence.day == MarkdownPlanCodec.isoDate(now, calendar: WallClock.dhakaCalendar()) else { return nil }
+        return CycleReviewResolver.task(in: tasks, at: occurrence.dueMinute)
+    }
+
+    private static func compactDecimal(_ value: Double) -> String {
+        value.rounded() == value ? String(Int(value)) : String(format: "%.2f", value).replacingOccurrences(of: "0$", with: "", options: .regularExpression)
+    }
+
+    private static func yesNoValue(from text: String) -> Bool? {
+        let value = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if value == "n" || value.hasPrefix("no") || value.contains("not yet")
+            || value.contains("didn't") || value.contains("did not")
+            || value.contains("haven't") || value.contains("have not")
+            || value.contains("missed") { return false }
+        if value == "y" || value.hasPrefix("yes") || value.hasPrefix("done")
+            || value.contains("i did") || value.contains("did it")
+            || value.contains("used it") || value.contains("i used")
+            || value == "i have" || value.hasPrefix("completed") { return true }
+        return nil
+    }
+
+    private static func isAffirmative(_ text: String) -> Bool {
+        yesNoValue(from: text) == true
+    }
+
+    private static func isNegative(_ text: String) -> Bool {
+        yesNoValue(from: text) == false
     }
 
     private func finishAIMessage(id: UUID, status: String = "Ready") {
@@ -655,6 +935,7 @@ final class AppModel: ObservableObject {
     /// the live clock reaches it. Any other current/future validation error
     /// still keeps the gate in place.
     var isPlanningGateRequired: Bool {
+        guard noPlanBlockEnabled else { return false }
         guard !isPlanCommitted else { return false }
         guard requiredCycleMinimum == 0,
               !validator.hasRemainingPlannedWork(in: activeSegment, at: now, tasks: tasks) else {
@@ -737,10 +1018,59 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func takeOneMinuteOverlayBreak() {
-        overlayPauseUntil = now.addingTimeInterval(60)
+    func takeOverlayBreak(minutes: Int) {
+        let nextScreenBreakAt = snapshot.phase == .focus && snapshot.phaseEnd > now
+            ? snapshot.phaseEnd
+            : nil
+        overlayPauseUntil = TemporaryBreakPolicy.end(
+            startedAt: now,
+            minutes: minutes,
+            nextScreenBreakAt: nextScreenBreakAt
+        )
         overlayController.hide()
         isBreakVisible = false
+    }
+
+    func takeOneMinuteOverlayBreak() {
+        takeOverlayBreak(minutes: 1)
+    }
+
+    var unplannedWorkBlocksRemaining: Int {
+        max(0, UnplannedWorkAllowance.maximumBlocks - unplannedWorkBlocksUsed)
+    }
+
+    func startUnplannedWorkBlock() {
+        guard isPlanningGateRequired, !isPlanCommitted,
+              unplannedWorkBlocksRemaining > 0,
+              !isStartingUnplannedWorkBlock,
+              let worker else { return }
+        let startedAt = now
+        let releaseID = UUID().uuidString.lowercased()
+        let quotaKey = Self.unplannedWorkQuotaKey(at: startedAt)
+        isStartingUnplannedWorkBlock = true
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let result = try await worker.recordUnplannedWorkRelease(id: releaseID, at: startedAt)
+                self.isStartingUnplannedWorkBlock = false
+                if self.unplannedWorkQuotaKey == quotaKey {
+                    self.unplannedWorkBlocksUsed = result.used
+                }
+                guard result.granted else {
+                    self.errorMessage = "The two unplanned work blocks for this six-hour block have already been used."
+                    return
+                }
+                let releaseEnd = startedAt.addingTimeInterval(UnplannedWorkAllowance.durationSeconds)
+                guard Date() < releaseEnd else { return }
+                self.overlayPauseUntil = releaseEnd
+                self.isArmed = true
+                self.overlayController.hide()
+                self.isBreakVisible = false
+            } catch {
+                self.isStartingUnplannedWorkBlock = false
+                self.errorMessage = "Could not start unplanned work: \(error.localizedDescription)"
+            }
+        }
     }
 
     var screenBreakSkipsRemaining: Int { max(0, 3 - screenBreakSkipsUsed) }
@@ -751,6 +1081,7 @@ final class AppModel: ObservableObject {
               let worker else { return }
         let breakID = activeBreakID ?? sessionID(for: snapshot.cycleStart)
         let skippedAt = now
+        let quotaKey = Self.unplannedWorkQuotaKey(at: skippedAt)
         overlayPauseUntil = snapshot.phaseEnd
         if var checkIn = currentCheckIn {
             checkIn.outcome = .interrupted
@@ -763,7 +1094,8 @@ final class AppModel: ObservableObject {
         Task { [weak self] in
             do {
                 let count = try await worker.recordScreenBreakSkip(id: breakID, at: skippedAt)
-                self?.screenBreakSkipsUsed = count
+                guard let self, self.unplannedWorkQuotaKey == quotaKey else { return }
+                self.screenBreakSkipsUsed = count
             } catch {
                 self?.overlayPauseUntil = nil
                 self?.errorMessage = "Could not skip this screen break: \(error.localizedDescription)"
@@ -789,6 +1121,7 @@ final class AppModel: ObservableObject {
         let localTomorrowBaseline = tomorrowBaselineTasks
         let hadTomorrowEdits = tomorrowIsDirty
         let date = now
+        let loadQuotaKey = Self.unplannedWorkQuotaKey(at: date)
         reloadGeneration &+= 1
         let generation = reloadGeneration
         Task { [weak self] in
@@ -802,7 +1135,10 @@ final class AppModel: ObservableObject {
             let agendaResult = (try? await worker.loadAgenda(asOf: date)) ?? []
             let fieldDefinitions = (try? await worker.loadDailyFieldDefinitions()) ?? []
             let fieldValues = (try? await worker.loadDailyFieldValues(for: date)) ?? []
+            let reminderDefinitions = (try? await worker.loadReminders()) ?? []
             let skipCount = (try? await worker.screenBreakSkipCount(on: date)) ?? 0
+            let unplannedWorkCount = (try? await worker.unplannedWorkReleaseCount(at: date)) ?? 0
+            let activeUnplannedWorkEnd = try? await worker.activeUnplannedWorkReleaseEnd(at: date)
             let templatesResult = (try? await worker.loadTemplates()) ?? []
             let nextDate = WallClock.dhakaCalendar().date(byAdding: .day, value: 1, to: date) ?? date
             let tomorrowResult = try? await worker.loadTomorrow(date: nextDate)
@@ -874,9 +1210,22 @@ final class AppModel: ObservableObject {
             }
             self.dailyFieldDefinitions = fieldDefinitions
             self.dailyFieldValues = Dictionary(uniqueKeysWithValues: fieldValues.map { ($0.definitionID, $0.value) })
-            self.screenBreakSkipsUsed = skipCount
+            self.reminders = reminderDefinitions
+            let currentQuotaKey = Self.unplannedWorkQuotaKey(at: self.now)
+            self.unplannedWorkQuotaKey = currentQuotaKey
+            if currentQuotaKey == loadQuotaKey {
+                self.screenBreakSkipsUsed = skipCount
+            } else {
+                self.screenBreakSkipsUsed = 0
+                self.refreshScreenBreakSkipUsage(at: self.now, quotaKey: currentQuotaKey)
+            }
+            self.unplannedWorkBlocksUsed = unplannedWorkCount
+            if let activeUnplannedWorkEnd, activeUnplannedWorkEnd > self.now {
+                self.overlayPauseUntil = max(self.overlayPauseUntil ?? .distantPast, activeUnplannedWorkEnd)
+            }
             self.reloadStreakSummaries()
             self.reloadDailyDashboardAnalytics()
+            self.refreshDueReminders()
             // A reload may have started while the planning gate was visible.
             // Re-evaluate the live gate after the saved plan is published so a
             // stale overlay cannot remain over a plan that is now committed.
@@ -1735,11 +2084,15 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func submitQuickNote(onSaved: (() -> Void)? = nil) {
-        guard let worker, !isSavingQuickNote else { return }
-        let line = quickNote.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !line.isEmpty else { return }
-        quickNote = ""
+    @discardableResult
+    func submitQuickNote(_ text: String, onSaved: (() -> Void)? = nil) -> Bool {
+        guard !isSavingQuickNote else { return false }
+        let line = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !line.isEmpty else { return false }
+        guard let worker else {
+            quickNoteError = "ReFocus local storage is unavailable. Your note has not been saved."
+            return false
+        }
         isSavingQuickNote = true
         quickNoteError = nil
         let submissionID = quickNoteSubmissionID ?? UUID()
@@ -1750,13 +2103,50 @@ final class AppModel: ObservableObject {
                 self?.isSavingQuickNote = false
                 self?.quickNoteSubmissionID = nil
                 onSaved?()
+                self?.refreshQuickNoteExport()
             } catch {
                 guard let self else { return }
                 self.isSavingQuickNote = false
-                if self.quickNote.isEmpty { self.quickNote = line }
                 self.quickNoteError = error.localizedDescription
             }
         }
+        return true
+    }
+
+    func chooseQuickNoteDumpFile() {
+        let picker = NSOpenPanel()
+        picker.title = "Connect Obsidian Quick Notes"
+        picker.message = "Select dump.md in your Obsidian vault. ReFocus will append your quick notes to this file."
+        picker.prompt = "Use dump.md"
+        picker.canChooseDirectories = false
+        picker.canChooseFiles = true
+        picker.allowsMultipleSelection = false
+        picker.directoryURL = QuickNoteDestination.suggestedURL.deletingLastPathComponent()
+        picker.nameFieldStringValue = "dump.md"
+        picker.begin { [weak self] response in
+            guard response == .OK, let url = picker.url else { return }
+            do {
+                try QuickNoteDestination.save(url)
+                self?.refreshQuickNoteExport()
+            } catch {
+                self?.quickNoteExportIssue = "Could not connect dump.md: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func refreshQuickNoteExport() {
+        guard let worker else { return }
+        Task { [weak self] in
+            let status = await worker.exportQuickNotes()
+            self?.applyQuickNoteExportStatus(status)
+        }
+    }
+
+    private func applyQuickNoteExportStatus(_ status: QuickNoteExportStatus) {
+        let path = status.destination ?? "Not connected"
+        if quickNoteDumpPath != path { quickNoteDumpPath = path }
+        if quickNoteExportMessage != status.message { quickNoteExportMessage = status.message }
+        if quickNoteExportIssue != status.issue { quickNoteExportIssue = status.issue }
     }
 
     func scheduleCheckInSave() {
@@ -1904,8 +2294,18 @@ final class AppModel: ObservableObject {
         let calendar = WallClock.dhakaCalendar()
         let previousDay = calendar.startOfDay(for: now)
         let currentDay = calendar.startOfDay(for: date)
+        let previousQuotaKey = Self.unplannedWorkQuotaKey(at: now)
+        let currentQuotaKey = Self.unplannedWorkQuotaKey(at: date)
         now = date
         clockDisplay.snapshot = clock.snapshot(at: date)
+
+        if previousQuotaKey != currentQuotaKey {
+            unplannedWorkQuotaKey = currentQuotaKey
+            unplannedWorkBlocksUsed = 0
+            screenBreakSkipsUsed = 0
+            refreshUnplannedWorkUsage(at: date, quotaKey: currentQuotaKey)
+            refreshScreenBreakSkipUsage(at: date, quotaKey: currentQuotaKey)
+        }
 
         // The dashboard is long-lived. If it stays open across midnight, the
         // ticker must load the new day's plan instead of continuing to show
@@ -1929,7 +2329,9 @@ final class AppModel: ObservableObject {
             attemptedFinalCaptureDay = nil
             activeBreakID = nil
             screenBreakSkipsUsed = 0
+            unplannedWorkBlocksUsed = 0
             aiDailyUsage = .zero
+            cycleReviewFollowUpID = nil
             if let worker {
                 Task { [weak self] in
                     if let usage = try? await worker.loadAIUsage(on: date) {
@@ -1970,23 +2372,23 @@ final class AppModel: ObservableObject {
         if let pauseUntil = overlayPauseUntil {
             if date < pauseUntil {
                 if overlayController.mode != nil { overlayController.hide() }
-                isBreakVisible = false
+                if isBreakVisible { isBreakVisible = false }
                 return
             }
             overlayPauseUntil = nil
         }
 
         // Only the four allowed live routine Rest windows are full-block screen
-        // guards. The overlay offers a one-minute temporary release, then
-        // restores itself until Rest ends.
+        // guards. The overlay offers a temporary 1-, 5-, or 10-minute
+        // release, then restores itself until Rest ends.
         if activeRestTask != nil {
             activeBreakID = nil
             if overlayController.mode != .rest { overlayController.showRest(model: self) }
-            isBreakVisible = true
+            if !isBreakVisible { isBreakVisible = true }
             return
         } else if overlayController.mode == .rest {
             overlayController.hide()
-            isBreakVisible = false
+            if isBreakVisible { isBreakVisible = false }
         }
 
         // Periodic five-minute screen breaks remain active around the clock.
@@ -1995,10 +2397,11 @@ final class AppModel: ObservableObject {
             if activeBreakID != breakID || overlayController.mode != .screenBreak {
                 activeBreakID = breakID
                 beginCheckIn(id: breakID)
+                refreshDueReminders(cycleStart: snapshot.cycleStart, repeatPrompt: true)
                 if let currentTaskID = currentTask?.id {
                     collapsedTaskIDs.remove(currentTaskID)
                 }
-                isBreakVisible = true
+                if !isBreakVisible { isBreakVisible = true }
                 overlayController.showBreak(model: self)
             }
             return
@@ -2007,7 +2410,7 @@ final class AppModel: ObservableObject {
         if overlayController.mode == .screenBreak {
             finalizeCurrentCheckIn()
             overlayController.hide()
-            isBreakVisible = false
+            if isBreakVisible { isBreakVisible = false }
         }
         activeBreakID = nil
 
@@ -2015,9 +2418,9 @@ final class AppModel: ObservableObject {
         // 18:00 save covers only the normal evening through 21:30; at 21:30 a
         // separate late-night gate deliberately relocks until 23:00 is saved.
         guard minute >= 330 && minute < PlanningSegment.lateNight.endMinute else {
-            isArmed = false
+            if isArmed { isArmed = false }
             if overlayController.mode == .planningGate { overlayController.hide() }
-            isBreakVisible = false
+            if isBreakVisible { isBreakVisible = false }
             return
         }
 
@@ -2026,15 +2429,15 @@ final class AppModel: ObservableObject {
         // An exhausted/protected block with no remaining work is different:
         // it should not cover the dashboard until the next block begins.
         guard isPlanningGateRequired else {
-            isArmed = false
+            if isArmed { isArmed = false }
             activeBreakID = nil
             if overlayController.mode == .planningGate { overlayController.hide() }
-            isBreakVisible = false
+            if isBreakVisible { isBreakVisible = false }
             return
         }
 
         guard isPlanCommitted else {
-            isArmed = false
+            if isArmed { isArmed = false }
             activeBreakID = nil
             if overlayController.mode != .planningGate {
                 overlayController.showPlanning(model: self)
@@ -2045,8 +2448,38 @@ final class AppModel: ObservableObject {
 
         if overlayController.mode == .planningGate {
             overlayController.hide()
-            isBreakVisible = false
+            if isBreakVisible { isBreakVisible = false }
         }
+    }
+
+    private func refreshUnplannedWorkUsage(at date: Date, quotaKey: String) {
+        guard let worker else { return }
+        Task { [weak self] in
+            guard let self,
+                  let count = try? await worker.unplannedWorkReleaseCount(at: date),
+                  self.unplannedWorkQuotaKey == quotaKey else { return }
+            self.unplannedWorkBlocksUsed = count
+        }
+    }
+
+    private func refreshScreenBreakSkipUsage(at date: Date, quotaKey: String) {
+        guard let worker else { return }
+        Task { [weak self] in
+            guard let self,
+                  let count = try? await worker.screenBreakSkipCount(on: date),
+                  self.unplannedWorkQuotaKey == quotaKey else { return }
+            self.screenBreakSkipsUsed = count
+        }
+    }
+
+    private static func unplannedWorkQuotaKey(at date: Date) -> String {
+        let calendar = WallClock.dhakaCalendar()
+        let parts = calendar.dateComponents([.year, .month, .day], from: date)
+        return String(
+            format: "%04d-%02d-%02d#%d",
+            parts.year ?? 0, parts.month ?? 0, parts.day ?? 0,
+            UnplannedWorkAllowance.blockIndex(at: date, calendar: calendar)
+        )
     }
 
     func loadDiff(on date: Date) {
@@ -2377,6 +2810,7 @@ final class AppModel: ObservableObject {
             }
         }
         reloadVault()
+        refreshQuickNoteExport()
         startCloudSyncLoop()
     }
 
@@ -2439,6 +2873,7 @@ final class AppModel: ObservableObject {
                 let result = await worker.syncNow()
                 self.applyCloudSyncResult(result)
                 if result.changedLocally { self.reloadVault(preservingLocalEdits: true) }
+                self.applyQuickNoteExportStatus(await worker.exportQuickNotes())
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
             }
         }

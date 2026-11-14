@@ -1,18 +1,26 @@
 import AppKit
 import Carbon.HIToolbox
-import SwiftUI
+import Combine
 
 @MainActor
-final class GlobalQuickNoteController {
+final class GlobalQuickNoteController: NSObject, NSTextFieldDelegate {
     private static let signature: OSType = 0x52464E54 // RFNT
 
     private let model: AppModel
     private var hotKey: EventHotKeyRef?
     private var eventHandler: EventHandlerRef?
     private var panel: QuickNotePanel?
+    private let noteField = NSTextField(string: "")
+    private let saveLabel = NSTextField(labelWithString: "↩ Save")
+    private let errorLabel = NSTextField(labelWithString: "")
+    private var subscriptions: Set<AnyCancellable> = []
 
     init(model: AppModel) {
         self.model = model
+        super.init()
+        // Build and lay out the reusable panel before the first shortcut press.
+        panel = makePanel()
+        observeSaveState()
         installHotKey()
     }
 
@@ -49,7 +57,9 @@ final class GlobalQuickNoteController {
                 let controller = Unmanaged<GlobalQuickNoteController>
                     .fromOpaque(context)
                     .takeUnretainedValue()
-                Task { @MainActor in controller.toggle() }
+                // Carbon application events are delivered on the main event
+                // loop. Present in this event instead of queueing another task.
+                MainActor.assumeIsolated { controller.toggle() }
                 return noErr
             },
             1,
@@ -78,11 +88,20 @@ final class GlobalQuickNoteController {
     }
 
     private func show() {
-        let panel = panel ?? makePanel()
-        self.panel = panel
+        guard let panel else { return }
         position(panel)
         panel.orderFrontRegardless()
         panel.makeKey()
+        focusEditor()
+    }
+
+    private func focusEditor() {
+        guard noteField.isEnabled else { return }
+        panel?.makeFirstResponder(noteField)
+        noteField.selectText(nil)
+        noteField.currentEditor()?.selectedRange = NSRange(
+            location: (noteField.stringValue as NSString).length, length: 0
+        )
     }
 
     private func makePanel() -> QuickNotePanel {
@@ -99,15 +118,105 @@ final class GlobalQuickNoteController {
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
         panel.becomesKeyOnlyIfNeeded = true
+        panel.isFloatingPanel = true
+        panel.animationBehavior = .none
         panel.isReleasedWhenClosed = false
-        panel.contentView = NSHostingView(
-            rootView: GlobalQuickNoteView { [weak panel] in
-                panel?.orderOut(nil)
-            }
-            .environmentObject(model)
-            .preferredColorScheme(.dark)
-        )
+        panel.appearance = NSAppearance(named: .darkAqua)
+
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 460, height: 92))
+        content.wantsLayer = true
+        content.layer?.backgroundColor = NSColor(calibratedWhite: 0.10, alpha: 0.98).cgColor
+        content.layer?.cornerRadius = 16
+        content.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
+        content.layer?.borderWidth = 1
+
+        let icon = NSImageView()
+        icon.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: nil)
+        icon.contentTintColor = .systemOrange
+        noteField.placeholderString = "Quick note → dump.md"
+        noteField.font = .systemFont(ofSize: 16, weight: .medium)
+        noteField.textColor = .labelColor
+        noteField.isBordered = false
+        noteField.drawsBackground = false
+        noteField.focusRingType = .none
+        noteField.usesSingleLineMode = true
+        noteField.cell?.isScrollable = true
+        (noteField.cell as? NSTextFieldCell)?.sendsActionOnEndEditing = false
+        noteField.lineBreakMode = .byClipping
+        noteField.target = self
+        noteField.action = #selector(submitNote(_:))
+        noteField.delegate = self
+        noteField.setAccessibilityLabel("Quick note")
+        saveLabel.font = .systemFont(ofSize: 11, weight: .bold)
+        saveLabel.textColor = .secondaryLabelColor
+        errorLabel.font = .systemFont(ofSize: 11)
+        errorLabel.textColor = .systemRed
+        errorLabel.lineBreakMode = .byTruncatingTail
+        errorLabel.isHidden = true
+
+        for view in [icon, noteField, saveLabel, errorLabel] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(view)
+        }
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
+            icon.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 20),
+            icon.heightAnchor.constraint(equalToConstant: 22),
+            noteField.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 10),
+            noteField.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            noteField.trailingAnchor.constraint(equalTo: saveLabel.leadingAnchor, constant: -10),
+            saveLabel.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -18),
+            saveLabel.centerYAnchor.constraint(equalTo: noteField.centerYAnchor),
+            saveLabel.widthAnchor.constraint(equalToConstant: 52),
+            errorLabel.leadingAnchor.constraint(equalTo: noteField.leadingAnchor),
+            errorLabel.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -18),
+            errorLabel.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10)
+        ])
+        panel.contentView = content
+        content.layoutSubtreeIfNeeded()
+        // Prepare the field editor while hidden. Typing stays inside AppKit;
+        // no keystroke publishes a change to the dashboard's AppModel.
+        if let editor = panel.fieldEditor(true, for: noteField) as? NSTextView {
+            editor.isAutomaticTextReplacementEnabled = false
+            editor.isAutomaticQuoteSubstitutionEnabled = false
+            editor.isAutomaticDashSubstitutionEnabled = false
+            editor.isAutomaticSpellingCorrectionEnabled = false
+        }
         return panel
+    }
+
+    private func observeSaveState() {
+        // Observe just save results, never the app clock or task list.
+        model.$isSavingQuickNote.removeDuplicates().sink { [weak self] saving in
+            guard let self else { return }
+            self.noteField.isEnabled = !saving
+            self.saveLabel.stringValue = saving ? "Saving…" : "↩ Save"
+            if !saving, self.panel?.isVisible == true {
+                self.focusEditor()
+            }
+        }.store(in: &subscriptions)
+        model.$quickNoteError.combineLatest(model.$quickNoteExportIssue).sink { [weak self] saveError, exportError in
+            let message = saveError ?? exportError
+            self?.errorLabel.stringValue = message ?? ""
+            self?.errorLabel.toolTip = message
+            self?.errorLabel.isHidden = message == nil
+        }.store(in: &subscriptions)
+    }
+
+    @objc private func submitNote(_ sender: Any?) {
+        let accepted = model.submitQuickNote(noteField.stringValue) { [weak self] in
+            self?.noteField.stringValue = ""
+        }
+        if accepted { panel?.orderOut(nil) }
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            panel?.orderOut(nil)
+            return true
+        }
+        return false
     }
 
     private func position(_ panel: NSPanel) {
@@ -124,45 +233,4 @@ final class GlobalQuickNoteController {
 private final class QuickNotePanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
-}
-
-private struct GlobalQuickNoteView: View {
-    @EnvironmentObject private var model: AppModel
-    @FocusState private var isFocused: Bool
-    let dismiss: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 10) {
-                Image(systemName: "square.and.pencil")
-                    .font(.title3.bold())
-                    .foregroundStyle(.orange)
-                TextField("Quick note → dump.md", text: $model.quickNote)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 16, weight: .medium))
-                    .focused($isFocused)
-                    .onSubmit {
-                        let hasText = !model.quickNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        guard hasText else { return }
-                        dismiss()
-                        model.submitQuickNote()
-                    }
-                    .disabled(model.isSavingQuickNote)
-                Text(model.isSavingQuickNote ? "Saving…" : "↩ Save")
-                    .font(.caption.bold())
-                    .foregroundStyle(.secondary)
-            }
-            if let error = model.quickNoteError {
-                Text(error).font(.caption2).foregroundStyle(.red).lineLimit(1)
-            }
-        }
-        .padding(.horizontal, 18)
-        .frame(width: 460, height: 92)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.18)))
-        .onAppear {
-            DispatchQueue.main.async { isFocused = true }
-        }
-        .onExitCommand { dismiss() }
-    }
 }

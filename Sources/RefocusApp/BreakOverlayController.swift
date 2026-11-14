@@ -132,7 +132,7 @@ final class BreakOverlayController {
             switch mode {
             case .planningGate:
                 content = AnyView(
-                    PlanningGateOverlayView(isPrimary: isPrimary)
+                    PlanningGateOverlayView(isPrimary: isPrimary, clock: model.clockDisplay)
                         .environmentObject(model)
                         .preferredColorScheme(.dark)
                 )

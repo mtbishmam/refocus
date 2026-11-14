@@ -107,6 +107,8 @@ public final class RefocusStore: @unchecked Sendable {
                 DailyFieldDefinition(id: "expenses", name: "Expenses", kind: .number, unit: "BDT", position: existingDefinitions.count + 2),
                 DailyFieldDefinition(id: "solved-problems", name: "Solved problems", kind: .number, position: existingDefinitions.count + 3),
                 DailyFieldDefinition(id: "cp-hours", name: "CP Hours", kind: .number, unit: "hours", position: existingDefinitions.count + 4),
+                DailyFieldDefinition(id: "hair-spray-1", name: "Hair Spray 1", kind: .triState, position: existingDefinitions.count + 5),
+                DailyFieldDefinition(id: "hair-spray-2", name: "Hair Spray 2", kind: .triState, position: existingDefinitions.count + 6),
             ]
             for definition in existingDefinitions + builtIns {
                 try upsertDefinition(definition)
@@ -611,11 +613,43 @@ public final class RefocusStore: @unchecked Sendable {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
         try transaction {
-            guard try scalar("SELECT id FROM captures WHERE id = ?", [.text(id)]) == nil else { return }
-            try execute("INSERT INTO captures(id, text, created_at, updated_hlc) VALUES(?, ?, ?, ?)",
-                        [.text(id), .text(clean), .double(date.timeIntervalSince1970), .text(nextHLC())])
-            try enqueue(kind: "capture", id: id, operation: "upsert", payload: Data(clean.utf8))
+            if try scalar("SELECT id FROM captures WHERE id = ?", [.text(id)]) == nil {
+                try execute("INSERT INTO captures(id, text, created_at, updated_hlc) VALUES(?, ?, ?, ?)",
+                            [.text(id), .text(clean), .double(date.timeIntervalSince1970), .text(nextHLC())])
+                try enqueue(kind: "capture", id: id, operation: "upsert", payload: Data(clean.utf8))
+            }
+            try queueCaptureExport(id: id)
         }
+    }
+
+    public func queueCaptureExport(id: String) throws {
+        try execute("INSERT OR IGNORE INTO capture_exports(capture_id) SELECT id FROM captures WHERE id = ?", [.text(id)])
+    }
+
+    public func pendingCaptureExports() throws -> [PendingCaptureExport] {
+        var captures: [PendingCaptureExport] = []
+        try query("""
+            SELECT c.id, c.text, e.destination, e.byte_offset, e.suffix
+            FROM capture_exports e JOIN captures c ON c.id = e.capture_id
+            WHERE e.exported_at IS NULL ORDER BY c.created_at, c.id
+            """) { row in
+            guard let id = row.text(0), let text = row.text(1) else { return }
+            captures.append(PendingCaptureExport(
+                id: id, text: text, destination: row.text(2),
+                byteOffset: row.text(3).flatMap(Int64.init), suffix: row.blob(4)
+            ))
+        }
+        return captures
+    }
+
+    public func prepareCaptureExport(id: String, destination: String, byteOffset: Int64, suffix: Data) throws {
+        try execute("UPDATE capture_exports SET destination = ?, byte_offset = ?, suffix = ? WHERE capture_id = ? AND exported_at IS NULL",
+                    [.text(destination), .integer(Int(byteOffset)), .blob(suffix), .text(id)])
+    }
+
+    public func markCaptureExported(id: String) throws {
+        try execute("UPDATE capture_exports SET exported_at = ? WHERE capture_id = ?",
+                    [.double(Date().timeIntervalSince1970), .text(id)])
     }
 
     public func saveCheckIn(_ checkIn: CheckIn) throws {
@@ -638,32 +672,246 @@ public final class RefocusStore: @unchecked Sendable {
     }
 
     public func screenBreakSkipCount(on date: Date) throws -> Int {
-        Int(try scalar(
-            "SELECT COUNT(*) FROM screen_break_skips WHERE day = ?",
-            [.text(dayKey(date))]
+        let day = dayKey(date)
+        let (windowStart, windowEnd) = screenBreakSkipWindow(for: date)
+        return Int(try scalar(
+            """
+            SELECT COUNT(*) FROM screen_break_skips
+            WHERE day = ? OR (day = ? AND skipped_at >= ? AND skipped_at < ?)
+            """,
+            [
+                .text(screenBreakSkipKey(for: date)), .text(day),
+                .double(windowStart.timeIntervalSince1970), .double(windowEnd.timeIntervalSince1970)
+            ]
         ) ?? "0") ?? 0
     }
 
-    /// Records one specific periodic break once and returns today's durable
-    /// count. A primary key on day + break ID makes retries idempotent.
+    /// Records one periodic break once and returns the durable count for its
+    /// six-hour wall-clock block. Legacy day-keyed rows are counted in the
+    /// block matching their original timestamp.
     public func recordScreenBreakSkip(id: String, at date: Date) throws -> Int {
         try transaction {
             let day = dayKey(date)
+            let quotaKey = screenBreakSkipKey(for: date)
+            let (windowStart, windowEnd) = screenBreakSkipWindow(for: date)
             let alreadyRecorded = try scalar(
-                "SELECT break_id FROM screen_break_skips WHERE day = ? AND break_id = ?",
-                [.text(day), .text(id)]
+                """
+                SELECT break_id FROM screen_break_skips
+                WHERE break_id = ? AND (day = ? OR (day = ? AND skipped_at >= ? AND skipped_at < ?))
+                """,
+                [
+                    .text(id), .text(quotaKey), .text(day),
+                    .double(windowStart.timeIntervalSince1970), .double(windowEnd.timeIntervalSince1970)
+                ]
             ) != nil
-            let count = Int(try scalar(
-                "SELECT COUNT(*) FROM screen_break_skips WHERE day = ?",
-                [.text(day)]
-            ) ?? "0") ?? 0
+            let count = try screenBreakSkipCount(on: date)
             guard alreadyRecorded || count < 3 else { return }
             try execute(
                 "INSERT OR IGNORE INTO screen_break_skips(day, break_id, skipped_at) VALUES(?, ?, ?)",
-                [.text(day), .text(id), .double(date.timeIntervalSince1970)]
+                [.text(quotaKey), .text(id), .double(date.timeIntervalSince1970)]
             )
         }
         return try screenBreakSkipCount(on: date)
+    }
+
+    private func screenBreakSkipKey(for date: Date) -> String {
+        "\(dayKey(date))#\(UnplannedWorkAllowance.blockIndex(at: date, calendar: calendar))"
+    }
+
+    private func screenBreakSkipWindow(for date: Date) -> (start: Date, end: Date) {
+        let block = UnplannedWorkAllowance.blockIndex(at: date, calendar: calendar)
+        var components = calendar.dateComponents([.year, .month, .day], from: date)
+        components.hour = block * 6
+        components.minute = 0
+        components.second = 0
+        let start = calendar.date(from: components) ?? date
+        let end = calendar.date(byAdding: .hour, value: 6, to: start) ?? start.addingTimeInterval(6 * 60 * 60)
+        return (start, end)
+    }
+
+    public func unplannedWorkReleaseCount(at date: Date) throws -> Int {
+        Int(try scalar(
+            "SELECT COUNT(*) FROM unplanned_work_releases WHERE day = ? AND block_index = ?",
+            [.text(dayKey(date)), .integer(UnplannedWorkAllowance.blockIndex(at: date, calendar: calendar))]
+        ) ?? "0") ?? 0
+    }
+
+    public func activeUnplannedWorkReleaseEnd(at date: Date) throws -> Date? {
+        guard let startedAt = try scalar(
+            "SELECT MAX(started_at) FROM unplanned_work_releases WHERE started_at <= ? AND started_at > ?",
+            [
+                .double(date.timeIntervalSince1970),
+                .double(date.timeIntervalSince1970 - UnplannedWorkAllowance.durationSeconds)
+            ]
+        ).flatMap(Double.init) else { return nil }
+        let end = Date(timeIntervalSince1970: startedAt + UnplannedWorkAllowance.durationSeconds)
+        return end > date ? end : nil
+    }
+
+    /// Grants at most two durable 25-minute no-plan releases in each six-hour
+    /// wall-clock block. The release ID makes a retried click idempotent.
+    public func recordUnplannedWorkRelease(
+        id: String, at date: Date
+    ) throws -> UnplannedWorkReleaseResult {
+        var granted = false
+        try transaction {
+            let day = dayKey(date)
+            let block = UnplannedWorkAllowance.blockIndex(at: date, calendar: calendar)
+            let alreadyRecorded = try scalar(
+                "SELECT release_id FROM unplanned_work_releases WHERE day = ? AND block_index = ? AND release_id = ?",
+                [.text(day), .integer(block), .text(id)]
+            ) != nil
+            let count = Int(try scalar(
+                "SELECT COUNT(*) FROM unplanned_work_releases WHERE day = ? AND block_index = ?",
+                [.text(day), .integer(block)]
+            ) ?? "0") ?? 0
+            if alreadyRecorded {
+                granted = true
+                return
+            }
+            guard count < UnplannedWorkAllowance.maximumBlocks else { return }
+            try execute(
+                "INSERT INTO unplanned_work_releases(day, block_index, release_id, started_at) VALUES(?, ?, ?, ?)",
+                [.text(day), .integer(block), .text(id), .double(date.timeIntervalSince1970)]
+            )
+            granted = true
+        }
+        return UnplannedWorkReleaseResult(
+            granted: granted,
+            used: try unplannedWorkReleaseCount(at: date)
+        )
+    }
+
+    public func reminders() throws -> [ReminderDefinition] {
+        var result: [ReminderDefinition] = []
+        try query(
+            "SELECT id, title, question, start_minute, kind, enabled, position FROM reminder_definitions WHERE deleted = 0 ORDER BY position, start_minute, title COLLATE NOCASE"
+        ) { row in
+            guard let id = row.text(0), let title = row.text(1), let question = row.text(2),
+                  let kindText = row.text(4), let kind = ReminderKind(rawValue: kindText) else { return }
+            result.append(ReminderDefinition(
+                id: id, title: title, question: question, startMinute: row.int(3),
+                kind: kind, enabled: row.int(5) != 0, position: row.int(6)
+            ))
+        }
+        return result
+    }
+
+    public func saveReminder(_ reminder: ReminderDefinition) throws {
+        try execute(
+            """
+            INSERT INTO reminder_definitions(id, title, question, start_minute, kind, enabled, position, deleted, updated_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?, 0, ?)
+            ON CONFLICT(id) DO UPDATE SET title=excluded.title, question=excluded.question,
+              start_minute=excluded.start_minute, kind=excluded.kind, enabled=excluded.enabled,
+              position=excluded.position, deleted=0, updated_at=excluded.updated_at
+            """,
+            [
+                .text(reminder.id), .text(reminder.title), .text(reminder.question),
+                .integer(reminder.startMinute), .text(reminder.kind.rawValue),
+                .integer(reminder.enabled ? 1 : 0), .integer(reminder.position),
+                .double(Date().timeIntervalSince1970)
+            ]
+        )
+    }
+
+    public func deleteReminder(id: String) throws {
+        try execute(
+            "UPDATE reminder_definitions SET deleted = 1, updated_at = ? WHERE id = ?",
+            [.double(Date().timeIntervalSince1970), .text(id)]
+        )
+    }
+
+    public func dueReminders(at date: Date, cycleStart: Date? = nil) throws -> [ReminderOccurrence] {
+        let day = dayKey(date)
+        let minute = calendar.component(.hour, from: date) * 60 + calendar.component(.minute, from: date)
+        try transaction {
+            for reminder in try reminders() where reminder.enabled {
+                if reminder.kind == .cycleReview {
+                    guard let cycleStart, dayKey(cycleStart) == day else { continue }
+                    let cycleMinute = calendar.component(.hour, from: cycleStart) * 60
+                        + calendar.component(.minute, from: cycleStart)
+                    guard ReminderResetBlock.forMinute(cycleMinute) != nil else { continue }
+                    try ensureReminderOccurrence(reminderID: reminder.id, day: day, dueMinute: cycleMinute)
+                } else if reminder.startMinute <= minute {
+                    try ensureReminderOccurrence(reminderID: reminder.id, day: day, dueMinute: reminder.startMinute)
+                }
+            }
+        }
+
+        var result: [ReminderOccurrence] = []
+        let resetBlock = ReminderResetBlock.forMinute(minute)
+        let cycleFilter: String
+        var arguments: [SQLiteValue] = [.text(day), .integer(minute)]
+        if let resetBlock {
+            cycleFilter = "AND (r.kind != ? OR (o.due_minute >= ? AND o.due_minute < ?))"
+            arguments.append(contentsOf: [
+                .text(ReminderKind.cycleReview.rawValue),
+                .integer(resetBlock.startMinute),
+                .integer(resetBlock.endMinute)
+            ])
+        } else {
+            cycleFilter = "AND r.kind != ?"
+            arguments.append(.text(ReminderKind.cycleReview.rawValue))
+        }
+        try query(
+            """
+            SELECT r.id, r.title, r.question, r.start_minute, r.kind, r.enabled, r.position,
+                   o.day, o.due_minute, o.answer, o.answered_at
+            FROM reminder_occurrences o
+            JOIN reminder_definitions r ON r.id = o.reminder_id
+            WHERE o.day = ? AND o.due_minute <= ? AND o.answer IS NULL
+              AND r.deleted = 0 AND r.enabled = 1
+              \(cycleFilter)
+            ORDER BY o.due_minute, r.position, r.title COLLATE NOCASE
+            """,
+            arguments
+        ) { row in
+            guard let id = row.text(0), let title = row.text(1), let question = row.text(2),
+                  let kindText = row.text(4), let kind = ReminderKind(rawValue: kindText),
+                  let occurrenceDay = row.text(7) else { return }
+            let definition = ReminderDefinition(
+                id: id, title: title, question: question, startMinute: row.int(3),
+                kind: kind, enabled: row.int(5) != 0, position: row.int(6)
+            )
+            result.append(ReminderOccurrence(
+                reminder: definition, day: occurrenceDay, dueMinute: row.int(8),
+                answer: row.text(9),
+                answeredAt: row.text(10).flatMap(Double.init).map(Date.init(timeIntervalSince1970:))
+            ))
+        }
+        return result
+    }
+
+    @discardableResult
+    public func answerReminder(_ occurrence: ReminderOccurrence, answer: String, at date: Date) throws -> ReminderOccurrence {
+        let clean = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { throw RefocusStoreError.corrupt("reminder answer cannot be empty") }
+        try execute(
+            """
+            UPDATE reminder_occurrences SET answer = ?, answered_at = ?
+            WHERE reminder_id = ? AND day = ? AND due_minute = ?
+            """,
+            [
+                .text(clean), .double(date.timeIntervalSince1970), .text(occurrence.reminder.id),
+                .text(occurrence.day), .integer(occurrence.dueMinute)
+            ]
+        )
+        guard try scalar(
+            "SELECT answer FROM reminder_occurrences WHERE reminder_id = ? AND day = ? AND due_minute = ?",
+            [.text(occurrence.reminder.id), .text(occurrence.day), .integer(occurrence.dueMinute)]
+        ) == clean else { throw RefocusStoreError.corrupt("reminder answer failed durable read-back verification") }
+        var answered = occurrence
+        answered.answer = clean
+        answered.answeredAt = date
+        return answered
+    }
+
+    private func ensureReminderOccurrence(reminderID: String, day: String, dueMinute: Int) throws {
+        try execute(
+            "INSERT OR IGNORE INTO reminder_occurrences(reminder_id, day, due_minute, created_at) VALUES(?, ?, ?, ?)",
+            [.text(reminderID), .text(day), .integer(dueMinute), .double(Date().timeIntervalSince1970)]
+        )
     }
 
     public func fieldDefinitions() throws -> [DailyFieldDefinition] {
@@ -995,7 +1243,31 @@ public final class RefocusStore: @unchecked Sendable {
               PRIMARY KEY(day, break_id)
             );
             CREATE INDEX IF NOT EXISTS screen_break_skips_day ON screen_break_skips(day);
+            CREATE TABLE IF NOT EXISTS unplanned_work_releases(
+              day TEXT NOT NULL, block_index INTEGER NOT NULL,
+              release_id TEXT NOT NULL, started_at REAL NOT NULL,
+              PRIMARY KEY(day, block_index, release_id)
+            );
+            CREATE INDEX IF NOT EXISTS unplanned_work_releases_block
+              ON unplanned_work_releases(day, block_index);
+            CREATE TABLE IF NOT EXISTS reminder_definitions(
+              id TEXT PRIMARY KEY, title TEXT NOT NULL, question TEXT NOT NULL,
+              start_minute INTEGER NOT NULL, kind TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+              position INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0,
+              updated_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS reminder_occurrences(
+              reminder_id TEXT NOT NULL, day TEXT NOT NULL, due_minute INTEGER NOT NULL,
+              answer TEXT, answered_at REAL, created_at REAL NOT NULL,
+              PRIMARY KEY(reminder_id, day, due_minute)
+            );
+            CREATE INDEX IF NOT EXISTS reminder_occurrences_due
+              ON reminder_occurrences(day, answer, due_minute);
             CREATE TABLE IF NOT EXISTS captures(id TEXT PRIMARY KEY, text TEXT NOT NULL, created_at REAL NOT NULL, updated_hlc TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS capture_exports(
+              capture_id TEXT PRIMARY KEY REFERENCES captures(id), destination TEXT,
+              byte_offset INTEGER, suffix BLOB, exported_at REAL
+            );
             CREATE TABLE IF NOT EXISTS field_definitions(
               id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, unit TEXT,
               position INTEGER NOT NULL, success_rule TEXT, archived INTEGER NOT NULL DEFAULT 0
@@ -1014,6 +1286,47 @@ public final class RefocusStore: @unchecked Sendable {
             );
             """
         )
+        try seedDefaultReminders()
+    }
+
+    private func seedDefaultReminders() throws {
+        let now = Date().timeIntervalSince1970
+        let defaults = [
+            ReminderDefinition(
+                id: "weight", title: "Today's Weight",
+                question: "What is today's weight?", startMinute: 330,
+                kind: .weight, position: 0
+            ),
+            ReminderDefinition(
+                id: "hair-spray-1", title: "Hair Spray 1",
+                question: "Did you use Hair Spray 1?", startMinute: 330,
+                kind: .hairSpray, position: 1
+            ),
+            ReminderDefinition(
+                id: "hair-spray-2", title: "Hair Spray 2",
+                question: "Did you use Hair Spray 2?", startMinute: 1050,
+                kind: .hairSpray, position: 2
+            ),
+            ReminderDefinition(
+                id: "cycle-review", title: "Cycle Review",
+                question: "What did you do during this time?", startMinute: 0,
+                kind: .cycleReview, position: 3
+            ),
+        ]
+        for reminder in defaults {
+            try execute(
+                """
+                INSERT OR IGNORE INTO reminder_definitions(
+                  id, title, question, start_minute, kind, enabled, position, deleted, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, 0, ?)
+                """,
+                [
+                    .text(reminder.id), .text(reminder.title), .text(reminder.question),
+                    .integer(reminder.startMinute), .text(reminder.kind.rawValue),
+                    .integer(reminder.enabled ? 1 : 0), .integer(reminder.position), .double(now)
+                ]
+            )
+        }
     }
 
     private func migrateFinalSnapshots() throws {
@@ -1051,6 +1364,8 @@ public final class RefocusStore: @unchecked Sendable {
             DailyFieldDefinition(id: "expenses", name: "Expenses", kind: .number, unit: "BDT", position: 102),
             DailyFieldDefinition(id: "solved-problems", name: "Solved problems", kind: .number, position: 103),
             DailyFieldDefinition(id: "cp-hours", name: "CP Hours", kind: .number, unit: "hours", position: 104),
+            DailyFieldDefinition(id: "hair-spray-1", name: "Hair Spray 1", kind: .triState, position: 105),
+            DailyFieldDefinition(id: "hair-spray-2", name: "Hair Spray 2", kind: .triState, position: 106),
         ]
 
         try transaction {

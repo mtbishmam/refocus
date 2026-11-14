@@ -82,6 +82,77 @@ public enum PlanningSegment: String, Codable, CaseIterable, Sendable {
     }
 }
 
+public enum UnplannedWorkAllowance {
+    public static let maximumBlocks = 2
+    public static let durationSeconds: TimeInterval = 25 * 60
+
+    public static func blockIndex(
+        at date: Date, calendar: Calendar = WallClock.dhakaCalendar()
+    ) -> Int {
+        let parts = calendar.dateComponents([.hour, .minute], from: date)
+        let minute = (parts.hour ?? 0) * 60 + (parts.minute ?? 0)
+        return min(3, max(0, minute / 360))
+    }
+}
+
+public enum ReminderResetBlock: String, CaseIterable, Sendable {
+    case sol
+    case terra
+    case luna
+
+    public var title: String {
+        switch self {
+        case .sol: "Sol Block"
+        case .terra: "Terra Block"
+        case .luna: "Luna Block"
+        }
+    }
+
+    public var startMinute: Int {
+        switch self {
+        case .sol: 360
+        case .terra: 720
+        case .luna: 1080
+        }
+    }
+
+    public var endMinute: Int {
+        switch self {
+        case .sol: 720
+        case .terra: 1080
+        case .luna: 1440
+        }
+    }
+
+    public static func forMinute(_ minute: Int) -> Self? {
+        allCases.first { minute >= $0.startMinute && minute < $0.endMinute }
+    }
+}
+
+public enum TemporaryBreakPolicy {
+    public static let allowedMinutes = [1, 5, 10]
+
+    public static func end(
+        startedAt: Date,
+        minutes: Int,
+        nextScreenBreakAt: Date?
+    ) -> Date {
+        let requestedEnd = startedAt.addingTimeInterval(TimeInterval(max(1, minutes) * 60))
+        guard let nextScreenBreakAt, nextScreenBreakAt > startedAt else { return requestedEnd }
+        return min(requestedEnd, nextScreenBreakAt)
+    }
+}
+
+public struct UnplannedWorkReleaseResult: Equatable, Sendable {
+    public var granted: Bool
+    public var used: Int
+
+    public init(granted: Bool, used: Int) {
+        self.granted = granted
+        self.used = used
+    }
+}
+
 public enum DayProfileKind: String, Codable, CaseIterable, Sendable {
     case standard
     case universityEarly = "university-early"
@@ -708,6 +779,85 @@ public struct DailyFieldValue: Identifiable, Codable, Equatable, Sendable {
         self.definitionID = definitionID
         self.date = date
         self.value = value
+    }
+}
+
+public enum ReminderKind: String, Codable, CaseIterable, Sendable {
+    case standard
+    case weight
+    case hairSpray = "hair-spray"
+    case cycleReview = "cycle-review"
+
+    public var title: String {
+        switch self {
+        case .standard: "Standard"
+        case .weight: "Weight"
+        case .hairSpray: "Hair Spray"
+        case .cycleReview: "Every cycle"
+        }
+    }
+}
+
+public struct ReminderDefinition: Identifiable, Codable, Equatable, Sendable {
+    public var id: String
+    public var title: String
+    public var question: String
+    public var startMinute: Int
+    public var kind: ReminderKind
+    public var enabled: Bool
+    public var position: Int
+
+    public init(
+        id: String = UUID().uuidString.lowercased(),
+        title: String,
+        question: String,
+        startMinute: Int,
+        kind: ReminderKind = .standard,
+        enabled: Bool = true,
+        position: Int = 0
+    ) {
+        self.id = id
+        self.title = title
+        self.question = question
+        self.startMinute = min(1410, max(0, (startMinute / 30) * 30))
+        self.kind = kind
+        self.enabled = enabled
+        self.position = position
+    }
+}
+
+public struct ReminderOccurrence: Identifiable, Equatable, Sendable {
+    public var id: String { "\(reminder.id):\(day):\(dueMinute)" }
+    public var reminder: ReminderDefinition
+    public var day: String
+    public var dueMinute: Int
+    public var answer: String?
+    public var answeredAt: Date?
+
+    public init(
+        reminder: ReminderDefinition,
+        day: String,
+        dueMinute: Int,
+        answer: String? = nil,
+        answeredAt: Date? = nil
+    ) {
+        self.reminder = reminder
+        self.day = day
+        self.dueMinute = dueMinute
+        self.answer = answer
+        self.answeredAt = answeredAt
+    }
+}
+
+public enum CycleReviewResolver {
+    public static func task(in tasks: [PlanTask], at minute: Int) -> PlanTask? {
+        tasks
+            .filter { $0.hasScheduledTime && $0.countsTowardPlanning && $0.contains(minuteOfDay: minute) }
+            .sorted {
+                if $0.startMinute != $1.startMinute { return $0.startMinute > $1.startMinute }
+                return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
+            }
+            .first
     }
 }
 
