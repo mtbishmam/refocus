@@ -51,6 +51,53 @@ func check(_ name: String, _ body: () throws -> Void) rethrows {
 }
 
 do {
+    try check("Browser site limits match subdomains but not lookalike hosts") {
+        let settings = BrowserLimitSettings(trackedDomains: ["https://www.facebook.com/path", " instagram.com ", "facebook.com", "bad domain"])
+        try expect(settings.trackedDomains == ["facebook.com", "instagram.com"], "Tracked domains were not safely normalized")
+        try expect(settings.trackedDomain(for: "m.facebook.com") == "facebook.com", "Facebook subdomain did not match")
+        try expect(settings.trackedDomain(for: "instagram.com") == "instagram.com", "Instagram root domain did not match")
+        try expect(settings.trackedDomain(for: "notfacebook.com") == nil, "Lookalike domain was incorrectly matched")
+    }
+    try check("Rolling browser usage combines sessions and excludes time older than one hour") {
+        let now = try date("2026-08-04 12:00:00")
+        let active = BrowserUsageSession(
+            host: "instagram.com", browserBundleID: "com.google.Chrome", browserName: "Google Chrome",
+            startedAt: now.addingTimeInterval(-100), lastSeenAt: now.addingTimeInterval(-10)
+        )
+        let ended = BrowserUsageSession(
+            host: "facebook.com", browserBundleID: "com.brave.Browser", browserName: "Brave Browser",
+            startedAt: now.addingTimeInterval(-500), lastSeenAt: now.addingTimeInterval(-260),
+            endedAt: now.addingTimeInterval(-260)
+        )
+        let expired = BrowserUsageSession(
+            host: "facebook.com", browserBundleID: "com.apple.Safari", browserName: "Safari",
+            startedAt: now.addingTimeInterval(-5_000), lastSeenAt: now.addingTimeInterval(-4_700),
+            endedAt: now.addingTimeInterval(-4_700)
+        )
+        let used = BrowserUsagePolicy.seconds(
+            in: [active, ended, expired], since: now.addingTimeInterval(-3_600),
+            through: now, activeSessionID: active.id
+        )
+        try expect(used == 340, "Rolling usage did not combine 240 seconds + 100 seconds (got \(used))")
+    }
+    try check("Browser-limit countdown advances only during active tracked-site use") {
+        let sampledAt = try date("2026-08-04 12:00:00")
+        let activeRemaining = BrowserUsagePolicy.remainingSeconds(
+            limitSeconds: 300, reportedUsageSeconds: 120, trackingActive: true,
+            sampledAt: sampledAt, now: sampledAt.addingTimeInterval(30)
+        )
+        let idleRemaining = BrowserUsagePolicy.remainingSeconds(
+            limitSeconds: 300, reportedUsageSeconds: 120, trackingActive: false,
+            sampledAt: sampledAt, now: sampledAt.addingTimeInterval(30)
+        )
+        let exhaustedRemaining = BrowserUsagePolicy.remainingSeconds(
+            limitSeconds: 300, reportedUsageSeconds: 300, trackingActive: false,
+            sampledAt: sampledAt, now: sampledAt
+        )
+        try expect(activeRemaining == 150, "Active countdown did not include elapsed seconds")
+        try expect(idleRemaining == 180, "Countdown advanced while no tracked site was active")
+        try expect(exhaustedRemaining == 0, "Remaining time went below zero")
+    }
     try check("11:17 joins the 11:00 focus phase") {
         let snapshot = WallClock(calendar: calendar).snapshot(at: try date("2026-08-04 11:17:00"))
         try expect(snapshot.phase == .focus, "Expected focus")
@@ -1034,6 +1081,59 @@ do {
         let finalPending = try store.pendingCaptureExports()
         try expect(finalPending.isEmpty, "A failed export could not be retried")
     }
+    try check("Voice transcripts append to dump.md with durable idempotent receipts") {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-voice-export-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let store = try RefocusStore(databaseURL: temporary.appendingPathComponent("refocus.sqlite3"), calendar: calendar)
+        let dumpURL = temporary.appendingPathComponent("dump.md")
+        try Data("# Existing dump content\n\nKeep this note.\n".utf8).write(to: dumpURL)
+        let firstTime = try date("2026-08-07 17:42:13")
+        try store.appendVoiceNote("First spoken thought.", id: "voice-1", recordedAt: firstTime)
+        try store.appendVoiceNote("First spoken thought.", id: "voice-1", recordedAt: firstTime)
+        let pendingAfterRetry = try store.pendingVoiceNoteExports()
+        try expect(pendingAfterRetry.count == 1, "A retry duplicated the queued transcript")
+
+        let exported = try VoiceNoteExporter.exportPendingVoiceNotes(from: store, to: dumpURL, calendar: calendar)
+        try expect(exported == 1, "The first transcript was not exported")
+        var markdown = try String(contentsOf: dumpURL, encoding: .utf8)
+        try expect(markdown.hasPrefix("# Existing dump content\n\nKeep this note."), "Existing dump content was not preserved")
+        try expect(markdown.contains("## Voice Note — 2026-08-07 17:42:13\n\nFirst spoken thought."), "Transcript date, time, or text is missing")
+        let pendingAfterExport = try store.pendingVoiceNoteExports()
+        try expect(pendingAfterExport.isEmpty, "An exported transcript remained pending")
+        let duplicateRetryExport = try VoiceNoteExporter.exportPendingVoiceNotes(from: store, to: dumpURL, calendar: calendar)
+        try expect(duplicateRetryExport == 0,
+                   "Retrying export wrote a duplicate transcript")
+
+        try store.appendVoiceNote("Second spoken thought.", id: "voice-2", recordedAt: firstTime.addingTimeInterval(600))
+        try VoiceNoteExporter.exportPendingVoiceNotes(from: store, to: dumpURL, calendar: calendar)
+        markdown = try String(contentsOf: dumpURL, encoding: .utf8)
+        try expect(markdown.components(separatedBy: "First spoken thought.").count == 2, "First transcript was duplicated")
+        try expect(markdown.contains("Second spoken thought."), "A later transcript was not appended")
+
+        let nextDay = try date("2026-08-08 00:05:00")
+        try store.appendVoiceNote("Next day's thought.", id: "voice-3", recordedAt: nextDay)
+        try VoiceNoteExporter.exportPendingVoiceNotes(from: store, to: dumpURL, calendar: calendar)
+        markdown = try String(contentsOf: dumpURL, encoding: .utf8)
+        try expect(markdown.contains("## Voice Note — 2026-08-08 00:05:00\n\nNext day's thought."), "A next-day transcript was not appended to dump.md")
+
+        try store.appendVoiceNote("Retry after destination failure.", id: "voice-4", recordedAt: nextDay.addingTimeInterval(60))
+        let obstruction = temporary.appendingPathComponent("not-a-folder")
+        try Data("file, not folder".utf8).write(to: obstruction)
+        var failed = false
+        do {
+            _ = try VoiceNoteExporter.exportPendingVoiceNotes(
+                from: store,
+                to: obstruction.appendingPathComponent("dump.md"),
+                calendar: calendar
+            )
+        } catch { failed = true }
+        let retainedAfterFailure = try store.pendingVoiceNoteExports()
+        try expect(failed && retainedAfterFailure.count == 1, "A failed vault write lost or acknowledged its queued transcript")
+        _ = try VoiceNoteExporter.exportPendingVoiceNotes(from: store, to: dumpURL, calendar: calendar)
+        let nextDayMarkdown = try String(contentsOf: dumpURL, encoding: .utf8)
+        try expect(nextDayMarkdown.contains("Retry after destination failure."), "A failed export could not be retried")
+    }
     try check("Archived daily logs do not repopulate Agenda") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-agenda-archive-\(UUID().uuidString)")
         let logDirectory = temporary.appendingPathComponent("log", isDirectory: true)
@@ -1846,6 +1946,49 @@ do {
             [expanded, later], taskID: anchorID, previousCycles: 1, protectedRanges: []
         )
         try expect(result == nil, "Expansion past midnight should fail atomically")
+    }
+    try check("Browser limits, rolling usage, and closed tabs persist locally") {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-browser-limits-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let databaseURL = temporary.appendingPathComponent("refocus.sqlite3")
+        let store = try RefocusStore(databaseURL: databaseURL, calendar: calendar)
+        let settings = BrowserLimitSettings(
+            enabled: true, minutesPerRollingHour: 5,
+            trackedDomains: ["facebook.com", "instagram.com"]
+        )
+        try store.saveBrowserLimitSettings(settings)
+        let savedSettings = try store.browserLimitSettings()
+        try expect(savedSettings == settings, "Browser settings did not read back")
+
+        let now = try date("2026-08-04 12:00:00")
+        let older = BrowserUsageSession(
+            host: "facebook.com", browserBundleID: "com.brave.Browser", browserName: "Brave Browser",
+            startedAt: now.addingTimeInterval(-500), lastSeenAt: now.addingTimeInterval(-260)
+        )
+        let active = BrowserUsageSession(
+            host: "instagram.com", browserBundleID: "com.google.Chrome", browserName: "Google Chrome",
+            startedAt: now.addingTimeInterval(-100), lastSeenAt: now.addingTimeInterval(-10)
+        )
+        try store.beginBrowserUsageSession(older)
+        try store.finishBrowserUsageSession(older.id, at: now.addingTimeInterval(-260))
+        try store.beginBrowserUsageSession(active)
+        let used = try store.browserUsageSeconds(inLast: 3_600, at: now, activeSessionID: active.id)
+        try expect(
+            used == 340,
+            "SQLite usage did not combine earlier and active browser sessions"
+        )
+        let closed = ClosedBrowserTab(
+            url: "https://www.instagram.com/reel/example", title: "Saved Reel",
+            browserBundleID: "com.google.Chrome", browserName: "Google Chrome", closedAt: now
+        )
+        try store.saveClosedBrowserTab(closed)
+
+        let reopened = try RefocusStore(databaseURL: databaseURL, calendar: calendar)
+        let reloadedSettings = try reopened.browserLimitSettings()
+        let savedTabs = try reopened.recentClosedBrowserTabs()
+        try expect(reloadedSettings == settings, "Browser settings did not survive reopening the database")
+        try expect(savedTabs == [closed], "Closed tab history did not survive reopening the database")
     }
     try check("Local store stays inside the speed budget") {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("refocus-speed-\(UUID().uuidString)")

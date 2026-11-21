@@ -2969,6 +2969,10 @@ private struct HabitDatabaseTable: View {
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
 
+    private func formatBrowserUsage(_ seconds: Int) -> String {
+        String(format: "%d:%02d", max(0, seconds) / 60, max(0, seconds) % 60)
+    }
+
     var body: some View {
         Form {
             Section("Startup") {
@@ -2983,6 +2987,81 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            Section("Website limits") {
+                Toggle("Enable tracked-site time limit", isOn: Binding(
+                    get: { model.browserLimitSettings.enabled },
+                    set: { model.setBrowserLimitEnabled($0) }
+                ))
+                Stepper(
+                    "Minutes allowed per rolling hour: \(model.browserLimitSettings.minutesPerRollingHour)",
+                    value: $model.browserLimitSettings.minutesPerRollingHour,
+                    in: 1...60
+                )
+                TextField("Tracked domains", text: $model.browserLimitDomainsDraft)
+                    .textFieldStyle(.roundedBorder)
+                HStack {
+                    Button("Save Website Limits") { model.saveBrowserLimitSettings() }
+                    Button("Open Automation Settings") { model.openBrowserAutomationSettings() }
+                }
+                TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                    let limitSeconds = model.browserLimitSettings.minutesPerRollingHour * 60
+                    let remainingSeconds = BrowserUsagePolicy.remainingSeconds(
+                        limitSeconds: limitSeconds,
+                        reportedUsageSeconds: model.browserLimitUsageSeconds,
+                        trackingActive: model.browserLimitActiveDomain != nil,
+                        sampledAt: model.browserLimitSampledAt,
+                        now: timeline.date
+                    )
+                    VStack(alignment: .leading, spacing: 4) {
+                        LabeledContent(
+                            "Time remaining this rolling hour",
+                            value: model.browserLimitSettings.enabled
+                                ? formatBrowserUsage(remainingSeconds)
+                                : "Off"
+                        )
+                        LabeledContent(
+                            "Used in the last 60 minutes",
+                            value: "\(formatBrowserUsage(limitSeconds - remainingSeconds)) / \(model.browserLimitSettings.minutesPerRollingHour):00"
+                        )
+                    }
+                }
+                Text(model.browserLimitStatus)
+                    .font(.caption)
+                    .foregroundStyle(model.browserLimitStatus.localizedCaseInsensitiveContains("couldn't")
+                        || model.browserLimitStatus.localizedCaseInsensitiveContains("could not")
+                        || model.browserLimitStatus.localizedCaseInsensitiveContains("allow ReFocus")
+                        ? .orange : .secondary)
+                Text("ReFocus checks only the frontmost tab while Chrome, Brave, or Safari is active. The same rolling-hour budget applies across their open profiles; background tabs do not count. Nothing is read until you enable this switch and allow browser control in macOS Automation. At the limit, only the still-active matching tab is closed. Usage and the last 100 closed links are stored locally and are not sent to ReFocus cloud sync.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if !model.closedBrowserTabs.isEmpty {
+                    Divider()
+                    Text("Recently closed at the limit")
+                        .font(.subheadline.weight(.semibold))
+                    ForEach(model.closedBrowserTabs) { tab in
+                        HStack(alignment: .top) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(tab.title.isEmpty ? tab.url : tab.title)
+                                    .lineLimit(1)
+                                    .textSelection(.enabled)
+                                Text("\(tab.browserName) · \(tab.closedAt.formatted(date: .abbreviated, time: .shortened))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                if !tab.title.isEmpty {
+                                    Text(tab.url)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .textSelection(.enabled)
+                                }
+                            }
+                            Spacer(minLength: 8)
+                            Button("Open") { model.reopenClosedBrowserTab(tab) }
+                        }
+                        .padding(.vertical, 3)
+                    }
+                }
+            }
             Section("Quick Note") {
                 Text(model.quickNoteDumpPath)
                     .font(.caption)
@@ -2995,6 +3074,40 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(model.quickNoteExportIssue == nil ? Color.secondary : Color.orange)
                 Text("Control–Space opens Quick Note. Press Enter to save. Notes are saved locally first, then appended to the selected Obsidian dump.md; queued exports survive restarts.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Voice Notes") {
+                Picker("Hold shortcut", selection: $model.voiceShortcutPreset) {
+                    ForEach(VoiceShortcutPreset.allCases) { preset in
+                        Text(preset.title).tag(preset)
+                    }
+                }
+                Text(model.voiceShortcutStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                LabeledContent("dump.md destination", value: model.voiceNotesDestinationPath)
+                    .textSelection(.enabled)
+                HStack {
+                    Button(model.voiceMicrophoneIsRequesting ? "Requesting…" : "Enable Microphone") {
+                        model.requestVoiceMicrophoneAccess()
+                    }
+                    .disabled(model.voiceMicrophoneIsRequesting)
+                    Button("Retry Export") { model.retryVoiceNoteExport() }
+                    if model.voiceHasPendingTranscription {
+                        Button(model.voiceIsTranscribing ? "Transcribing…" : "Retry Transcription") {
+                            model.retryVoiceTranscription()
+                        }
+                        .disabled(model.voiceIsTranscribing)
+                    }
+                }
+                Text(model.voiceStatus)
+                    .font(.caption)
+                    .foregroundStyle(model.voiceStatus.localizedCaseInsensitiveContains("failed") ? .orange : .secondary)
+                Text(model.voiceNoteExportMessage)
+                    .font(.caption)
+                    .foregroundStyle(model.voiceNoteExportIssue == nil ? Color.secondary : Color.orange)
+                Text("Enable microphone access here before using the shortcut. Hold the shortcut anywhere to record; release it to transcribe with OpenAI gpt-transcribe. ReFocus keeps the audio on this Mac until transcription succeeds, then appends a dated entry to the dump.md selected above in Quick Note Settings. Audio is uploaded to OpenAI. Transcripts are not sent through ReFocus Cloudflare sync; the selected vault's own sync settings still apply.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

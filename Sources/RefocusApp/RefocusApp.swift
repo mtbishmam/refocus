@@ -43,12 +43,14 @@ struct ReFocusApplication: App {
 @MainActor
 final class ReFocusAppDelegate: NSObject, NSApplicationDelegate {
     private var globalQuickNote: GlobalQuickNoteController?
+    private var globalVoiceRecording: GlobalVoiceRecordingController?
     private var statusItem: NSStatusItem?
     private var statusPanel: StatusMenuPanel?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installStatusItem()
         globalQuickNote = GlobalQuickNoteController(model: ReFocusRuntime.model)
+        globalVoiceRecording = GlobalVoiceRecordingController(model: ReFocusRuntime.model)
         // MenuBarExtra apps do not automatically instantiate ordinary windows.
         // Show the dashboard explicitly so `open ReFocus.app` has visible output.
         DispatchQueue.main.async {

@@ -16,7 +16,10 @@ let package = Package(
         .executableTarget(
             name: "RefocusApp",
             dependencies: ["RefocusCore"],
-            linkerSettings: [.linkedFramework("Security")]
+            linkerSettings: [
+                .linkedFramework("Security"),
+                .linkedFramework("AVFoundation"),
+            ]
         ),
         .executableTarget(
             name: "RefocusCoreChecks",

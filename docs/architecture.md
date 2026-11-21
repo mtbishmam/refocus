@@ -31,9 +31,11 @@ public MCP ingress (or a public Site with all data APIs still protected by the
 ReFocus bearer-token layer).
 
 SQLite tables hold tasks, day plans and immutable/modified snapshots, Description-backed check-ins,
-daily-field definitions and values, analyses, captures, tombstones, migration
-history, per-day periodic-break skip records, and the sync outbox. The main thread only updates observable state after
-the local transaction; sync and projections are debounced background work.
+daily-field definitions and values, analyses, captures, local-only voice-note
+and browser-tab export/history, browser-usage sessions, tombstones, migration
+history, per-day periodic-break skip records, and the sync outbox. The main
+thread only updates observable state after the local transaction; sync and
+projections are debounced background work.
 
 The D1 schema stores fields independently. Each field is resolved by its hybrid
 clock and device identifier, while mutation IDs make retries idempotent. Deletes
@@ -107,6 +109,8 @@ D1 partition.
 ## Projection ownership
 
 Control–Space Quick Note keeps typing local to a prewarmed AppKit text field.
+Its panel uses a higher window level than the screen-break overlays, so the
+shortcut remains visible and editable while a break is active.
 The one-second timer publishes through a separate `ClockDisplay`; the exact
 AppModel clock value is not published, so timer ticks do not redraw the full
 dashboard while the Quick Note field is active.
@@ -118,6 +122,32 @@ in SQLite, allowing crash recovery without inserting IDs into the document or
 collapsing intentional identical notes. File access and lease failures leave
 the queue intact and appear in Quick Note and Settings. Export retries run on
 startup, after capture, and during background sync; typing never waits on them.
+
+Push-to-talk uses a distinct Carbon global hotkey with press and release
+events. The default is Control–Option–Space; Settings offers Control–Shift–Space
+and Option–Shift–Space alternatives. AVFoundation records mono AAC locally
+while held, and release starts an upload to OpenAI's Audio Transcriptions API
+using `gpt-transcribe` and the existing Keychain API key. Microphone permission
+can be granted in Settings before using the shortcut. The original recording
+remains in the local Application Support retry queue until transcription succeeds, then is deleted.
+The transcript is committed to the local-only `voice_note_exports` SQLite queue
+before a background exporter appends a dated entry to the security-scoped
+`dump.md` selected in Quick Note Settings. Durable byte receipts make retries
+safe; voice transcripts do not enter the ReFocus cloud-sync outbox (the selected
+vault's own sync behavior still applies). A user can retry a failed
+transcription or `dump.md` export from Settings. Carbon press and release events
+are installed through one event handler that subscribes to both event types.
+
+Website limits are opt-in and use browser-specific Apple Events for the
+installed Google Chrome, Brave, and Safari apps. Only the frontmost tab counts;
+the default five-minute allowance is a shared rolling 60-minute budget across
+those browsers and all their profiles. Background tabs and unlisted domains do
+not count. ReFocus stores only site host and time intervals during normal
+tracking; it saves a full URL/title locally just before closing the still-active
+matching tab, and keeps the latest 100 such links for reopening. This data is
+not written to the cloud-sync outbox. macOS Automation permission is requested
+per browser only after the user enables the feature. Settings shows a live
+remaining-budget countdown that advances only while a tracked site is active.
 
 When cloud pairing is configured, a Mac requests a 90-second export lease and
 renews through normal background activity. A failed or denied lease suppresses

@@ -21,7 +21,7 @@
     <key>CFBundleShortVersionString</key>
     <string>0.1.0</string>
     <key>CFBundleVersion</key>
-    <string>15</string>
+    <string>16</string>
     <key>LSMinimumSystemVersion</key>
     <string>15.0</string>
 	<!-- Keep a normal app/Dock presence; the status item itself is retained
@@ -30,6 +30,10 @@
 	<false/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>ReFocus records while you hold your push-to-talk shortcut and transcribes the recording into an Obsidian voice note after you release it.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>ReFocus reads the active tab in Chrome, Brave, or Safari while you enable website limits, and closes only a matching active tab after its time limit is reached.</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
 </dict>

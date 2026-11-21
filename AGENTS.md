@@ -24,7 +24,8 @@ note prevents cross-app context from being lost.
 - Control–Space Quick Note uses a retained AppKit panel and text editor prepared
   at launch. Draft typing stays local to the text field and must not publish
   per-keystroke AppModel changes or rebuild the dashboard. Every open restores
-  keyboard focus immediately; Return commits through the SQLite worker and
+  keyboard focus immediately, including above screen-break and Rest overlays;
+  Return commits through the SQLite worker and
   clears the draft only after success. Escape preserves the draft. A durable
   SQLite export queue appends captures to the Obsidian `dump.md` selected in
   Settings using a security-scoped bookmark. Never use `ReFocus/Internal/dump.md`
@@ -189,6 +190,25 @@ The day is independently planned and snapshotted in four super-blocks:
   - 21:00–21:30 — `ReVision`, with ReSolve, ReSync, and Routes, Goals and
     Milestones.
 - Only the 21:00–21:30 overlap between Plan Tomorrow and ReVision is permitted.
+
+## Browser time limits
+
+- Website limits are opt-in and default off. The Settings control defaults to
+  five minutes per rolling 60 minutes for Facebook and Instagram combined;
+  domains and the allowed minutes are editable.
+- Track only the frontmost tab while Google Chrome, Brave, or Safari is the
+  active app. The rolling budget is shared across those browsers and their
+  profiles. Background tabs and unlisted sites do not count.
+- Request macOS Automation access only after the user enables the feature.
+  Read the active tab URL/title only from the supported browser and re-check
+  the exact URL immediately before closing. If the active tab changed, close
+  nothing.
+- Settings shows both used time and a live remaining-budget countdown. The
+  countdown advances only while a tracked site is the active tab.
+- Usage intervals and closed-tab history are local SQLite data, never cloud
+  outbox mutations. Store only host and timestamps during tracking; persist the
+  full URL/title only for tabs closed at the limit, retain at most 100 recent
+  links, and provide a way to reopen them.
 
 ## Native ReFocus AI
 

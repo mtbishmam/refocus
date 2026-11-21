@@ -163,6 +163,151 @@ public final class RefocusStore: @unchecked Sendable {
         )
     }
 
+    public func browserLimitSettings() throws -> BrowserLimitSettings {
+        guard let encoded = try scalar("SELECT value FROM meta WHERE key = 'browser_limit_settings_v1'"),
+              let data = Data(base64Encoded: encoded),
+              let settings = try? decoder.decode(BrowserLimitSettings.self, from: data) else {
+            return .default
+        }
+        return BrowserLimitSettings(
+            enabled: settings.enabled,
+            minutesPerRollingHour: settings.minutesPerRollingHour,
+            trackedDomains: settings.trackedDomains
+        )
+    }
+
+    public func saveBrowserLimitSettings(_ settings: BrowserLimitSettings) throws {
+        let clean = BrowserLimitSettings(
+            enabled: settings.enabled,
+            minutesPerRollingHour: settings.minutesPerRollingHour,
+            trackedDomains: settings.trackedDomains
+        )
+        let encoded = try encoder.encode(clean).base64EncodedString()
+        try execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('browser_limit_settings_v1', ?)",
+            [.text(encoded)]
+        )
+    }
+
+    public func closeInterruptedBrowserUsageSessions() throws {
+        try execute("UPDATE browser_usage_sessions SET ended_at = last_seen_at WHERE ended_at IS NULL")
+        let cutoff = Date().addingTimeInterval(-86_400).timeIntervalSince1970
+        try execute("DELETE FROM browser_usage_sessions WHERE COALESCE(ended_at, last_seen_at) < ?", [.double(cutoff)])
+    }
+
+    public func beginBrowserUsageSession(_ session: BrowserUsageSession) throws {
+        try execute(
+            """
+            INSERT OR REPLACE INTO browser_usage_sessions(
+              id, host, browser_bundle_id, browser_name, started_at, last_seen_at, ended_at
+            ) VALUES(?, ?, ?, ?, ?, ?, NULL)
+            """,
+            [
+                .text(session.id.uuidString.lowercased()), .text(session.host),
+                .text(session.browserBundleID), .text(session.browserName),
+                .double(session.startedAt.timeIntervalSince1970),
+                .double(session.lastSeenAt.timeIntervalSince1970),
+            ]
+        )
+    }
+
+    public func heartbeatBrowserUsageSession(_ id: UUID, at date: Date) throws {
+        try execute(
+            "UPDATE browser_usage_sessions SET last_seen_at = ? WHERE id = ? AND ended_at IS NULL",
+            [.double(date.timeIntervalSince1970), .text(id.uuidString.lowercased())]
+        )
+    }
+
+    public func finishBrowserUsageSession(_ id: UUID, at date: Date) throws {
+        try execute(
+            """
+            UPDATE browser_usage_sessions SET ended_at = ?, last_seen_at = ?
+            WHERE id = ? AND ended_at IS NULL
+            """,
+            [
+                .double(date.timeIntervalSince1970), .double(date.timeIntervalSince1970),
+                .text(id.uuidString.lowercased()),
+            ]
+        )
+    }
+
+    public func browserUsageSeconds(
+        inLast seconds: TimeInterval,
+        at now: Date,
+        activeSessionID: UUID? = nil
+    ) throws -> Int {
+        let windowStart = now.addingTimeInterval(-max(0, seconds))
+        var sessions: [BrowserUsageSession] = []
+        try query(
+            """
+            SELECT id, host, browser_bundle_id, browser_name, started_at, last_seen_at, ended_at
+            FROM browser_usage_sessions
+            WHERE started_at < ? AND COALESCE(ended_at, last_seen_at) > ?
+            """,
+            [.double(now.timeIntervalSince1970), .double(windowStart.timeIntervalSince1970)]
+        ) { row in
+            guard let id = row.text(0).flatMap(UUID.init(uuidString:)),
+                  let host = row.text(1), let bundleID = row.text(2),
+                  let browserName = row.text(3) else { return }
+            let endedAt = sqlite3_column_type(row.statement, 6) == SQLITE_NULL
+                ? nil : Date(timeIntervalSince1970: row.double(6))
+            sessions.append(BrowserUsageSession(
+                id: id, host: host, browserBundleID: bundleID, browserName: browserName,
+                startedAt: Date(timeIntervalSince1970: row.double(4)),
+                lastSeenAt: Date(timeIntervalSince1970: row.double(5)), endedAt: endedAt
+            ))
+        }
+        return BrowserUsagePolicy.seconds(
+            in: sessions, since: windowStart, through: now, activeSessionID: activeSessionID
+        )
+    }
+
+    public func saveClosedBrowserTab(_ tab: ClosedBrowserTab) throws {
+        try execute(
+            """
+            INSERT OR REPLACE INTO browser_closed_tabs(
+              id, url, title, browser_bundle_id, browser_name, closed_at
+            ) VALUES(?, ?, ?, ?, ?, ?)
+            """,
+            [
+                .text(tab.id.uuidString.lowercased()), .text(tab.url), .text(tab.title),
+                .text(tab.browserBundleID), .text(tab.browserName),
+                .double(tab.closedAt.timeIntervalSince1970),
+            ]
+        )
+        try execute(
+            """
+            DELETE FROM browser_closed_tabs WHERE id NOT IN (
+              SELECT id FROM browser_closed_tabs ORDER BY closed_at DESC LIMIT 100
+            )
+            """
+        )
+    }
+
+    public func removeClosedBrowserTab(id: UUID) throws {
+        try execute("DELETE FROM browser_closed_tabs WHERE id = ?", [.text(id.uuidString.lowercased())])
+    }
+
+    public func recentClosedBrowserTabs(limit: Int = 30) throws -> [ClosedBrowserTab] {
+        var tabs: [ClosedBrowserTab] = []
+        try query(
+            """
+            SELECT id, url, title, browser_bundle_id, browser_name, closed_at
+            FROM browser_closed_tabs ORDER BY closed_at DESC LIMIT ?
+            """,
+            [.integer(min(100, max(1, limit)))]
+        ) { row in
+            guard let id = row.text(0).flatMap(UUID.init(uuidString:)),
+                  let url = row.text(1), let title = row.text(2),
+                  let bundleID = row.text(3), let browserName = row.text(4) else { return }
+            tabs.append(ClosedBrowserTab(
+                id: id, url: url, title: title, browserBundleID: bundleID,
+                browserName: browserName, closedAt: Date(timeIntervalSince1970: row.double(5))
+            ))
+        }
+        return tabs
+    }
+
     public func recordAIUsage(promptID: UUID, on date: Date, usage: AITokenUsage) throws {
         try execute(
             """
@@ -650,6 +795,53 @@ public final class RefocusStore: @unchecked Sendable {
     public func markCaptureExported(id: String) throws {
         try execute("UPDATE capture_exports SET exported_at = ? WHERE capture_id = ?",
                     [.double(Date().timeIntervalSince1970), .text(id)])
+    }
+
+    /// Voice transcripts stay local and are queued independently from Quick
+    /// Notes so they can share dump.md export without entering the cloud-sync
+    /// outbox.
+    public func appendVoiceNote(_ text: String, id: String, recordedAt: Date) throws {
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { throw RefocusStoreError.corrupt("The recording did not contain a transcript.") }
+        try execute(
+            "INSERT OR IGNORE INTO voice_note_exports(id, day, recorded_at, text) VALUES(?, ?, ?, ?)",
+            [.text(id), .text(dayKey(recordedAt)), .double(recordedAt.timeIntervalSince1970), .text(clean)]
+        )
+    }
+
+    public func pendingVoiceNoteExports() throws -> [PendingVoiceNoteExport] {
+        var notes: [PendingVoiceNoteExport] = []
+        try query(
+            """
+            SELECT id, day, recorded_at, text, destination, byte_offset, suffix
+            FROM voice_note_exports WHERE exported_at IS NULL
+            ORDER BY recorded_at, id
+            """
+        ) { row in
+            guard let id = row.text(0), let day = row.text(1),
+                  let text = row.text(3) else { return }
+            notes.append(PendingVoiceNoteExport(
+                id: id, day: day,
+                recordedAt: Date(timeIntervalSince1970: Double(row.text(2) ?? "0") ?? 0),
+                text: text, destination: row.text(4),
+                byteOffset: row.text(5).flatMap(Int64.init), suffix: row.blob(6)
+            ))
+        }
+        return notes
+    }
+
+    public func prepareVoiceNoteExport(id: String, destination: String, byteOffset: Int64, suffix: Data) throws {
+        try execute(
+            "UPDATE voice_note_exports SET destination = ?, byte_offset = ?, suffix = ? WHERE id = ? AND exported_at IS NULL",
+            [.text(destination), .integer(Int(byteOffset)), .blob(suffix), .text(id)]
+        )
+    }
+
+    public func markVoiceNoteExported(id: String) throws {
+        try execute(
+            "UPDATE voice_note_exports SET exported_at = ? WHERE id = ?",
+            [.double(Date().timeIntervalSince1970), .text(id)]
+        )
     }
 
     public func saveCheckIn(_ checkIn: CheckIn) throws {
@@ -1226,6 +1418,20 @@ public final class RefocusStore: @unchecked Sendable {
               created_at REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS ai_usage_day ON ai_usage(day);
+            CREATE TABLE IF NOT EXISTS browser_usage_sessions(
+              id TEXT PRIMARY KEY, host TEXT NOT NULL, browser_bundle_id TEXT NOT NULL,
+              browser_name TEXT NOT NULL, started_at REAL NOT NULL, last_seen_at REAL NOT NULL,
+              ended_at REAL
+            );
+            CREATE INDEX IF NOT EXISTS browser_usage_window
+              ON browser_usage_sessions(started_at, ended_at, last_seen_at);
+            CREATE TABLE IF NOT EXISTS browser_closed_tabs(
+              id TEXT PRIMARY KEY, url TEXT NOT NULL, title TEXT NOT NULL,
+              browser_bundle_id TEXT NOT NULL, browser_name TEXT NOT NULL,
+              closed_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS browser_closed_tabs_recent
+              ON browser_closed_tabs(closed_at DESC);
             CREATE TABLE IF NOT EXISTS tasks(
               id TEXT PRIMARY KEY, scheduled_date TEXT NOT NULL, title TEXT NOT NULL,
               start_minute INTEGER NOT NULL, fixed_role TEXT, payload BLOB NOT NULL,
@@ -1268,6 +1474,13 @@ public final class RefocusStore: @unchecked Sendable {
               capture_id TEXT PRIMARY KEY REFERENCES captures(id), destination TEXT,
               byte_offset INTEGER, suffix BLOB, exported_at REAL
             );
+            CREATE TABLE IF NOT EXISTS voice_note_exports(
+              id TEXT PRIMARY KEY, day TEXT NOT NULL, recorded_at REAL NOT NULL,
+              text TEXT NOT NULL, destination TEXT, byte_offset INTEGER,
+              suffix BLOB, exported_at REAL
+            );
+            CREATE INDEX IF NOT EXISTS voice_note_exports_pending
+              ON voice_note_exports(exported_at, recorded_at);
             CREATE TABLE IF NOT EXISTS field_definitions(
               id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, unit TEXT,
               position INTEGER NOT NULL, success_rule TEXT, archived INTEGER NOT NULL DEFAULT 0
@@ -1874,6 +2087,7 @@ public final class RefocusStore: @unchecked Sendable {
             return String(cString: value)
         }
         func int(_ index: Int32) -> Int { Int(sqlite3_column_int64(statement, index)) }
+        func double(_ index: Int32) -> Double { sqlite3_column_double(statement, index) }
         func blob(_ index: Int32) -> Data? {
             guard sqlite3_column_type(statement, index) != SQLITE_NULL else { return nil }
             let count = Int(sqlite3_column_bytes(statement, index))

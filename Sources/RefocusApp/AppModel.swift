@@ -79,6 +79,35 @@ final class AppModel: ObservableObject {
     @Published private(set) var quickNoteExportMessage = "Choose your Obsidian dump.md."
     @Published private(set) var quickNoteExportIssue: String?
     private var quickNoteSubmissionID: UUID?
+    @Published var voiceShortcutPreset: VoiceShortcutPreset = VoiceShortcutPreset(
+        rawValue: UserDefaults.standard.string(forKey: "refocus.voice.shortcut") ?? ""
+    ) ?? .defaultPreset {
+        didSet {
+            guard oldValue != voiceShortcutPreset else { return }
+            UserDefaults.standard.set(voiceShortcutPreset.rawValue, forKey: "refocus.voice.shortcut")
+            voiceShortcutChangeHandler?(voiceShortcutPreset)
+        }
+    }
+    @Published private(set) var voiceIsRecording = false
+    @Published private(set) var voiceIsTranscribing = false
+    @Published private(set) var voiceHasPendingTranscription = false
+    @Published private(set) var voiceMicrophoneIsRequesting = false
+    @Published private(set) var voiceStatus = "Hold the shortcut to record."
+    @Published private(set) var voiceShortcutStatus = "Registering voice shortcut…"
+    @Published private(set) var voiceNotesDestinationPath = "Not connected"
+    @Published private(set) var voiceNoteExportMessage = "Voice transcripts use the dump.md selected in Quick Note Settings."
+    @Published private(set) var voiceNoteExportIssue: String?
+    @Published var browserLimitSettings = BrowserLimitSettings.default
+    @Published var browserLimitDomainsDraft = BrowserLimitSettings.default.trackedDomains.joined(separator: ", ")
+    @Published private(set) var browserLimitUsageSeconds = 0
+    @Published private(set) var browserLimitActiveDomain: String?
+    @Published private(set) var browserLimitSampledAt = Date()
+    @Published private(set) var browserLimitStatus = "Website limits are off; no browser URLs are being read."
+    @Published private(set) var closedBrowserTabs: [ClosedBrowserTab] = []
+    var voiceShortcutChangeHandler: ((VoiceShortcutPreset) -> Void)?
+    private var pendingVoiceRecording: (id: String, url: URL, recordedAt: Date)?
+    private var voiceTranscriptionTask: Task<Void, Never>?
+    private let audioTranscriptionClient = OpenAIAudioTranscriptionClient()
     @Published var cloudPairingToken = ""
     @Published var cloudSyncPaired = CloudCredentials.load() != nil
     @Published var isConnectingCloud = false
@@ -112,6 +141,8 @@ final class AppModel: ObservableObject {
     private var worker: VaultWorker?
     private var watchers: [VaultWatcher] = []
     private var ticker: Task<Void, Never>?
+    private var browserLimitTask: Task<Void, Never>?
+    private var browserLimitMonitor: BrowserLimitMonitor?
     private var reloadGeneration = 0
     private var cloudSyncTicker: Task<Void, Never>?
     private var aiResponseTask: Task<Void, Never>?
@@ -147,6 +178,11 @@ final class AppModel: ObservableObject {
         // choice so existing installations migrate away from older defaults.
         UserDefaults.standard.set(openAIModel, forKey: "refocus.openai.model")
         unplannedWorkQuotaKey = Self.unplannedWorkQuotaKey(at: now)
+        pendingVoiceRecording = Self.loadPendingVoiceRecording()
+        if pendingVoiceRecording != nil {
+            voiceHasPendingTranscription = true
+            voiceStatus = "A saved recording is waiting to be transcribed."
+        }
         configureLocalStorage()
         refreshLoginStatus()
         startTicker()
@@ -154,8 +190,10 @@ final class AppModel: ObservableObject {
 
     deinit {
         ticker?.cancel()
+        browserLimitTask?.cancel()
         cloudSyncTicker?.cancel()
         aiResponseTask?.cancel()
+        voiceTranscriptionTask?.cancel()
         saveTask?.cancel()
         breakTaskSaveTask?.cancel()
         agendaSaveTask?.cancel()
@@ -178,6 +216,56 @@ final class AppModel: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    func setBrowserLimitEnabled(_ enabled: Bool) {
+        browserLimitSettings.enabled = enabled
+        saveBrowserLimitSettings()
+    }
+
+    func saveBrowserLimitSettings() {
+        let domains = BrowserLimitSettings.normalizedDomains(
+            browserLimitDomainsDraft.split(separator: ",").map(String.init)
+        )
+        guard !domains.isEmpty else {
+            browserLimitStatus = "Add at least one valid domain, such as facebook.com or instagram.com."
+            return
+        }
+        guard let worker else {
+            browserLimitStatus = "ReFocus local storage is unavailable."
+            return
+        }
+        let settings = BrowserLimitSettings(
+            enabled: browserLimitSettings.enabled,
+            minutesPerRollingHour: browserLimitSettings.minutesPerRollingHour,
+            trackedDomains: domains
+        )
+        Task { [weak self] in
+            do {
+                try await worker.saveBrowserLimitSettings(settings)
+                await self?.browserLimitMonitor?.configure(settings)
+                self?.browserLimitSettings = settings
+                self?.browserLimitDomainsDraft = settings.trackedDomains.joined(separator: ", ")
+                if !settings.enabled {
+                    self?.browserLimitStatus = "Website limits are off; no browser URLs are being read."
+                }
+            } catch {
+                self?.browserLimitStatus = "Could not save browser limits: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func openBrowserAutomationSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    func reopenClosedBrowserTab(_ tab: ClosedBrowserTab) {
+        guard let url = URL(string: tab.url), ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
+            browserLimitStatus = "That saved tab does not contain a valid web URL."
+            return
+        }
+        NSWorkspace.shared.open(url)
     }
 
     func pasteOpenAIKey() {
@@ -2113,6 +2201,114 @@ final class AppModel: ObservableObject {
         return true
     }
 
+    func setVoiceShortcutStatus(_ status: String) {
+        voiceShortcutStatus = status
+    }
+
+    func requestVoiceMicrophoneAccess() {
+        guard !voiceMicrophoneIsRequesting else { return }
+        voiceMicrophoneIsRequesting = true
+        voiceStatus = "Requesting microphone access…"
+        Task { @MainActor [weak self] in
+            let granted = await VoiceMicrophoneAccess.request()
+            guard let self else { return }
+            self.voiceMicrophoneIsRequesting = false
+            self.voiceStatus = granted
+                ? "Microphone enabled. Hold the shortcut to record."
+                : "Microphone access is off. Enable it in System Settings → Privacy & Security → Microphone."
+        }
+    }
+
+    func voiceRecordingDidStart() {
+        voiceIsRecording = true
+        voiceStatus = "Recording… release the shortcut to transcribe."
+    }
+
+    func voiceRecordingDidFail(_ message: String) {
+        voiceIsRecording = false
+        voiceStatus = message
+    }
+
+    func voiceRecordingDidFinish(fileURL: URL, id: String, recordedAt: Date) {
+        voiceIsRecording = false
+        pendingVoiceRecording = (id, fileURL, recordedAt)
+        UserDefaults.standard.set(id, forKey: "refocus.voice.pending.id")
+        UserDefaults.standard.set(fileURL.path, forKey: "refocus.voice.pending.path")
+        UserDefaults.standard.set(recordedAt.timeIntervalSince1970, forKey: "refocus.voice.pending.startedAt")
+        voiceHasPendingTranscription = true
+        transcribePendingVoiceRecording()
+    }
+
+    func retryVoiceTranscription() {
+        guard !voiceIsTranscribing else { return }
+        guard pendingVoiceRecording != nil else {
+            voiceStatus = "There is no saved recording to retry."
+            return
+        }
+        transcribePendingVoiceRecording()
+    }
+
+    private func transcribePendingVoiceRecording() {
+        guard let clip = pendingVoiceRecording, let worker else {
+            voiceStatus = "Recording is saved locally, but ReFocus storage is unavailable."
+            return
+        }
+        voiceTranscriptionTask?.cancel()
+        voiceIsTranscribing = true
+        voiceStatus = "Transcribing with OpenAI…"
+        voiceTranscriptionTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let transcript = try await self.audioTranscriptionClient.transcribe(fileURL: clip.url)
+                try await worker.appendVoiceNote(transcript, id: clip.id, recordedAt: clip.recordedAt)
+                try? FileManager.default.removeItem(at: clip.url)
+                self.pendingVoiceRecording = nil
+                self.voiceHasPendingTranscription = false
+                UserDefaults.standard.removeObject(forKey: "refocus.voice.pending.id")
+                UserDefaults.standard.removeObject(forKey: "refocus.voice.pending.path")
+                UserDefaults.standard.removeObject(forKey: "refocus.voice.pending.startedAt")
+                self.voiceIsTranscribing = false
+                self.voiceStatus = "Transcript saved locally; exporting to Obsidian…"
+                self.refreshVoiceNoteExport()
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.voiceIsTranscribing = false
+                self.voiceStatus = "Transcription failed; the recording is kept locally. \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func refreshVoiceNoteExport() {
+        guard let worker else { return }
+        Task { [weak self] in
+            let status = await worker.exportVoiceNotes()
+            self?.applyVoiceNoteExportStatus(status)
+        }
+    }
+
+    func retryVoiceNoteExport() { refreshVoiceNoteExport() }
+
+    private func applyVoiceNoteExportStatus(_ status: VoiceNoteExportStatus) {
+        voiceNotesDestinationPath = status.destination ?? "Not connected"
+        voiceNoteExportMessage = status.message
+        voiceNoteExportIssue = status.issue
+    }
+
+    private static func loadPendingVoiceRecording() -> (id: String, url: URL, recordedAt: Date)? {
+        guard let id = UserDefaults.standard.string(forKey: "refocus.voice.pending.id"),
+              let path = UserDefaults.standard.string(forKey: "refocus.voice.pending.path") else { return nil }
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        guard let appSupport = try? FileManager.default.url(
+            for: .applicationSupportDirectory, in: .userDomainMask,
+            appropriateFor: nil, create: false
+        ).appendingPathComponent("ReFocus/VoiceQueue", isDirectory: true).standardizedFileURL,
+              url.path.hasPrefix(appSupport.path + "/"),
+              FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let timestamp = UserDefaults.standard.double(forKey: "refocus.voice.pending.startedAt")
+        guard timestamp > 0 else { return nil }
+        return (id, url, Date(timeIntervalSince1970: timestamp))
+    }
+
     func chooseQuickNoteDumpFile() {
         let picker = NSOpenPanel()
         picker.title = "Connect Obsidian Quick Notes"
@@ -2798,20 +2994,49 @@ final class AppModel: ObservableObject {
         // The database owns live state. iCloud Markdown is output-only, so
         // projection writes must never trigger a broad vault reload.
         watchers = []
-        if let worker {
-            Task {
-                await worker.refreshProjections()
-                if let preferences = try? await worker.loadAIPreferences() {
-                    self.aiPreferencesDraft = preferences
-                }
-                if let usage = try? await worker.loadAIUsage(on: self.now) {
-                    self.aiDailyUsage = usage
-                }
+        guard let worker else { return }
+        Task {
+            await worker.refreshProjections()
+            if let preferences = try? await worker.loadAIPreferences() {
+                self.aiPreferencesDraft = preferences
+            }
+            if let usage = try? await worker.loadAIUsage(on: self.now) {
+                self.aiDailyUsage = usage
             }
         }
         reloadVault()
         refreshQuickNoteExport()
+        refreshVoiceNoteExport()
         startCloudSyncLoop()
+        startBrowserLimitMonitor(using: worker)
+    }
+
+    private func startBrowserLimitMonitor(using worker: VaultWorker) {
+        browserLimitTask?.cancel()
+        let monitor = BrowserLimitMonitor(worker: worker) { [weak self] state in
+            self?.browserLimitUsageSeconds = state.usedSeconds
+            self?.browserLimitActiveDomain = state.activeDomain
+            self?.browserLimitSampledAt = state.sampledAt
+            self?.browserLimitStatus = state.message
+            self?.closedBrowserTabs = state.closedTabs
+        }
+        browserLimitMonitor = monitor
+        browserLimitTask = Task { [weak self] in
+            do {
+                let settings = try await worker.loadBrowserLimitSettings()
+                self?.browserLimitSettings = settings
+                self?.browserLimitDomainsDraft = settings.trackedDomains.joined(separator: ", ")
+                await monitor.prepare()
+                await monitor.configure(settings)
+                while !Task.isCancelled {
+                    let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+                    await monitor.poll(frontmostBundleID: bundleID)
+                    try await Task.sleep(for: .seconds(2))
+                }
+            } catch {
+                self?.browserLimitStatus = "Could not start browser limits: \(error.localizedDescription)"
+            }
+        }
     }
 
     private func configureLocalStorage() {

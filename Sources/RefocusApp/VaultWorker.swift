@@ -65,6 +65,7 @@ actor VaultWorker {
     private var projectionTask: Task<Void, Never>?
     private var pendingProjectionDays: Set<String> = []
     private var quickNoteExportTask: Task<QuickNoteExportStatus, Never>?
+    private var voiceNoteExportTask: Task<VoiceNoteExportStatus, Never>?
 
     init(vaultURL: URL) throws {
         self.vaultURL = vaultURL
@@ -299,6 +300,46 @@ actor VaultWorker {
     }
 
     func loadAIPreferences() throws -> String { try store.aiPreferences() }
+
+    func loadBrowserLimitSettings() throws -> BrowserLimitSettings {
+        try store.browserLimitSettings()
+    }
+
+    func saveBrowserLimitSettings(_ settings: BrowserLimitSettings) throws {
+        try store.saveBrowserLimitSettings(settings)
+    }
+
+    func prepareBrowserUsageTracking() throws {
+        try store.closeInterruptedBrowserUsageSessions()
+    }
+
+    func beginBrowserUsageSession(_ session: BrowserUsageSession) throws {
+        try store.beginBrowserUsageSession(session)
+    }
+
+    func heartbeatBrowserUsageSession(_ id: UUID, at date: Date) throws {
+        try store.heartbeatBrowserUsageSession(id, at: date)
+    }
+
+    func finishBrowserUsageSession(_ id: UUID, at date: Date) throws {
+        try store.finishBrowserUsageSession(id, at: date)
+    }
+
+    func browserUsageSeconds(inLast seconds: TimeInterval, at now: Date, activeSessionID: UUID?) throws -> Int {
+        try store.browserUsageSeconds(inLast: seconds, at: now, activeSessionID: activeSessionID)
+    }
+
+    func saveClosedBrowserTab(_ tab: ClosedBrowserTab) throws {
+        try store.saveClosedBrowserTab(tab)
+    }
+
+    func removeClosedBrowserTab(id: UUID) throws {
+        try store.removeClosedBrowserTab(id: id)
+    }
+
+    func recentClosedBrowserTabs(limit: Int = 30) throws -> [ClosedBrowserTab] {
+        try store.recentClosedBrowserTabs(limit: limit)
+    }
 
     func saveAIPreferences(_ document: String) throws -> String {
         try store.saveAIPreferences(document)
@@ -914,6 +955,57 @@ actor VaultWorker {
         // remain lease-protected and flush in the background.
         try store.appendCapture(line, id: submissionID.uuidString.lowercased())
         scheduleBackgroundWork(days: [])
+    }
+
+    func appendVoiceNote(_ transcript: String, id: String, recordedAt: Date) throws {
+        try store.appendVoiceNote(transcript, id: id, recordedAt: recordedAt)
+    }
+
+    func exportVoiceNotes() async -> VoiceNoteExportStatus {
+        if let task = voiceNoteExportTask { return await task.value }
+        let task = Task { await self.performVoiceNoteExport() }
+        voiceNoteExportTask = task
+        defer { voiceNoteExportTask = nil }
+        return await task.value
+    }
+
+    private func performVoiceNoteExport() async -> VoiceNoteExportStatus {
+        var pending = 0
+        var destination: String?
+        do {
+            pending = try store.pendingVoiceNoteExports().count
+            guard let dumpURL = try QuickNoteDestination.resolve() else {
+                return VoiceNoteExportStatus(
+                    destination: nil, pending: pending,
+                    issue: "Transcript saved in ReFocus. Choose dump.md in Settings → Quick Note."
+                )
+            }
+            destination = dumpURL.path
+            guard pending > 0 else {
+                return VoiceNoteExportStatus(destination: destination, pending: 0, issue: nil)
+            }
+            guard dumpURL.startAccessingSecurityScopedResource() else {
+                throw CocoaError(.fileWriteNoPermission)
+            }
+            defer { dumpURL.stopAccessingSecurityScopedResource() }
+            guard try await cloud.acquireExportLease(deviceID: projectionDeviceID()) else {
+                return VoiceNoteExportStatus(
+                    destination: destination, pending: pending,
+                    issue: "Transcript saved in ReFocus; Obsidian export is waiting for the other Mac's export lease."
+                )
+            }
+            _ = try VoiceNoteExporter.exportPendingVoiceNotes(from: store, to: dumpURL)
+            return VoiceNoteExportStatus(
+                destination: destination,
+                pending: try store.pendingVoiceNoteExports().count,
+                issue: nil
+            )
+        } catch {
+            return VoiceNoteExportStatus(
+                destination: destination, pending: pending,
+                issue: "Transcript saved in ReFocus; Obsidian export failed: \(error.localizedDescription)"
+            )
+        }
     }
 
     func exportQuickNotes() async -> QuickNoteExportStatus {

@@ -111,8 +111,11 @@ final class GlobalQuickNoteController: NSObject, NSTextFieldDelegate {
             backing: .buffered,
             defer: false
         )
-        panel.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        // Keep Quick Note above the screen-break/rest panels. Those blockers
+        // reassert themselves after Space and app-activation changes, so using
+        // the same level made the note appear intermittently underneath them.
+        panel.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 2)
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .stationary, .ignoresCycle]
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = true
